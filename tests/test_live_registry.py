@@ -53,9 +53,43 @@ def test_missing_setting_fields() -> None:
     missing = reg.missing_setting_fields("emt", {})
     assert "ALPHAPILOT_LIVE_EMT_ACCOUNT" in missing
     assert "ALPHAPILOT_LIVE_EMT_PASSWORD" in missing
+    assert "ALPHAPILOT_LIVE_EMT_QUOTE_PORT" in missing
+    assert "ALPHAPILOT_LIVE_EMT_TRADE_PORT" in missing
     # ints with non-empty defaults are not "missing"
     assert "ALPHAPILOT_LIVE_EMT_CLIENT_ID" not in missing
+    assert "ALPHAPILOT_LIVE_EMT_LOG_LEVEL" not in missing
     assert reg.missing_setting_fields("emt", {"ALPHAPILOT_LIVE_EMT_SETTING_JSON": "{}"}) == []
+
+
+def test_xtp_missing_fields_require_software_key_and_ports() -> None:
+    missing = reg.missing_setting_fields(
+        "xtp",
+        {
+            "ALPHAPILOT_LIVE_XTP_ACCOUNT": "user1",
+            "ALPHAPILOT_LIVE_XTP_PASSWORD": "pw",
+            "ALPHAPILOT_LIVE_XTP_QUOTE_HOST": "119.0.0.1",
+            "ALPHAPILOT_LIVE_XTP_TRADE_HOST": "119.0.0.2",
+        },
+    )
+    assert "ALPHAPILOT_LIVE_XTP_SOFTWARE_KEY" in missing
+    assert "ALPHAPILOT_LIVE_XTP_QUOTE_PORT" in missing
+    assert "ALPHAPILOT_LIVE_XTP_TRADE_PORT" in missing
+    assert "ALPHAPILOT_LIVE_XTP_CLIENT_ID" not in missing
+
+
+def test_xtp_public_test_endpoint_defaults_do_not_override_env() -> None:
+    from scripts.live_xtp_common import env_with_public_test_endpoints
+
+    env = env_with_public_test_endpoints(
+        {
+            "ALPHAPILOT_LIVE_XTP_QUOTE_HOST": "1.2.3.4",
+            "ALPHAPILOT_LIVE_XTP_TRADE_PORT": "7001",
+        }
+    )
+    assert env["ALPHAPILOT_LIVE_XTP_QUOTE_HOST"] == "1.2.3.4"
+    assert env["ALPHAPILOT_LIVE_XTP_TRADE_PORT"] == "7001"
+    assert env["ALPHAPILOT_LIVE_XTP_TRADE_HOST"] == "120.27.164.69"
+    assert env["ALPHAPILOT_LIVE_XTP_QUOTE_PORT"] == "6002"
 
 
 def test_resolve_gateway_class_import_error_message() -> None:

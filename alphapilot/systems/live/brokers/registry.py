@@ -35,17 +35,30 @@ class SettingField:
     gateway_key: str
     cast: Callable[[str], Any] = str
     default: Any = ""
+    required: bool | None = None
+
+    @property
+    def is_required(self) -> bool:
+        """Whether this field must be provided through env.
+
+        Back-compat: historically an empty-string default meant required.
+        ``required`` exists for non-empty defaults that are still mandatory,
+        such as integer ports whose native gateway default is ``0``.
+        """
+        if self.required is None:
+            return self.default == ""
+        return self.required
 
 
 # vn.py A-share stock gateways share this connect-setting shape.
 _COMMON_FIELDS: tuple[SettingField, ...] = (
-    SettingField("ACCOUNT", "账号"),
-    SettingField("PASSWORD", "密码"),
+    SettingField("ACCOUNT", "账号", required=True),
+    SettingField("PASSWORD", "密码", required=True),
     SettingField("CLIENT_ID", "客户号", int, 1),
-    SettingField("QUOTE_HOST", "行情地址"),
-    SettingField("QUOTE_PORT", "行情端口", int, 0),
-    SettingField("TRADE_HOST", "交易地址"),
-    SettingField("TRADE_PORT", "交易端口", int, 0),
+    SettingField("QUOTE_HOST", "行情地址", required=True),
+    SettingField("QUOTE_PORT", "行情端口", int, 0, required=True),
+    SettingField("TRADE_HOST", "交易地址", required=True),
+    SettingField("TRADE_PORT", "交易端口", int, 0, required=True),
     SettingField("QUOTE_PROTOCOL", "行情协议", str, "TCP"),
     SettingField("LOG_LEVEL", "日志级别", str, "INFO"),
 )
@@ -138,7 +151,7 @@ def build_connect_setting(name: str, env: Mapping[str, str] | None = None) -> di
 
 
 def missing_setting_fields(name: str, env: Mapping[str, str] | None = None) -> list[str]:
-    """Env variable names still unset for broker ``name`` (empty-string defaults)."""
+    """Required env variable names still unset for broker ``name``."""
     spec = get_broker(name)
     env = os.environ if env is None else env
     prefix = f"{ENV_PREFIX}{spec.name.upper()}_"
@@ -147,7 +160,7 @@ def missing_setting_fields(name: str, env: Mapping[str, str] | None = None) -> l
     return [
         prefix + fld.env_suffix
         for fld in spec.setting_fields
-        if fld.default == "" and not env.get(prefix + fld.env_suffix)
+        if fld.is_required and not env.get(prefix + fld.env_suffix)
     ]
 
 
@@ -157,7 +170,7 @@ register_broker(
         name="xtp",
         gateway_path="vnpy_xtp:XtpGateway",
         gateway_name="XTP",
-        setting_fields=_COMMON_FIELDS + (SettingField("SOFTWARE_KEY", "授权码"),),
+        setting_fields=_COMMON_FIELDS + (SettingField("SOFTWARE_KEY", "授权码", required=True),),
         description="中泰证券 XTP（SDK 2.2.50.8）",
     )
 )

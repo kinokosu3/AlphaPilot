@@ -82,9 +82,12 @@ services:
   # Live-trading executor (vn.py + compiled XTP/EMT gateways). Separate image
   # (Dockerfile.live) and disabled by default; enable with `--profile live`.
   # Broker credentials go in .env as ALPHAPILOT_LIVE_<BROKER>_* variables —
-  # never baked into the image. Default command is the import smoke; run the
-  # gated real-connect check with:
+  # never baked into the image. Default command is the import smoke; preflight
+  # the live runtime/endpoints first, then run the gated real-connect check:
+  #   docker compose --profile live run --rm live python scripts/live_preflight_xtp.py
   #   docker compose --profile live run --rm live python scripts/live_smoke_connect_xtp.py
+  # Add --use-public-test-endpoints for public XTP simulation accounts when
+  # host/port values are not supplied in .env.
   live:
     platform: linux/amd64
     build:

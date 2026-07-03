@@ -95,7 +95,7 @@ RUN pip install --no-deps -e .
 
 # Build-time smoke: both gateways import, MainEngine wires them, and the
 # AlphaPilot adapter loads — fail the image build if any of that breaks.
-COPY scripts/live_smoke_import.py scripts/live_smoke_connect_xtp.py ./scripts/
+COPY scripts/live_xtp_common.py scripts/live_preflight_xtp.py scripts/live_smoke_import.py scripts/live_smoke_connect_xtp.py ./scripts/
 RUN python scripts/live_smoke_import.py
 
 ENTRYPOINT ["tini", "--"]

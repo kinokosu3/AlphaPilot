@@ -1,0 +1,24 @@
+version 1.2.1-r.3
+（1）修改异步日志输出格式
+（2）修复bug
+
+version 1.2.1-r.2
+（1）修改异步日志输出格式
+
+version 1.2.1-r.1
+（1）港股通HKC和指数通IndexPress与快照MD配置合并，不再单独配置
+（2）配置文件中新增busy_wait配置项，所有接收线程均可单独配置，此选项默认开启
+（3）逐笔委托XTPTickByTickEntrust结构体中增加已成交的委托数量字段traded_qty
+
+version 1.2.0-r.1
+（1）添加获取港股通静态信息接口QueryAllHKCInfo()以及回调接口OnQueryAllHKCInfo()
+（2）添加获取指数通静态信息接口QueryAllIndexPressInfo()以及回应接口OnQueryAllIndexPressInfo()
+
+version 1.1.0-r.1
+（1）支持orderbook数据的订阅和获取
+（2）枚举类型 XTP_SECURITY_TYPE 新增REITs基金类型 XTP_SECURITY_REITS
+（3）修复bug
+
+version 1.0.15
+（1）修复bug
+（2）修改部分日志级别

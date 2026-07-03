@@ -246,6 +246,7 @@ alphapilot timing_backtest --strategy_name dual_ma --symbols 000001 --strategy_p
 - [Project structure and architecture](docs/alphapilot-structure.md)
 - [Docker deployment and service mode](docs/DOCKER.md)
 - [Docker run notes and troubleshooting](docs/DOCKER-RUN.md)
+- [Normal XTP live/simulation setup](docs/live-xtp.md)
 - [important_data directory, templates, and assets](important_data/README.md)
 - [AlphaForge notes](alphapilot/modules/alphaforge/README.md)
 
