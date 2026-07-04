@@ -1,7 +1,7 @@
 project(
   'vnpy_xtp',
   'cpp',
-  version: '2.2.50.8.1',
+  version: '1.2.1.1',
   license: 'MIT',
   meson_version: '>=1.7.0',
   default_options: [
@@ -50,11 +50,11 @@ if host_machine.system() == 'windows'
     pybind11_include_dir,
   )
   
-  # 定义CTP库
-  thostmduserapi_lib = cpp.find_library('xtpquoteapi', 
+  # 定义XTP PRO库
+  thostmduserapi_lib = cpp.find_library('xtpxquoteapi',
                                        dirs: [lib_dir, api_dir],
                                        required: true)
-  thosttraderapi_lib = cpp.find_library('xtptraderapi', 
+  thosttraderapi_lib = cpp.find_library('xtpxtraderapi',
                                        dirs: [lib_dir, api_dir],
                                        required: true)
 
@@ -83,11 +83,11 @@ else  # Linux
     pybind11_include_dir,
   )
   
-  # 定义CTP库
-  thostmduserapi_lib = cpp.find_library('xtpquoteapi', 
+  # 定义XTP PRO库
+  thostmduserapi_lib = cpp.find_library('xtpxquoteapi',
                                        dirs: [lib_dir],
                                        required: true)
-  thosttraderapi_lib = cpp.find_library('xtptraderapi', 
+  thosttraderapi_lib = cpp.find_library('xtpxtraderapi',
                                        dirs: [lib_dir],
                                        required: true)
 endif
@@ -136,8 +136,8 @@ endforeach
 # 安装API动态库文件
 if host_machine.system() == 'windows'
   api_libs = [
-    'vnpy_xtp/api/xtpquoteapi.dll',
-    'vnpy_xtp/api/xtptraderapi.dll',
+    'vnpy_xtp/api/xtpxquoteapi.dll',
+    'vnpy_xtp/api/xtpxtraderapi.dll',
   ]
   
   install_data(
@@ -146,8 +146,8 @@ if host_machine.system() == 'windows'
   )
 else  # Linux
   api_libs = [
-    'vnpy_xtp/api/libxtpquoteapi.so',
-    'vnpy_xtp/api/libxtptraderapi.so',
+    'vnpy_xtp/api/libxtpxquoteapi.so',
+    'vnpy_xtp/api/libxtpxtraderapi.so',
   ]
   
   install_data(

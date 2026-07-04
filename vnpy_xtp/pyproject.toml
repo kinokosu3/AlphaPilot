@@ -1,7 +1,7 @@
 [project]
 name = "vnpy_xtp"
-version = "2.2.50.8.1"
-description = "XTP gateway for vn.py quant trading framework."
+version = "1.2.1.1"
+description = "XTP PRO gateway for vn.py quant trading framework."
 readme = "README.md"
 license = {text = "MIT"}
 authors = [{name = "Xiaoyou Chen", email = "xiaoyou.chen@mail.vnpy.com"}]

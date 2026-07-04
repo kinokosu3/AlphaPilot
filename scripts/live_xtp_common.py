@@ -6,9 +6,11 @@ from collections.abc import Mapping
 
 
 PUBLIC_TEST_ENDPOINT_ENV: dict[str, str] = {
-    # Public XTP simulation endpoints historically used by vn.py tutorials.
-    # They may change; values supplied by the broker/account email should be
-    # passed through env and will override these defaults.
+    # WARNING: these are the *classic* XTP simulation endpoints from vn.py
+    # tutorials. The gateway is now built against XTP PRO (XTPX), whose
+    # counters/servers are different — for PRO accounts you MUST pass the
+    # PRO test endpoints from your broker through env; these defaults exist
+    # only as a last-resort fallback and will likely fail against PRO.
     "ALPHAPILOT_LIVE_XTP_CLIENT_ID": "1",
     "ALPHAPILOT_LIVE_XTP_QUOTE_HOST": "120.27.164.138",
     "ALPHAPILOT_LIVE_XTP_QUOTE_PORT": "6002",

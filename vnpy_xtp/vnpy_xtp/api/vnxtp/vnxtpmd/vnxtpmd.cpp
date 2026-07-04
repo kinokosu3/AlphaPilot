@@ -536,12 +536,6 @@ int MdApi::exit()
 	return 1;
 };
 
-string MdApi::getTradingDay()
-{
-	string day = this->api->GetTradingDay();
-	return day;
-};
-
 string MdApi::getApiVersion()
 {
 	string version = this->api->GetApiVersion();
@@ -555,11 +549,6 @@ dict MdApi::getApiLastError()
 	error["error_id"] = last_error->error_id;
 	error["error_msg"] = last_error->error_msg;
 	return error;
-};
-
-void MdApi::setUDPBufferSize(int buff_size)
-{
-	this->api->SetUDPBufferSize(buff_size);
 };
 
 void MdApi::setHeartBeatInterval(int interval)
@@ -685,12 +674,6 @@ int MdApi::queryTickersPriceInfo(string ticker, int count, int exchange_id)
 	char* buffer = (char*)ticker.c_str();
 	char* myreq[1] = { buffer };
 	int i = this->api->QueryTickersPriceInfo(myreq, 1, (XTP_EXCHANGE_TYPE)exchange_id);
-	return i;
-};
-
-int MdApi::queryAllTickersPriceInfo()
-{
-	int i = this->api->QueryAllTickersPriceInfo();
 	return i;
 };
 
@@ -1035,10 +1018,8 @@ PYBIND11_MODULE(vnxtpmd, m)
 		.def("init", &MdApi::init)
 		.def("release", &MdApi::release)
 		.def("exit", &MdApi::exit)
-		.def("getTradingDay", &MdApi::getTradingDay)
 		.def("getApiVersion", &MdApi::getApiVersion)
 		.def("getApiLastError", &MdApi::getApiLastError)
-		.def("setUDPBufferSize", &MdApi::setUDPBufferSize)
 		.def("setHeartBeatInterval", &MdApi::setHeartBeatInterval)
 		.def("subscribeMarketData", &MdApi::subscribeMarketData)
 		.def("unSubscribeMarketData", &MdApi::unSubscribeMarketData)
@@ -1057,7 +1038,6 @@ PYBIND11_MODULE(vnxtpmd, m)
 
 		.def("queryAllTickers", &MdApi::queryAllTickers)
 		.def("queryTickersPriceInfo", &MdApi::queryTickersPriceInfo)
-		.def("queryAllTickersPriceInfo", &MdApi::queryAllTickersPriceInfo)
 		.def("queryAllTickersFullInfo", &MdApi::queryAllTickersFullInfo)
 
 		.def("onDisconnected", &MdApi::onDisconnected)

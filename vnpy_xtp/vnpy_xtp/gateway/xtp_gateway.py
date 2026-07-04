@@ -644,74 +644,9 @@ class XtpTdApi(TdApi):
 
         self.gateway.on_account(account)
 
-    def onQueryOptionAuctionInfo(self, data: dict, error: dict, reqid: int, last: bool, session: int) -> None:
-        """查询期权合约细节回报"""
-        if not data or not data["ticker"]:
-            return
-
-        contract: ContractData = ContractData(
-            symbol=data["ticker"],
-            exchange=MARKET_XTP2VT[data["security_id_source"]],
-            name=data["symbol"],
-            product=Product.OPTION,
-            size=data["contract_unit"],
-            min_volume=data["qty_unit"],
-            pricetick=data["price_tick"],
-            gateway_name=self.gateway_name
-        )
-
-        contract.option_portfolio = data["underlying_security_id"] + "_O"
-        contract.option_underlying = (
-            data["underlying_security_id"]
-            + "-"
-            + str(data["delivery_month"])
-        )
-        contract.option_type = OPTIONTYPE_XTP2VT.get(data["call_or_put"], None)
-
-        contract.option_strike = data["exercise_price"]
-        contract.option_expiry = datetime.strptime(
-            str(data["last_trade_date"]), "%Y%m%d"
-        )
-        contract.option_index = get_option_index(
-            contract.option_strike, data["contract_id"]
-        )
-
-        self.gateway.on_contract(contract)
-        symbol_contract_map[contract.vt_symbol] = contract
-
-        if last:
-            self.gateway.write_log("期权信息查询成功")
-
-    def onQueryCreditDebtInfo(
-        self,
-        data: dict,
-        error: dict,
-        request: int,
-        last: bool,
-        session: int
-    ) -> None:
-        """查询两融持仓回报"""
-        if data["debt_type"] == 1:
-            symbol: str = data["ticker"]
-            exchange: Exchange = MARKET_XTP2VT[data["market"]]
-
-            position: PositionData = self.short_positions.get(symbol, None)
-            if not position:
-                position = PositionData(
-                    symbol=symbol,
-                    exchange=exchange,
-                    direction=Direction.SHORT,
-                    gateway_name=self.gateway_name
-                )
-                self.short_positions[symbol] = position
-
-            position.volume += data["remain_qty"]
-
-        if last:
-            for position in self.short_positions.values():
-                self.gateway.on_position(position)
-
-            self.short_positions.clear()
+    # XTP PRO (XTPX 1.2.1) removed the option-auction-info and credit-debt
+    # query APIs, so the classic onQueryOptionAuctionInfo / onQueryCreditDebtInfo
+    # callbacks and their query calls are gone from this gateway.
 
     def connect(
         self,
@@ -764,17 +699,11 @@ class XtpTdApi(TdApi):
             msg = f"交易服务器登录失败，原因：{error['error_msg']}"
 
         self.gateway.write_log(msg)
-        self.query_option_info()
 
     def close(self) -> None:
         """关闭连接"""
         if self.connect_status:
             self.exit()
-
-    def query_option_info(self) -> None:
-        """查询期权信息"""
-        self.reqid += 1
-        self.queryOptionAuctionInfo({}, self.session_id, self.reqid)
 
     def send_order(self, req: OrderRequest) -> str:
         """委托下单"""
@@ -858,10 +787,6 @@ class XtpTdApi(TdApi):
 
         self.reqid += 1
         self.queryPosition("", self.session_id, self.reqid)
-
-        if self.margin_trading:
-            self.reqid += 1
-            self.queryCreditDebtInfo(self.session_id, self.reqid)
 
 
 def get_option_index(strike_price: float, exchange_instrument_id: str) -> str:

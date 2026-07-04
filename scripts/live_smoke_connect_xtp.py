@@ -13,9 +13,10 @@ Usage (credentials via env, never files):
       -e ALPHAPILOT_LIVE_XTP_TRADE_HOST=... -e ALPHAPILOT_LIVE_XTP_TRADE_PORT=... \
       live python scripts/live_smoke_connect_xtp.py [--order] [--symbol 600000]
 
-For XTP public simulation accounts, if the account email did not include
-endpoints, pass --use-public-test-endpoints to fill the commonly published
-test hosts. Broker-provided values in env always win.
+NOTE: the gateway is built against XTP PRO (XTPX) — use the PRO test
+endpoints provided by the broker. --use-public-test-endpoints fills the old
+*classic* XTP simulation hosts and will likely NOT work against PRO; it is
+kept only as a fallback. Broker-provided values in env always win.
 
 Checks: TD+MD login, account/positions arrive, contracts load, one tick after
 subscribing; with --order: submit a limit buy ~10% below last price (1 lot),
@@ -63,7 +64,7 @@ def main() -> int:
     parser.add_argument(
         "--use-public-test-endpoints",
         action="store_true",
-        help="fill missing quote/trade hosts and ports with public XTP simulation defaults",
+        help="fill missing hosts/ports with *classic* XTP simulation defaults (likely wrong for PRO counters)",
     )
     parser.add_argument("--skip-tick", action="store_true", help="skip market-data subscription/tick check")
     parser.add_argument("--dump-logs", action="store_true", help="print gateway logs collected by OMS")

@@ -5,11 +5,11 @@
 
 #include "vnxtp.h"
 #include "pybind11/pybind11.h"
-#include "xtp/xtp_quote_api.h"
+#include "xtpx/xtpx_quote_api.h"
 
 
 using namespace pybind11;
-using namespace XTP::API;
+using namespace XTPX::API;
 
 
 ///-------------------------------------------------------------------------------------
@@ -273,13 +273,11 @@ public:
 
 	int exit();
 
-	string getTradingDay();
 
 	string getApiVersion();
 
 	dict getApiLastError();
 
-	void setUDPBufferSize(int buff_size);
 
 	void setHeartBeatInterval(int interval);
 
@@ -315,7 +313,6 @@ public:
 
 	int queryTickersPriceInfo(string ticker, int count, int exchange_id);
 
-	int queryAllTickersPriceInfo();
 
 	int queryAllTickersFullInfo(int exchange_id);
 };

@@ -171,7 +171,7 @@ register_broker(
         gateway_path="vnpy_xtp:XtpGateway",
         gateway_name="XTP",
         setting_fields=_COMMON_FIELDS + (SettingField("SOFTWARE_KEY", "授权码", required=True),),
-        description="中泰证券 XTP（SDK 2.2.50.8）",
+        description="中泰证券 XTP PRO（SDK 1.2.1，XTPX 新一代柜台）",
     )
 )
 register_broker(
