@@ -31,8 +31,8 @@ from scripts.live_xtp_common import env_with_public_test_endpoints  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 XTP_SDK_LIBS = (
-    REPO_ROOT / "vnpy_xtp/vnpy_xtp/api/libxtpquoteapi.so",
-    REPO_ROOT / "vnpy_xtp/vnpy_xtp/api/libxtptraderapi.so",
+    REPO_ROOT / "vnpy_xtp/vnpy_xtp/api/libxtpxquoteapi.so",
+    REPO_ROOT / "vnpy_xtp/vnpy_xtp/api/libxtpxtraderapi.so",
 )
 ELF_MACHINE_NAMES = {
     62: "x86_64",
@@ -124,9 +124,13 @@ def main() -> int:
 
     try:
         gateway_class = resolve_gateway_class("xtp")
-        check_line(True, "vnpy_xtp gateway import", getattr(gateway_class, "default_name", "XTP"))
+        from alphapilot.systems.live.brokers.xtp_pro import SDK_AVAILABLE
+
+        detail = f"{gateway_class.__name__}, sdk_bindings={'ok' if SDK_AVAILABLE else 'MISSING'}"
+        check_line(SDK_AVAILABLE, "native xtp gateway + compiled bindings", detail)
+        failed |= not SDK_AVAILABLE
     except Exception as exc:  # noqa: BLE001 - preflight should report any import/link issue
-        check_line(False, "vnpy_xtp gateway import", f"{type(exc).__name__}: {exc}")
+        check_line(False, "native xtp gateway + compiled bindings", f"{type(exc).__name__}: {exc}")
         failed = True
 
     endpoint_missing = missing_endpoint_fields(env)

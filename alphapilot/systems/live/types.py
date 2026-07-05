@@ -341,11 +341,19 @@ class Account:
 
 @dataclass
 class TickData:
-    """Minimal real-time quote (extend with full depth later)."""
+    """L1 real-time quote (extend with full depth later).
+
+    ``volume`` / ``turnover`` are the *cumulative* session totals as pushed by
+    A-share feeds — bar aggregation diffs consecutive ticks to get per-bar
+    volume, so they must be carried here.
+    """
 
     code: str
     exchange: Exchange
     datetime: Optional[datetime] = None
+    name: str = ""
+    volume: float = 0.0          # cumulative traded volume (shares)
+    turnover: float = 0.0        # cumulative traded amount (CNY)
     last_price: float = 0.0
     pre_close: float = 0.0
     open_price: float = 0.0

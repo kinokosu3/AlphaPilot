@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 
 def test_live_system_registered_and_snapshot(engine) -> None:
     live = engine.get_system("live")
@@ -37,15 +39,15 @@ def test_timing_still_imports_order_status_after_refactor() -> None:
     assert OrderStatus.CANCELLED.value == "cancelled"
 
 
-def test_timing_paper_broker_unchanged() -> None:
-    # The pre-existing sync PaperBroker (timing.broker) must keep working with the
-    # refactored enum (it references OrderStatus.SUBMITTED / .CANCELLED).
-    from alphapilot.systems.timing.base import OrderIntent
-    from alphapilot.systems.timing.broker import PaperBroker
+def test_timing_legacy_broker_stack_removed() -> None:
+    # The old request/reply stack (timing.broker.PaperBroker, ExecutionReport,
+    # the second BrokerGateway protocol) was superseded by the live stack;
+    # OrderIntent stays as the strategy-side contract.
+    import alphapilot.systems.timing as timing
 
-    broker = PaperBroker(cash=100000.0)
-    report = broker.submit_order(
-        OrderIntent(datetime="2026-07-01", instrument="SZ000001", action="buy", quantity=100)
-    )
-    assert report.status.name == "SUBMITTING"      # alias of old SUBMITTED
-    assert broker.query_account()["cash"] == 100000.0
+    assert not hasattr(timing, "ExecutionReport")
+    assert not hasattr(timing, "BrokerGateway")
+    from alphapilot.systems.timing.base import OrderIntent  # noqa: F401 - still exported
+
+    with pytest.raises(ImportError):
+        from alphapilot.systems.timing.broker import PaperBroker  # noqa: F401

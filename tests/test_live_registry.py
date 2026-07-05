@@ -13,7 +13,9 @@ from alphapilot.systems.live.brokers import registry as reg
 def test_builtin_brokers_registered() -> None:
     names = [spec.name for spec in reg.list_brokers()]
     assert names == ["emt", "xtp"]
-    assert reg.get_broker("XTP").gateway_path == "vnpy_xtp:XtpGateway"
+    assert reg.get_broker("XTP").gateway_path == (
+        "alphapilot.systems.live.brokers.xtp_pro:XtpProGateway"
+    )
     assert reg.get_broker("emt").gateway_name == "EMT"
 
 
@@ -92,24 +94,54 @@ def test_xtp_public_test_endpoint_defaults_do_not_override_env() -> None:
     assert env["ALPHAPILOT_LIVE_XTP_QUOTE_PORT"] == "6002"
 
 
-def test_resolve_gateway_class_import_error_message() -> None:
-    # vn.py gateways are not installed on the dev Mac -> actionable ImportError.
-    if reg.gateway_importable("xtp"):
-        pytest.skip("vnpy_xtp installed in this env")
+def test_resolve_gateway_class_import_error_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A broker whose gateway package is absent -> actionable ImportError.
+    spec = reg.BrokerSpec(name="ghost", gateway_path="ghost_pkg:GhostGateway", gateway_name="GHOST")
+    monkeypatch.setitem(reg._BROKERS, "ghost", spec)
     with pytest.raises(ImportError, match="Dockerfile.live"):
-        reg.resolve_gateway_class("xtp")
+        reg.resolve_gateway_class("ghost")
+    assert not reg.gateway_importable("ghost")
 
 
-def test_resolve_gateway_class_with_fake_module(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = types.ModuleType("vnpy_xtp")
+def test_resolve_gateway_class_native_brokers() -> None:
+    # XTP and EMT resolve to AlphaPilot-native gateways; no vn.py involved.
+    from alphapilot.systems.live.brokers.emt import EmtGateway
+    from alphapilot.systems.live.brokers.xtp_pro import XtpProGateway
 
-    class XtpGateway:  # noqa: D401 - stub
+    assert reg.resolve_gateway_class("xtp") is XtpProGateway
+    assert reg.resolve_gateway_class("emt") is EmtGateway
+    assert reg.gateway_importable("xtp")
+    assert reg.gateway_importable("emt")
+
+
+def test_create_gateway_native_returns_broker_gateway() -> None:
+    from alphapilot.systems.live.brokers.xtp_pro import XtpProGateway
+    from alphapilot.systems.live.gateway import BrokerGateway
+
+    gw = reg.create_gateway("xtp")
+    assert isinstance(gw, XtpProGateway)
+    assert isinstance(gw, BrokerGateway)
+    assert gw.name == "xtp"
+
+
+def test_create_gateway_wraps_vnpy_class(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A non-BrokerGateway class (vn.py style) gets wrapped in VnpyBrokerAdapter.
+    fake = types.ModuleType("fake_vnpy_broker")
+
+    class LegacyGateway:  # noqa: D401 - stub vn.py gateway class
         pass
 
-    fake.XtpGateway = XtpGateway
-    monkeypatch.setitem(sys.modules, "vnpy_xtp", fake)
-    assert reg.resolve_gateway_class("xtp") is XtpGateway
-    assert reg.gateway_importable("xtp")
+    fake.LegacyGateway = LegacyGateway
+    monkeypatch.setitem(sys.modules, "fake_vnpy_broker", fake)
+    spec = reg.BrokerSpec(
+        name="legacy", gateway_path="fake_vnpy_broker:LegacyGateway", gateway_name="LEGACY"
+    )
+    monkeypatch.setitem(reg._BROKERS, "legacy", spec)
+    from alphapilot.systems.live.brokers.vnpy_adapter import VnpyBrokerAdapter
+
+    gw = reg.create_gateway("legacy")
+    assert isinstance(gw, VnpyBrokerAdapter)
+    assert gw.gateway_name == "LEGACY"
 
 
 def test_register_custom_broker(monkeypatch: pytest.MonkeyPatch) -> None:

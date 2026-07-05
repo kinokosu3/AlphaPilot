@@ -97,17 +97,17 @@ def check_emt_td() -> str:
 
 
 def check_gateways_wire() -> str:
-    from vnpy.event import EventEngine
-    from vnpy.trader.engine import MainEngine
-    from vnpy_emt import EmtGateway
-    from vnpy_xtp import XtpGateway
+    # Native AlphaPilot gateways: registry resolution + construction (which
+    # instantiates the C++ API wrapper objects) + callback registration.
+    from alphapilot.systems.live.brokers.registry import create_gateway
+    from alphapilot.systems.live.oms import OMS
 
-    main_engine = MainEngine(EventEngine())
-    main_engine.add_gateway(XtpGateway)
-    main_engine.add_gateway(EmtGateway)
-    names = main_engine.get_all_gateway_names()
-    main_engine.close()
-    return f"MainEngine gateways: {names}"
+    names = []
+    for broker in ("xtp", "emt"):
+        gateway = create_gateway(broker)
+        gateway.register_callback(OMS())
+        names.append(f"{broker}:{type(gateway).__name__}")
+    return f"native gateways: {names}"
 
 
 def main() -> int:
@@ -116,7 +116,7 @@ def main() -> int:
     record("xtp TdApi create+login", check_xtp_td)
     record("emt MdApi create+login (new EMQ binding)", check_emt_md)
     record("emt TdApi create+login", check_emt_td)
-    record("MainEngine wiring", check_gateways_wire)
+    record("native gateway wiring", check_gateways_wire)
 
     print("=" * 64)
     for key, value in results.items():

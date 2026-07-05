@@ -9,8 +9,9 @@ Ownership:
   :meth:`cancel` / :meth:`halt` / :meth:`reconcile_and_resume`.
 
 The engine is broker-agnostic: it talks only to the :class:`BrokerGateway` port,
-so PAPER (PaperBroker), SIM (SimBroker) and LIVE (VnpyBrokerAdapter) all run the
-same logic. The clock is injected so a whole trading day can be simulated in tests.
+so PAPER (PaperBroker), SIM (SimBroker) and LIVE (native XTP Pro / EMT gateways)
+all run the same logic. The clock is injected so a whole trading day can be
+simulated in tests.
 """
 
 from __future__ import annotations
@@ -58,7 +59,16 @@ class LiveEngine:
         self.session = SessionClock(now_fn or datetime.now, is_trading_day_fn)
         self.ledger = ledger or Ledger(config.ledger_dir)
         self.risk = risk  # installed in Phase 3; None => no pre-trade checks
+        self._tick_listeners: list[Callable[[TickData], None]] = []
         gateway.register_callback(self)
+
+    def add_tick_listener(self, listener: Callable[[TickData], None]) -> None:
+        """Attach a tick consumer (e.g. a strategy runner's bar aggregator).
+
+        Listeners run synchronously after the OMS update, on the same thread that
+        delivers gateway events — keep them fast and non-blocking.
+        """
+        self._tick_listeners.append(listener)
 
     # ---- GatewayCallback (fan-out to OMS + ledger) ----------------------- #
     def on_order(self, order: Order) -> None:
@@ -80,6 +90,8 @@ class LiveEngine:
 
     def on_tick(self, tick: TickData) -> None:
         self.oms.on_tick(tick)
+        for listener in self._tick_listeners:
+            listener(tick)
 
     def on_log(self, log: LogEvent) -> None:
         self.oms.on_log(log)

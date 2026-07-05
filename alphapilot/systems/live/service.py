@@ -35,12 +35,13 @@ class LiveSystem(BaseSystem):
     def make_broker(self):
         """Pick the broker gateway for the configured mode/broker.
 
-        DRY_RUN / PAPER -> in-process :class:`PaperBroker`; LIVE -> lazily build a
-        :class:`VnpyBrokerAdapter` (which imports vn.py — Linux/Windows only)."""
+        DRY_RUN / PAPER -> in-process :class:`PaperBroker`; LIVE -> resolve through
+        the broker registry (native gateways constructed directly, vn.py gateways
+        wrapped in an adapter — either way the SDK loads lazily, here)."""
         if self.config.mode == RunMode.LIVE:
-            from alphapilot.systems.live.brokers.vnpy_adapter import VnpyBrokerAdapter
+            from alphapilot.systems.live.brokers.registry import create_gateway
 
-            return VnpyBrokerAdapter(self.config.broker.upper())
+            return create_gateway(self.config.broker)
         from alphapilot.systems.live.brokers.paper import PaperBroker
 
         return PaperBroker()

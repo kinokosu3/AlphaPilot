@@ -22,7 +22,11 @@
 
 import importlib_metadata
 
-from .gateway import EmtGateway
+# This package now ships ONLY the compiled EMT SDK bindings (vnpy_emt.api).
+# The vn.py gateway layer was ported into AlphaPilot
+# (alphapilot.systems.live.brokers.emt) and is no longer imported here, so
+# installing this package does not require vn.py. The legacy source remains in
+# vnpy_emt/gateway/ for reference only.
 
 try:
     __version__ = importlib_metadata.version("vnpy_emt")

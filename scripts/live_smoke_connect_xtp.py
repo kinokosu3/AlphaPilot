@@ -36,9 +36,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from alphapilot.systems.live.brokers.registry import (
     build_connect_setting,
+    create_gateway,
     missing_setting_fields,
 )
-from alphapilot.systems.live.brokers.vnpy_adapter import VnpyBrokerAdapter
 from alphapilot.systems.live.oms import OMS
 from alphapilot.systems.live.types import OrderRequest, OrderType, normalize_symbol, symbol_key
 from scripts.live_xtp_common import env_with_public_test_endpoints
@@ -85,7 +85,7 @@ def main() -> int:
           f"quote {setting['行情地址']}:{setting['行情端口']}) ...")
     code, exchange = normalize_symbol(args.symbol)
 
-    adapter = VnpyBrokerAdapter("XTP")
+    adapter = create_gateway("xtp")   # AlphaPilot-native XTP Pro gateway (no vn.py)
     oms = OMS()
     adapter.register_callback(oms)
     adapter.connect(setting)

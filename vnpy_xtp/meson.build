@@ -121,8 +121,6 @@ python_files = [
   ['vnpy_xtp/__init__.py', 'vnpy_xtp'],
   ['vnpy_xtp/api/__init__.py', 'vnpy_xtp/api'],
   ['vnpy_xtp/api/xtp_constant.py', 'vnpy_xtp/api'],
-  ['vnpy_xtp/gateway/__init__.py', 'vnpy_xtp/gateway'],
-  ['vnpy_xtp/gateway/xtp_gateway.py', 'vnpy_xtp/gateway'],
 ]
 
 foreach file : python_files

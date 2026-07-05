@@ -22,10 +22,13 @@
 
 import importlib_metadata
 
-from .gateway import XtpGateway
+# This package now ships ONLY the compiled XTP Pro SDK bindings (vnpy_xtp.api).
+# The vn.py gateway layer was ported into AlphaPilot
+# (alphapilot.systems.live.brokers.xtp_pro) and is no longer imported here, so
+# installing this package does not require vn.py. The legacy source remains in
+# vnpy_xtp/gateway/ for reference only.
 
-
-__all__ = ["XtpGateway"]
+__all__: list = []
 
 
 try:

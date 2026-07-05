@@ -123,6 +123,26 @@ def gateway_importable(name: str) -> bool:
         return False
 
 
+def create_gateway(name: str):
+    """Instantiate the broker gateway for ``name`` — the one entry point callers use.
+
+    Native gateways (AlphaPilot :class:`BrokerGateway` subclasses, e.g. XTP Pro /
+    EMT) are constructed directly. Anything else is assumed to be a vn.py gateway
+    class and gets wrapped in :class:`VnpyBrokerAdapter`, so legacy/vn.py brokers
+    keep working through the same call.
+    """
+    from alphapilot.systems.live.gateway import BrokerGateway
+
+    spec = get_broker(name)
+    gateway_class = resolve_gateway_class(name)
+    if isinstance(gateway_class, type) and issubclass(gateway_class, BrokerGateway):
+        return gateway_class(spec.name)
+
+    from alphapilot.systems.live.brokers.vnpy_adapter import VnpyBrokerAdapter
+
+    return VnpyBrokerAdapter(spec.gateway_name, gateway_class=gateway_class)
+
+
 def build_connect_setting(name: str, env: Mapping[str, str] | None = None) -> dict[str, Any]:
     """Build the gateway's native connect-setting dict from the environment.
 
@@ -168,7 +188,7 @@ def missing_setting_fields(name: str, env: Mapping[str, str] | None = None) -> l
 register_broker(
     BrokerSpec(
         name="xtp",
-        gateway_path="vnpy_xtp:XtpGateway",
+        gateway_path="alphapilot.systems.live.brokers.xtp_pro:XtpProGateway",
         gateway_name="XTP",
         setting_fields=_COMMON_FIELDS + (SettingField("SOFTWARE_KEY", "授权码", required=True),),
         description="中泰证券 XTP PRO（SDK 1.2.1，XTPX 新一代柜台）",
@@ -177,8 +197,8 @@ register_broker(
 register_broker(
     BrokerSpec(
         name="emt",
-        gateway_path="vnpy_emt:EmtGateway",
+        gateway_path="alphapilot.systems.live.brokers.emt:EmtGateway",
         gateway_name="EMT",
-        description="东方财富证券 EMT（trade ~2.27 / quote ~2.19）",
+        description="东方财富证券 EMT（trade ~2.27 / quote ~2.19，原生网关）",
     )
 )

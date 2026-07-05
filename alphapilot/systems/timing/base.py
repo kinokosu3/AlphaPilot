@@ -66,35 +66,13 @@ class EventTimingStrategy(Protocol):
 # ``OrderStatus`` now lives in ``systems/live/types`` (6-state, vn.py-aligned) and
 # is imported above; re-exported here (and via ``systems/timing/__init__``) so
 # existing timing code keeps its ``OrderStatus.SUBMITTED`` / ``.CANCELLED`` usage.
-
-
-@dataclass(frozen=True)
-class ExecutionReport:
-    order_id: str
-    status: OrderStatus
-    instrument: str
-    datetime: pd.Timestamp | str
-    action: OrderAction
-    filled_quantity: float = 0.0
-    price: float | None = None
-    cost: float = 0.0
-    message: str = ""
-
-
-class BrokerGateway(Protocol):
-    """Live-trading adapter boundary; vn.py can implement this later."""
-
-    def submit_order(self, intent: OrderIntent) -> ExecutionReport:
-        """Submit one order intent."""
-
-    def cancel_order(self, order_id: str) -> ExecutionReport:
-        """Cancel one order."""
-
-    def query_account(self) -> dict[str, Any]:
-        """Return account snapshot."""
-
-    def query_positions(self) -> dict[str, float]:
-        """Return current positions."""
+#
+# The old request/reply broker abstractions (``ExecutionReport`` + a second
+# ``BrokerGateway`` protocol + ``timing/broker.py``'s PaperBroker) were removed:
+# execution now goes through the event-driven live stack —
+# ``systems/live/gateway.BrokerGateway`` + ``systems/live/executor
+# .orders_from_intents`` — with ``OrderIntent`` as the strategy-side contract
+# and ``systems/timing/live_adapter.BatchStrategyAdapter`` as the bridge.
 
 
 @dataclass
