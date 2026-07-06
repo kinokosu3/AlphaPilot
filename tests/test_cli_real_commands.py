@@ -55,6 +55,23 @@ EXPECTED_COMMANDS = {
     "mine_aff",
     "mine_gp",
     "mine_rl",
+    "live_brokers",
+    "live_connect",
+    "live_daemon_start",
+    "live_daemon_status",
+    "live_daemon_stop",
+    "live_daemon_halt",
+    "live_daemon_order",
+    "live_daemon_resume",
+    "live_daemon_refresh",
+    "live_daemon_submit_target",
+    "live_modes",
+    "live_order",
+    "live_preflight",
+    "live_run",
+    "live_state",
+    "live_status",
+    "live_submit_target",
     "modules",
     "notify_commands",
     "portal",
@@ -389,6 +406,113 @@ def test_real_cli_command_smoke(cli_ctx: CliContext) -> None:
         patterns=("No running portal process found",),
         timeout=30,
     )
+
+    live_state = ctx.cwd / "live_state"
+    live_ledger = ctx.cwd / "live_ledger"
+    daemon_state = ctx.cwd / "live_daemon_state"
+    daemon_ledger = ctx.cwd / "live_daemon_ledger"
+    _run_ok(ctx, "live_status")
+    _run_ok(ctx, "live_modes")
+    _run_ok(ctx, "live_brokers")
+    _run_ok(ctx, "live_preflight", "--broker=paper")
+    _run_ok(ctx, "live_state", "--mode=paper", f"--state_dir={live_state}")
+    _run_ok(
+        ctx,
+        "live_connect",
+        "--mode=paper",
+        "--cash=10000",
+        "--timeout=1",
+        f"--state_dir={live_state}",
+        f"--ledger_dir={live_ledger}",
+    )
+    _run_ok(
+        ctx,
+        "live_run",
+        "--mode=paper",
+        "--symbols=600000",
+        "--cash=10000",
+        "--interval=0.05",
+        "--duration=0.05",
+        "--timeout=1",
+        f"--state_dir={live_state}",
+        f"--ledger_dir={live_ledger}",
+    )
+    _run_ok(
+        ctx,
+        "live_order",
+        "--mode=paper",
+        "--symbol=SH600000",
+        "--side=buy",
+        "--volume=100",
+        "--price=10",
+        "--cash=10000",
+        "--timeout=1",
+    )
+    _run_ok(
+        ctx,
+        "live_submit_target",
+        "--mode=paper",
+        "--holdings={\"SH600000\":100}",
+        "--prices={\"SH600000\":10.0}",
+        "--cash=10000",
+        "--route=True",
+        "--timeout=1",
+    )
+    _run_ok(ctx, "live_daemon_status", "--mode=paper", f"--state_dir={daemon_state}")
+    started_daemon = False
+    try:
+        _run_ok(
+            ctx,
+            "live_daemon_start",
+            "--mode=paper",
+            "--symbols=600000",
+            "--cash=10000",
+            "--interval=0.05",
+            "--timeout=1",
+            f"--state_dir={daemon_state}",
+            f"--ledger_dir={daemon_ledger}",
+        )
+        started_daemon = True
+        time.sleep(1)
+        _run_ok(
+            ctx,
+            "live_daemon_halt",
+            "--reason=cli-smoke",
+            "--wait=True",
+            "--timeout=5",
+            f"--state_dir={daemon_state}",
+        )
+        _run_ok(ctx, "live_daemon_resume", "--wait=True", "--timeout=5", f"--state_dir={daemon_state}")
+        _run_ok(ctx, "live_daemon_refresh", "--wait=True", "--timeout=5", f"--state_dir={daemon_state}")
+        _run_ok(
+            ctx,
+            "live_daemon_order",
+            "--symbol=SH600000",
+            "--side=buy",
+            "--volume=100",
+            "--price=10",
+            "--wait=True",
+            "--timeout=5",
+            f"--state_dir={daemon_state}",
+        )
+        _run_ok(
+            ctx,
+            "live_daemon_submit_target",
+            "--holdings={\"SH600000\":200}",
+            "--prices={\"SH600000\":10.0}",
+            "--route=True",
+            "--wait=True",
+            "--timeout=5",
+            f"--state_dir={daemon_state}",
+        )
+    finally:
+        if started_daemon:
+            _run_ok(
+                ctx,
+                "live_daemon_stop",
+                "--timeout=5",
+                f"--state_dir={daemon_state}",
+            )
 
     _run_ok(ctx, "category_list")
     _run_ok(ctx, "category_create", "--name=cli_smoke")

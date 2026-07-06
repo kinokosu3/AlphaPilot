@@ -193,6 +193,8 @@ class LiveEngine:
             "buying_power": self.oms.buying_power(),
             "active_orders": len(self.oms.get_active_orders()),
             "positions": len(self.oms.get_positions()),
+            "contracts": len(self.oms.contracts),
+            "ticks": len(self.oms.ticks),
         }
 
 

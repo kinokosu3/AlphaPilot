@@ -1373,66 +1373,242 @@ def create_app(
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
-    # ---- Live trading (in-process PAPER sandbox) ----------------------------
-    # Real LIVE trading runs in a separate long-lived daemon (Linux + vn.py). The
-    # portal drives an in-process PAPER LiveEngine so the whole stack (reconcile ->
-    # risk -> broker -> OMS -> ledger + kill-switch) can be exercised safely here.
+    # ---- Live trading --------------------------------------------------------
+    # Portal controls the same LiveRuntime used by the CLI. PAPER remains the
+    # safe in-process sandbox; LIVE endpoints below are deliberately read-only /
+    # connect-only so real order routing still needs explicit CLI/runtime
+    # confirmation.
     def _live_system() -> Any:
         return _engine(app).get_system("live")
 
+    def _live_module() -> Any:
+        return _engine(app).get_module("live")
+
+    def _active_runtime() -> Any:
+        return getattr(app.state, "live_runtime", None)
+
+    def _replace_runtime(runtime: Any | None) -> None:
+        old = _active_runtime()
+        if old is not None and old is not runtime:
+            try:
+                old.close()
+            except Exception:
+                pass
+        app.state.live_runtime = runtime
+
     def _require_paper() -> Any:
-        engine_obj = getattr(app.state, "live_engine", None)
-        if engine_obj is None:
+        runtime = _active_runtime()
+        if runtime is None:
             raise ValueError("Paper session not started; connect first.")
-        return engine_obj
+        if runtime.config.mode != "paper":
+            raise ValueError("Active live runtime is not a paper session.")
+        return runtime
 
-    def _live_state(engine_obj: Any) -> dict[str, Any]:
-        oms = engine_obj.oms
-
-        def _side(direction: Any) -> str:
-            return "buy" if getattr(direction, "value", direction) == "long" else "sell"
-
-        positions = [
-            {"code": p.code, "exchange": p.exchange.value, "volume": p.volume,
-             "available": p.available, "yd_volume": p.yd_volume, "frozen": p.frozen, "price": p.price}
-            for p in oms.get_positions()
-        ]
-        orders = [
-            {"order_id": o.order_id, "code": o.code, "side": _side(o.direction), "price": o.price,
-             "volume": o.volume, "traded": o.traded, "status": o.status.value, "active": o.is_active()}
-            for o in oms.orders.values()
-        ]
-        trades = [
-            {"trade_id": t.trade_id, "code": t.code, "side": _side(t.direction),
-             "price": t.price, "volume": t.volume}
-            for t in oms.get_trades()
-        ]
-        account = oms.account
+    def _live_state(runtime: Any) -> dict[str, Any]:
+        state = runtime.snapshot()
+        engine_state = state.get("engine") or {}
+        account = state.get("account") or {}
         return {
-            "snapshot": engine_obj.snapshot(),
+            "snapshot": engine_state,
             "account": {
-                "buying_power": oms.buying_power(),
-                "balance": account.balance if account else 0.0,
+                "buying_power": engine_state.get("buying_power", 0.0),
+                "balance": account.get("balance", 0.0),
+                "available": account.get("available", 0.0),
             },
-            "positions": positions,
-            "orders": orders,
-            "trades": trades,
-            "ledger": engine_obj.ledger.events()[-50:],
+            "positions": state.get("positions") or [],
+            "orders": state.get("orders") or [],
+            "trades": state.get("trades") or [],
+            "ledger": state.get("ledger_tail") or [],
+            "runtime": state.get("config") or {},
         }
 
     @app.get("/api/live/status")
     def live_status() -> dict[str, Any]:
         try:
             live = _live_system()
-            engine_obj = getattr(app.state, "live_engine", None)
+            runtime = _active_runtime()
             data: dict[str, Any] = {
                 "config": live.snapshot(),
                 "modes": live.modes(),
-                "running": engine_obj is not None,
+                "running": runtime is not None,
             }
-            if engine_obj is not None:
-                data["state"] = _live_state(engine_obj)
+            if runtime is not None:
+                data["state"] = _live_state(runtime)
             return _jsonable(data)
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.get("/api/live/runtime/state")
+    def live_runtime_state(
+        mode: str | None = Query(default=None),
+        broker: str | None = Query(default=None),
+        state_dir: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        try:
+            return _jsonable(_live_module().live_state(mode=mode, broker=broker, state_dir=state_dir))
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/live/runtime/preflight")
+    def live_runtime_preflight(payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _jsonable(
+                _live_module().live_preflight(
+                    broker=payload.get("broker"),
+                    network=bool(payload.get("network", False)),
+                    timeout=float(payload.get("timeout") or 3.0),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/live/runtime/connect")
+    def live_runtime_connect(payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _jsonable(
+                _live_module().live_connect(
+                    mode=payload.get("mode"),
+                    broker=payload.get("broker"),
+                    cash=payload.get("cash"),
+                    timeout=float(payload.get("timeout") or 20.0),
+                    ledger_dir=payload.get("ledger_dir"),
+                    state_dir=payload.get("state_dir"),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.get("/api/live/daemon/status")
+    def live_daemon_status(
+        mode: str | None = Query(default=None),
+        broker: str | None = Query(default=None),
+        state_dir: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        try:
+            return _jsonable(_live_module().live_daemon_status(mode=mode, broker=broker, state_dir=state_dir))
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/live/daemon/start")
+    def live_daemon_start(payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _jsonable(
+                _live_module().live_daemon_start(
+                    mode=payload.get("mode"),
+                    broker=payload.get("broker"),
+                    symbols=payload.get("symbols"),
+                    cash=payload.get("cash"),
+                    interval=float(payload.get("interval") or 2.0),
+                    timeout=float(payload.get("timeout") or 20.0),
+                    ledger_dir=payload.get("ledger_dir"),
+                    state_dir=payload.get("state_dir"),
+                    duration=payload.get("duration"),
+                    timing_strategy=payload.get("timing_strategy"),
+                    timing_params=payload.get("timing_params"),
+                    timing_freq=str(payload.get("timing_freq") or "day"),
+                    bar_seconds=int(payload.get("bar_seconds") or 60),
+                    min_bars=int(payload.get("min_bars") or 30),
+                    window=int(payload.get("window") or 250),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/live/daemon/stop")
+    def live_daemon_stop(payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _jsonable(
+                _live_module().live_daemon_stop(
+                    state_dir=payload.get("state_dir"),
+                    timeout=float(payload.get("timeout") or 5.0),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/live/daemon/halt")
+    def live_daemon_halt(payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _jsonable(
+                _live_module().live_daemon_halt(
+                    reason=str(payload.get("reason") or "portal"),
+                    state_dir=payload.get("state_dir"),
+                    wait=bool(payload.get("wait", False)),
+                    timeout=float(payload.get("timeout") or 5.0),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/live/daemon/resume")
+    def live_daemon_resume(payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _jsonable(
+                _live_module().live_daemon_resume(
+                    state_dir=payload.get("state_dir"),
+                    wait=bool(payload.get("wait", False)),
+                    timeout=float(payload.get("timeout") or 5.0),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/live/daemon/refresh")
+    def live_daemon_refresh(payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _jsonable(
+                _live_module().live_daemon_refresh(
+                    state_dir=payload.get("state_dir"),
+                    wait=bool(payload.get("wait", False)),
+                    timeout=float(payload.get("timeout") or 5.0),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/live/daemon/order")
+    def live_daemon_order(payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _jsonable(
+                _live_module().live_daemon_order(
+                    symbol=str(payload.get("symbol") or payload.get("code") or ""),
+                    side=str(payload.get("side") or "buy"),
+                    volume=float(payload["volume"]),
+                    price=float(payload.get("price") or 0.0),
+                    order_type=str(payload.get("order_type") or "limit"),
+                    state_dir=payload.get("state_dir"),
+                    wait=bool(payload.get("wait", False)),
+                    timeout=float(payload.get("timeout") or 5.0),
+                    confirm_live=bool(payload.get("confirm_live", False)),
+                    reference=str(payload.get("reference") or "portal_daemon"),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/live/daemon/submit-target")
+    def live_daemon_submit_target(payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _jsonable(
+                _live_module().live_daemon_submit_target(
+                    target_path=payload.get("target_path"),
+                    holdings=payload.get("holdings"),
+                    prices=payload.get("prices"),
+                    date=payload.get("date"),
+                    source=payload.get("source") or "portal_daemon",
+                    session=payload.get("session"),
+                    strategy_name=payload.get("strategy_name"),
+                    factor_path=payload.get("factor_path"),
+                    model_pickle_path=payload.get("model_pickle_path"),
+                    yaml_params=payload.get("yaml_params"),
+                    refresh_data=bool(payload.get("refresh_data", False)),
+                    route=bool(payload.get("route", False)),
+                    state_dir=payload.get("state_dir"),
+                    wait=bool(payload.get("wait", False)),
+                    timeout=float(payload.get("timeout") or 5.0),
+                    confirm_live=bool(payload.get("confirm_live", False)),
+                )
+            )
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
@@ -1440,81 +1616,78 @@ def create_app(
     def live_paper_connect(payload: dict[str, Any]) -> dict[str, Any]:
         try:
             cash = float(payload.get("cash") or 1_000_000.0)
-            engine_obj = _live_system().create_paper_engine(cash=cash)
-            engine_obj.connect({"cash": cash})
-            app.state.live_engine = engine_obj
-            return _jsonable(_live_state(engine_obj))
+            runtime = _live_system().create_runtime(mode="paper", broker="paper")
+            runtime.connect(paper_cash=cash)
+            runtime.wait_ready(timeout=1.0, require_contracts=False)
+            _replace_runtime(runtime)
+            return _jsonable(_live_state(runtime))
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
     @app.get("/api/live/paper/state")
     def live_paper_state() -> dict[str, Any]:
         try:
-            engine_obj = getattr(app.state, "live_engine", None)
-            if engine_obj is None:
+            runtime = _active_runtime()
+            if runtime is None:
                 return _jsonable({"running": False})
-            return _jsonable({"running": True, **_live_state(engine_obj)})
+            return _jsonable({"running": True, **_live_state(runtime)})
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
     @app.post("/api/live/paper/order")
     def live_paper_order(payload: dict[str, Any]) -> dict[str, Any]:
         try:
-            from alphapilot.systems.live.types import OrderRequest, normalize_symbol
-
-            engine_obj = _require_paper()
+            runtime = _require_paper()
             code = str(payload["code"]).strip()
             side = str(payload.get("side", "buy")).lower()
             volume = float(payload["volume"])
             price = float(payload.get("price") or 0.0)
-            c, ex = normalize_symbol(code)
             if price > 0:
-                engine_obj.gateway.set_prices({code: price})
-            req = (OrderRequest.buy if side == "buy" else OrderRequest.sell)(c, ex, volume, price)
-            order_id = engine_obj.submit(req)
-            return _jsonable({"order_id": order_id, **_live_state(engine_obj)})
+                runtime.engine.gateway.set_prices({code: price})
+            order = runtime.submit_order(code, side=side, volume=volume, price=price, reference="portal")
+            return _jsonable({"order_id": order["order_id"], **_live_state(runtime)})
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
     @app.post("/api/live/paper/submit-target")
     def live_paper_submit_target(payload: dict[str, Any]) -> dict[str, Any]:
         try:
-            from alphapilot.systems.live.executor import reconcile
             from alphapilot.systems.live.targets import TargetPortfolio
 
-            engine_obj = _require_paper()
+            runtime = _require_paper()
             holdings = {str(k): float(v) for k, v in (payload.get("holdings") or {}).items()}
             prices = {str(k): float(v) for k, v in (payload.get("prices") or {}).items()}
             if prices:
-                engine_obj.gateway.set_prices(prices)
+                runtime.engine.gateway.set_prices(prices)
             target = TargetPortfolio(date=str(payload.get("date") or "portal"), holdings=holdings, prices=prices)
-            reqs = reconcile(target, engine_obj.oms, lot_size=engine_obj.config.risk.lot_size)
-            routed = [oid for oid in (engine_obj.submit(r) for r in reqs) if oid]
-            return _jsonable({"planned": len(reqs), "routed": len(routed), **_live_state(engine_obj)})
+            result = runtime.submit_target(target, route=True)
+            return _jsonable({"planned": result["planned"], "routed": len(result["routed"]), **_live_state(runtime)})
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
     @app.post("/api/live/paper/halt")
     def live_paper_halt(payload: dict[str, Any]) -> dict[str, Any]:
         try:
-            engine_obj = _require_paper()
-            engine_obj.halt(str(payload.get("reason") or "portal kill-switch"))
-            return _jsonable(_live_state(engine_obj))
+            runtime = _require_paper()
+            runtime.engine.halt(str(payload.get("reason") or "portal kill-switch"))
+            runtime.write_state()
+            return _jsonable(_live_state(runtime))
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
     @app.post("/api/live/paper/resume")
     def live_paper_resume() -> dict[str, Any]:
         try:
-            engine_obj = _require_paper()
-            engine_obj.resume()
-            return _jsonable(_live_state(engine_obj))
+            runtime = _require_paper()
+            runtime.engine.resume()
+            runtime.write_state()
+            return _jsonable(_live_state(runtime))
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
     @app.post("/api/live/paper/reset")
     def live_paper_reset() -> dict[str, Any]:
-        app.state.live_engine = None
+        _replace_runtime(None)
         return _jsonable({"running": False})
 
     @app.get("/branding/logo.svg")

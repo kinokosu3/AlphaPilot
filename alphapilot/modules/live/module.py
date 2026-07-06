@@ -1,13 +1,15 @@
 """CLI module for the live-trading subsystem.
 
-Thin surface for now (status / modes) — the guarded actions (connect, submit
-target, kill-switch) run inside the long-lived ``LiveEngine`` process and will be
-exposed here + on the portal in a later phase. Paper/dry-run is the default mode.
+The commands are a thin control plane over ``LiveRuntime``: preflight, one-shot
+connect/run, explicit order/target routing, and long-lived daemon controls.
+Paper/dry-run is the default mode.
 """
 
 from __future__ import annotations
 
 import json
+import socket
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from alphapilot.kernel.base import BaseModule
@@ -27,17 +29,28 @@ class LiveModule(BaseModule):
     def _system(self):
         return self.context.system("live")
 
+    def _runtime(
+        self,
+        *,
+        mode: str | None = None,
+        broker: str | None = None,
+        ledger_dir: str | None = None,
+        state_dir: str | None = None,
+    ):
+        return self._system().create_runtime(
+            mode=mode,
+            broker=broker,
+            ledger_dir=ledger_dir,
+            state_dir=state_dir,
+        )
+
     def live_status(self) -> dict[str, Any]:
         """Show the resolved live config (mode, broker, risk limits) — no secrets."""
-        snapshot = self._system().snapshot()
-        print(json.dumps(snapshot, ensure_ascii=False, indent=2))
-        return snapshot
+        return self._system().snapshot()
 
     def live_modes(self) -> list[str]:
         """List the run-mode ladder (dry_run -> paper -> live)."""
-        modes = self._system().modes()
-        print(json.dumps(modes, ensure_ascii=False))
-        return modes
+        return self._system().modes()
 
     def live_brokers(self) -> list[dict[str, Any]]:
         """List registered brokers: gateway, env fields for credentials, availability."""
@@ -59,14 +72,546 @@ class LiveModule(BaseModule):
                     "gateway_importable": gateway_importable(spec.name),
                     "env_fields": [prefix + f.env_suffix for f in spec.setting_fields],
                     "missing_env": missing_setting_fields(spec.name),
+                    "capabilities": {
+                        "asset_classes": list(spec.capabilities.asset_classes),
+                        "supports_tick": spec.capabilities.supports_tick,
+                        "supports_contract_query": spec.capabilities.supports_contract_query,
+                        "supports_account_query": spec.capabilities.supports_account_query,
+                        "supports_position_query": spec.capabilities.supports_position_query,
+                        "supports_cancel": spec.capabilities.supports_cancel,
+                        "supports_margin": spec.capabilities.supports_margin,
+                        "supports_history": spec.capabilities.supports_history,
+                    },
                 }
             )
-        print(json.dumps(rows, ensure_ascii=False, indent=2))
         return rows
+
+    def live_state(
+        self,
+        mode: str | None = None,
+        broker: str | None = None,
+        state_dir: str | None = None,
+    ) -> dict[str, Any]:
+        """Read the last persisted live runtime state without connecting."""
+        runtime = self._runtime(mode=mode, broker=broker, state_dir=state_dir)
+        path = runtime.state_path
+        if not path.exists():
+            return {"exists": False, "state_path": str(path), "config": runtime.snapshot()["config"]}
+        return {"exists": True, "state_path": str(path), "state": json.loads(path.read_text(encoding="utf-8"))}
+
+    def live_connect(
+        self,
+        mode: str | None = None,
+        broker: str | None = None,
+        cash: float | None = None,
+        timeout: float = 20.0,
+        ledger_dir: str | None = None,
+        state_dir: str | None = None,
+    ) -> dict[str, Any]:
+        """Connect once, wait for readiness, persist state, then close.
+
+        Use this as the AlphaPilot-native smoke path. In LIVE mode credentials
+        are still read only from environment variables.
+        """
+        runtime = self._runtime(mode=mode, broker=broker, ledger_dir=ledger_dir, state_dir=state_dir)
+        try:
+            state = runtime.connect(paper_cash=cash)
+            ready = runtime.wait_ready(timeout=timeout)
+            return {"ready": ready, "state": state if not ready else runtime.snapshot()}
+        finally:
+            runtime.close()
+
+    def live_preflight(
+        self,
+        broker: str | None = None,
+        network: bool = False,
+        timeout: float = 3.0,
+    ) -> dict[str, Any]:
+        """Check broker registry, env fields and optional TCP endpoint reachability."""
+        from alphapilot.systems.live.brokers.registry import (
+            build_connect_setting,
+            gateway_importable,
+            get_broker,
+            missing_setting_fields,
+        )
+
+        name = broker or self._system().config.broker
+        if name == "paper":
+            return {
+                "broker": "paper",
+                "description": "In-process PaperBroker sandbox",
+                "gateway": "alphapilot.systems.live.brokers.paper:PaperBroker",
+                "gateway_importable": True,
+                "missing_env": [],
+                "network_checked": False,
+                "endpoints": [],
+                "ok": True,
+            }
+        spec = get_broker(name)
+        missing = missing_setting_fields(name)
+        result: dict[str, Any] = {
+            "broker": name,
+            "description": spec.description,
+            "gateway": spec.gateway_path,
+            "gateway_importable": gateway_importable(name),
+            "missing_env": missing,
+            "network_checked": False,
+            "endpoints": [],
+        }
+        if network and not missing:
+            setting = build_connect_setting(name)
+            endpoints = []
+            for label, host_key, port_key in (
+                ("quote", "行情地址", "行情端口"),
+                ("trade", "交易地址", "交易端口"),
+            ):
+                host = setting.get(host_key)
+                port = setting.get(port_key)
+                if host and port:
+                    ok, detail = _tcp_probe(str(host), int(port), timeout)
+                    endpoints.append({"name": label, "host": host, "port": int(port), "ok": ok, "detail": detail})
+            result["network_checked"] = True
+            result["endpoints"] = endpoints
+        result["ok"] = result["gateway_importable"] and not result["missing_env"] and all(
+            item.get("ok", True) for item in result["endpoints"]
+        )
+        return result
+
+    def live_run(
+        self,
+        mode: str | None = None,
+        broker: str | None = None,
+        symbols: str | list[str] | None = None,
+        cash: float | None = None,
+        interval: float = 2.0,
+        duration: float | None = None,
+        timeout: float = 20.0,
+        ledger_dir: str | None = None,
+        state_dir: str | None = None,
+    ) -> dict[str, Any]:
+        """Run a connected live runtime loop and keep writing state snapshots.
+
+        Omit ``duration`` for a foreground daemon. This command does not route
+        orders by itself; strategy/target routing is done by explicit commands.
+        """
+        runtime = self._runtime(mode=mode, broker=broker, ledger_dir=ledger_dir, state_dir=state_dir)
+        try:
+            runtime.connect(paper_cash=cash)
+            ready = runtime.wait_ready(timeout=timeout)
+            loop = runtime.run_loop(
+                symbols=_split_symbols(symbols),
+                interval=interval,
+                duration=duration,
+            )
+            return {"ready": ready, **loop}
+        finally:
+            runtime.close()
+
+    def live_daemon_status(
+        self,
+        mode: str | None = None,
+        broker: str | None = None,
+        state_dir: str | None = None,
+    ) -> dict[str, Any]:
+        """Show the long-lived live runtime daemon status and latest state."""
+        from alphapilot.systems.live.daemon import daemon_status
+        from alphapilot.systems.live.runtime import clone_config
+
+        cfg = clone_config(self._system().config, mode=mode, broker=broker, state_dir=state_dir)
+        return daemon_status(cfg, state_dir=state_dir)
+
+    def live_daemon_start(
+        self,
+        mode: str | None = None,
+        broker: str | None = None,
+        symbols: str | list[str] | None = None,
+        cash: float | None = None,
+        interval: float = 2.0,
+        timeout: float = 20.0,
+        ledger_dir: str | None = None,
+        state_dir: str | None = None,
+        duration: float | None = None,
+        timing_strategy: str | None = None,
+        timing_params: str | dict | None = None,
+        timing_freq: str = "day",
+        bar_seconds: int = 60,
+        min_bars: int = 30,
+        window: int = 250,
+    ) -> dict[str, Any]:
+        """Start a detached live runtime daemon.
+
+        The daemon connects and maintains OMS/state heartbeats. It does not route
+        orders by itself unless ``timing_strategy`` is explicitly enabled; even
+        then every order still goes through LiveEngine.submit and RiskGate.
+        ``duration`` is mainly for smoke tests; omit it for a persistent process.
+        """
+        from alphapilot.systems.live.daemon import start_daemon
+
+        return start_daemon(
+            self._system().config,
+            mode=mode,
+            broker=broker,
+            symbols=_split_symbols(symbols),
+            cash=cash,
+            interval=interval,
+            timeout=timeout,
+            ledger_dir=ledger_dir,
+            state_dir=state_dir,
+            duration=duration,
+            timing_strategy=timing_strategy,
+            timing_params=_parse_mapping(timing_params),
+            timing_freq=timing_freq,
+            bar_seconds=int(bar_seconds),
+            min_bars=int(min_bars),
+            window=int(window),
+        )
+
+    def live_daemon_stop(
+        self,
+        state_dir: str | None = None,
+        timeout: float = 5.0,
+    ) -> dict[str, Any]:
+        """Stop the detached live runtime daemon if one is running."""
+        from alphapilot.systems.live.daemon import stop_daemon
+
+        return stop_daemon(self._system().config, state_dir=state_dir, timeout=timeout)
+
+    def live_daemon_halt(
+        self,
+        reason: str = "manual",
+        state_dir: str | None = None,
+        wait: bool = False,
+        timeout: float = 5.0,
+    ) -> dict[str, Any]:
+        """Ask the running daemon to engage the in-process kill-switch."""
+        from alphapilot.systems.live.daemon import send_daemon_command
+
+        return send_daemon_command(
+            self._system().config,
+            "halt",
+            payload={"reason": reason},
+            state_dir=state_dir,
+            wait=wait,
+            timeout=timeout,
+        )
+
+    def live_daemon_resume(
+        self,
+        state_dir: str | None = None,
+        wait: bool = False,
+        timeout: float = 5.0,
+    ) -> dict[str, Any]:
+        """Ask the running daemon to resume after a kill-switch halt."""
+        from alphapilot.systems.live.daemon import send_daemon_command
+
+        return send_daemon_command(
+            self._system().config,
+            "resume",
+            state_dir=state_dir,
+            wait=wait,
+            timeout=timeout,
+        )
+
+    def live_daemon_refresh(
+        self,
+        state_dir: str | None = None,
+        wait: bool = False,
+        timeout: float = 5.0,
+    ) -> dict[str, Any]:
+        """Ask the running daemon to re-query broker account and positions."""
+        from alphapilot.systems.live.daemon import send_daemon_command
+
+        return send_daemon_command(
+            self._system().config,
+            "refresh",
+            state_dir=state_dir,
+            wait=wait,
+            timeout=timeout,
+        )
+
+    def live_daemon_order(
+        self,
+        symbol: str,
+        side: str,
+        volume: float,
+        price: float = 0.0,
+        order_type: str = "limit",
+        state_dir: str | None = None,
+        wait: bool = False,
+        timeout: float = 5.0,
+        confirm_live: bool = False,
+        reference: str = "daemon_manual",
+    ) -> dict[str, Any]:
+        """Ask the running daemon to submit one manual/debug order."""
+        from alphapilot.systems.live.daemon import send_daemon_command
+
+        _require_daemon_live_confirmation(self.live_daemon_status(state_dir=state_dir), confirm_live=confirm_live)
+        return send_daemon_command(
+            self._system().config,
+            "order",
+            payload={
+                "symbol": symbol,
+                "side": side,
+                "volume": float(volume),
+                "price": float(price),
+                "order_type": order_type,
+                "reference": reference,
+                "confirm_live": confirm_live,
+            },
+            state_dir=state_dir,
+            wait=wait,
+            timeout=timeout,
+        )
+
+    def live_daemon_submit_target(
+        self,
+        target_path: str | None = None,
+        holdings: str | dict | None = None,
+        prices: str | dict | None = None,
+        date: str | None = None,
+        source: str | None = None,
+        session: str | None = None,
+        strategy_name: str | None = None,
+        factor_path: str | None = None,
+        model_pickle_path: str | None = None,
+        yaml_params: str | None = None,
+        refresh_data: bool = False,
+        route: bool = False,
+        state_dir: str | None = None,
+        wait: bool = False,
+        timeout: float = 5.0,
+        confirm_live: bool = False,
+    ) -> dict[str, Any]:
+        """Ask the running daemon to plan or route a target portfolio."""
+        from alphapilot.systems.live.daemon import send_daemon_command
+        from alphapilot.systems.live.runtime import target_to_dict
+
+        if route:
+            _require_daemon_live_confirmation(self.live_daemon_status(state_dir=state_dir), confirm_live=confirm_live)
+        target = self._load_target(
+            target_path=target_path,
+            holdings=holdings,
+            prices=prices,
+            date=date,
+            source=source,
+            session=session,
+            strategy_name=strategy_name,
+            factor_path=factor_path,
+            model_pickle_path=model_pickle_path,
+            yaml_params=yaml_params,
+            refresh_data=refresh_data,
+        )
+        payload = {
+            **target_to_dict(target),
+            "route": bool(route),
+            "confirm_live": bool(confirm_live),
+        }
+        return send_daemon_command(
+            self._system().config,
+            "target",
+            payload=payload,
+            state_dir=state_dir,
+            wait=wait,
+            timeout=timeout,
+        )
+
+    def live_order(
+        self,
+        symbol: str,
+        side: str,
+        volume: float,
+        price: float = 0.0,
+        order_type: str = "limit",
+        mode: str | None = None,
+        broker: str | None = None,
+        cash: float | None = None,
+        timeout: float = 20.0,
+        confirm_live: bool = False,
+        reference: str = "manual",
+    ) -> dict[str, Any]:
+        """Submit one manual/debug order through LiveEngine and RiskGate.
+
+        Defaults to the configured mode (normally dry_run). LIVE mode requires
+        ``confirm_live=True``.
+        """
+        from alphapilot.systems.live.runtime import require_live_confirmation
+
+        runtime = self._runtime(mode=mode, broker=broker)
+        require_live_confirmation(runtime.config, confirm_live=confirm_live)
+        try:
+            runtime.connect(paper_cash=cash)
+            runtime.wait_ready(timeout=timeout)
+            return runtime.submit_order(
+                symbol,
+                side=side,
+                volume=volume,
+                price=price,
+                order_type=order_type,
+                reference=reference,
+            )
+        finally:
+            runtime.close()
+
+    def live_submit_target(
+        self,
+        target_path: str | None = None,
+        holdings: str | dict | None = None,
+        prices: str | dict | None = None,
+        date: str | None = None,
+        source: str | None = None,
+        session: str | None = None,
+        strategy_name: str | None = None,
+        factor_path: str | None = None,
+        model_pickle_path: str | None = None,
+        yaml_params: str | None = None,
+        refresh_data: bool = False,
+        route: bool = False,
+        mode: str | None = None,
+        broker: str | None = None,
+        cash: float | None = None,
+        timeout: float = 20.0,
+        confirm_live: bool = False,
+    ) -> dict[str, Any]:
+        """Plan or route a target portfolio through the live executor.
+
+        Target source precedence: ``target_path`` JSON > inline ``holdings`` >
+        ``daily_signals`` generated from ``session``/``strategy_name``. By default
+        this only plans orders; pass ``route=True`` to submit them.
+        """
+        from alphapilot.systems.live.runtime import require_live_confirmation
+
+        runtime = self._runtime(mode=mode, broker=broker)
+        if route:
+            require_live_confirmation(runtime.config, confirm_live=confirm_live)
+        target = self._load_target(
+            target_path=target_path,
+            holdings=holdings,
+            prices=prices,
+            date=date,
+            source=source,
+            session=session,
+            strategy_name=strategy_name,
+            factor_path=factor_path,
+            model_pickle_path=model_pickle_path,
+            yaml_params=yaml_params,
+            refresh_data=refresh_data,
+        )
+        try:
+            runtime.connect(paper_cash=cash)
+            runtime.wait_ready(timeout=timeout)
+            return runtime.submit_target(target, route=route)
+        finally:
+            runtime.close()
+
+    def _load_target(
+        self,
+        *,
+        target_path: str | None,
+        holdings: str | dict | None,
+        prices: str | dict | None,
+        date: str | None,
+        source: str | None,
+        session: str | None,
+        strategy_name: str | None,
+        factor_path: str | None,
+        model_pickle_path: str | None,
+        yaml_params: str | None,
+        refresh_data: bool,
+    ):
+        from alphapilot.systems.live.targets import TargetPortfolio
+
+        if target_path:
+            data = json.loads(Path(target_path).expanduser().read_text(encoding="utf-8"))
+            return TargetPortfolio(
+                date=str(data.get("date") or date or "target"),
+                holdings={str(k): float(v) for k, v in (data.get("holdings") or {}).items()},
+                prices={str(k): float(v) for k, v in (data.get("prices") or {}).items()},
+                cash=data.get("cash"),
+                source=str(data.get("source") or source or "target_file"),
+                market=data.get("market"),
+            )
+        if holdings is not None:
+            return TargetPortfolio(
+                date=str(date or "inline"),
+                holdings={str(k): float(v) for k, v in _parse_mapping(holdings).items()},
+                prices={str(k): float(v) for k, v in _parse_mapping(prices).items()},
+                source=source or "inline",
+            )
+
+        from alphapilot.modules.daily_trade.module import _parse_yaml_params
+        from alphapilot.systems.backtest.live import DailySignalRequest, generate_daily_signal
+        from alphapilot.systems.backtest.live.service import to_target_portfolio
+
+        if not (session or strategy_name or factor_path or model_pickle_path):
+            raise ValueError("provide target_path, holdings, session, strategy_name, factor_path or model_pickle_path")
+        result = generate_daily_signal(
+            self.context,
+            DailySignalRequest(
+                strategy_name=strategy_name,
+                session=session,
+                factor_path=factor_path,
+                model_pickle_path=model_pickle_path,
+                yaml_params=_parse_yaml_params(yaml_params),
+                date=date,
+                refresh_data=refresh_data,
+                use_local=self.context.config.backtest.use_local,
+            ),
+        )
+        return to_target_portfolio(result, source=source)
 
     def commands(self) -> dict[str, Callable[..., Any]]:
         return {
             "live_status": self.live_status,
             "live_modes": self.live_modes,
             "live_brokers": self.live_brokers,
+            "live_state": self.live_state,
+            "live_connect": self.live_connect,
+            "live_preflight": self.live_preflight,
+            "live_run": self.live_run,
+            "live_daemon_status": self.live_daemon_status,
+            "live_daemon_start": self.live_daemon_start,
+            "live_daemon_stop": self.live_daemon_stop,
+            "live_daemon_halt": self.live_daemon_halt,
+            "live_daemon_resume": self.live_daemon_resume,
+            "live_daemon_refresh": self.live_daemon_refresh,
+            "live_daemon_order": self.live_daemon_order,
+            "live_daemon_submit_target": self.live_daemon_submit_target,
+            "live_order": self.live_order,
+            "live_submit_target": self.live_submit_target,
         }
+
+
+def _parse_mapping(raw: str | dict | None) -> dict[str, Any]:
+    if raw is None:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    text = str(raw).strip()
+    if not text:
+        return {}
+    path = Path(text).expanduser()
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(text)
+
+
+def _split_symbols(raw: str | list[str] | None) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [str(item).strip() for item in raw if str(item).strip()]
+    return [part.strip() for part in str(raw).split(",") if part.strip()]
+
+
+def _tcp_probe(host: str, port: int, timeout: float) -> tuple[bool, str]:
+    try:
+        with socket.create_connection((host, int(port)), timeout=float(timeout)):
+            return True, "reachable"
+    except OSError as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def _require_daemon_live_confirmation(status: dict[str, Any], *, confirm_live: bool) -> None:
+    mode = status.get("mode") or (status.get("state") or {}).get("config", {}).get("mode")
+    if mode == "live" and not confirm_live:
+        raise ValueError("LIVE daemon route requires confirm_live=True")

@@ -3499,16 +3499,71 @@ type LiveConfigSnapshot = {
 type LivePosition = { code: string; exchange: string; volume: number; available: number; yd_volume: number; frozen: number; price: number };
 type LiveOrder = { order_id: string; code: string; side: string; price: number; volume: number; traded: number; status: string; active: boolean };
 type LiveTrade = { trade_id: string; code: string; side: string; price: number; volume: number };
-type LiveEngineSnapshot = { mode: string; halted: boolean; connection: string; session: string; buying_power: number; active_orders: number; positions: number };
+type LiveEngineSnapshot = {
+  mode: string;
+  halted: boolean;
+  connection: string;
+  session: string;
+  buying_power: number;
+  active_orders: number;
+  positions: number;
+  contracts?: number;
+  ticks?: number;
+};
 type LiveState = {
   snapshot: LiveEngineSnapshot;
-  account: { buying_power: number; balance: number };
+  account: { buying_power: number; balance: number; available?: number };
   positions: LivePosition[];
   orders: LiveOrder[];
   trades: LiveTrade[];
   ledger: Array<{ ts: string; kind: string }>;
+  runtime?: { mode?: string; broker?: string; state_dir?: string; ledger_dir?: string };
 };
 type LiveStatus = { config: LiveConfigSnapshot; modes: string[]; running: boolean; state?: LiveState };
+type LiveRuntimeSnapshot = {
+  config: { mode: string; broker: string; ledger_dir: string; state_dir: string };
+  engine: LiveEngineSnapshot;
+  account: { balance: number; available: number } | null;
+  positions: LivePosition[];
+  orders: LiveOrder[];
+  trades: LiveTrade[];
+  ledger_tail?: Array<{ ts: string; kind: string }>;
+};
+type LiveRuntimeState = {
+  exists: boolean;
+  state_path: string;
+  state?: LiveRuntimeSnapshot;
+  config?: LiveRuntimeSnapshot["config"];
+};
+type LivePreflight = {
+  broker: string;
+  description?: string;
+  gateway_importable: boolean;
+  missing_env: string[];
+  network_checked: boolean;
+  endpoints: Array<{ name: string; host: string; port: number; ok: boolean; detail: string }>;
+  ok: boolean;
+};
+type LiveConnectResult = { ready: boolean; state: LiveRuntimeSnapshot };
+type LiveDaemonStatus = {
+  exists: boolean;
+  path: string;
+  alive?: boolean;
+  starting?: boolean;
+  running: boolean;
+  status?: string;
+  pid?: number;
+  ready?: boolean;
+  mode?: string;
+  broker?: string;
+  commands_processed?: number;
+  runner?: { enabled?: boolean; strategy?: string; freq?: string };
+  last_command?: { id?: string; action?: string; ok?: boolean; error?: string };
+  state_path?: string;
+  log_path?: string;
+  state?: LiveRuntimeSnapshot;
+};
+type LiveDaemonCommandResult = { accepted: boolean; command?: { id: string; action: string }; daemon?: LiveDaemonStatus; reason?: string };
 
 export function LivePage() {
   const { t } = useI18n();
@@ -3516,6 +3571,22 @@ export function LivePage() {
   const fmtMoney = (n: number) => (Number.isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: 2 }) : "—");
   const status = useAsync(() => api.get<LiveStatus>("/api/live/status"), []);
   const { run } = useAction();
+  const [runtimeMode, setRuntimeMode] = useState("live");
+  const [runtimeBroker, setRuntimeBroker] = useState("xtp");
+  const selectedRuntimeBroker = runtimeMode === "live" ? runtimeBroker.trim() : "paper";
+  const runtimeState = useAsync(
+    () => api.get<LiveRuntimeState>(`/api/live/runtime/state${qs({ mode: runtimeMode, broker: selectedRuntimeBroker })}`),
+    [runtimeMode, selectedRuntimeBroker],
+  );
+  const daemonStatus = useAsync(
+    () => api.get<LiveDaemonStatus>(`/api/live/daemon/status${qs({ mode: runtimeMode, broker: selectedRuntimeBroker })}`),
+    [runtimeMode, selectedRuntimeBroker],
+  );
+  const [preflight, setPreflight] = useState<LivePreflight | null>(null);
+  const [daemonSymbols, setDaemonSymbols] = useState("600000");
+  const [daemonTimingStrategy, setDaemonTimingStrategy] = useState("");
+  const [daemonTimingFreq, setDaemonTimingFreq] = useState("day");
+  const daemonTimingParams = useJsonInput("{}");
   const [cash, setCash] = useState("1000000");
   const [orderCode, setOrderCode] = useState("");
   const [orderSide, setOrderSide] = useState("buy");
@@ -3528,7 +3599,73 @@ export function LivePage() {
   const cfg = status.data?.config;
   const running = Boolean(status.data?.running);
   const state = status.data?.state;
+  const runtimeSnapshot = runtimeState.data?.state;
+  const runtimeEngine = runtimeSnapshot?.engine;
+  const daemon = daemonStatus.data;
+  const daemonEngine = daemon?.state?.engine;
 
+  const checkRuntime = () =>
+    run(async () => {
+      const result = await api.post<LivePreflight>("/api/live/runtime/preflight", { broker: runtimeBroker.trim(), network: false });
+      setPreflight(result);
+    }, t("livePreflightDone"));
+  const connectRuntime = async () => {
+    if (runtimeMode === "live" && !(await confirm({ message: t("liveConnectConfirm"), danger: true }))) return;
+    await run(async () => {
+      await api.post<LiveConnectResult>("/api/live/runtime/connect", {
+        mode: runtimeMode,
+        broker: selectedRuntimeBroker || undefined,
+        timeout: 30,
+      });
+      await runtimeState.refresh();
+      await daemonStatus.refresh();
+    }, t("liveRuntimeConnected"));
+  };
+  const startDaemon = async () => {
+    if (runtimeMode === "live" && !(await confirm({ message: t("liveDaemonStartConfirm"), danger: true }))) return;
+    await run(async () => {
+      const timingParams = daemonTimingStrategy.trim() ? daemonTimingParams.parse() : undefined;
+      await api.post("/api/live/daemon/start", {
+        mode: runtimeMode,
+        broker: selectedRuntimeBroker || undefined,
+        symbols: daemonSymbols,
+        interval: 2,
+        timeout: 30,
+        timing_strategy: daemonTimingStrategy.trim() || undefined,
+        timing_params: timingParams,
+        timing_freq: daemonTimingFreq,
+      });
+      await daemonStatus.refresh();
+    }, t("liveDaemonStarted"));
+  };
+  const stopDaemon = async () => {
+    if (!(await confirm({ message: t("liveDaemonStopConfirm"), danger: true }))) return;
+    await run(async () => {
+      await api.post("/api/live/daemon/stop", { timeout: 5 });
+      await daemonStatus.refresh();
+      await runtimeState.refresh();
+    }, t("liveDaemonStopped"));
+  };
+  const haltDaemon = async () => {
+    if (!(await confirm({ message: t("liveHaltConfirm"), danger: true }))) return;
+    await run(async () => {
+      await api.post<LiveDaemonCommandResult>("/api/live/daemon/halt", { reason: "portal", wait: true, timeout: 5 });
+      await daemonStatus.refresh();
+      await runtimeState.refresh();
+    }, t("liveHaltedDone"));
+  };
+  const resumeDaemon = () =>
+    run(async () => {
+      await api.post<LiveDaemonCommandResult>("/api/live/daemon/resume", { wait: true, timeout: 5 });
+      await daemonStatus.refresh();
+      await runtimeState.refresh();
+    }, t("liveResumedDone"));
+  const refreshDaemon = () =>
+    run(async () => {
+      await api.post<LiveDaemonCommandResult>("/api/live/daemon/refresh", { wait: true, timeout: 5 });
+      await daemonStatus.refresh();
+      await runtimeState.refresh();
+    }, t("liveDaemonRefreshed"));
   const connect = () =>
     run(async () => {
       await api.post("/api/live/paper/connect", { cash: Number(cash) || undefined });
@@ -3584,7 +3721,7 @@ export function LivePage() {
   return (
     <div className="stack">
       <PageTitle title={t("navLive")} subtitle={t("liveIntro")} />
-      <Alert tone="info">{t("livePaperNote")}</Alert>
+      <Alert tone="info">{t("liveRuntimeNote")}</Alert>
 
       <section className="panel">
         <div className="panel-head">
@@ -3606,6 +3743,114 @@ export function LivePage() {
           <Spinner />
         )}
       </section>
+
+      <section className="panel">
+        <div className="panel-head">
+          <div className="panel-title-inline">
+            <h2>{t("liveRuntime")}</h2>
+            <InfoDot tip={t("liveRuntimeNote")} />
+          </div>
+          <RefreshButton onClick={runtimeState.refresh} />
+        </div>
+        <div className="toolbar live-status-bar">
+          <label className="field">
+            <span>{t("liveMode")}</span>
+            <select value={runtimeMode} onChange={(e) => setRuntimeMode(e.target.value)}>
+              <option value="live">live</option>
+              <option value="paper">paper</option>
+              <option value="dry_run">dry_run</option>
+            </select>
+          </label>
+          <label className="field">
+            <span>{t("liveBroker")}</span>
+            <input value={runtimeMode === "live" ? runtimeBroker : "paper"} onChange={(e) => setRuntimeBroker(e.target.value)} disabled={runtimeMode !== "live"} />
+          </label>
+          <div className="row-actions">
+            <AsyncButton onClick={checkRuntime}>{t("livePreflight")}</AsyncButton>
+            <AsyncButton className="button ghost" onClick={connectRuntime}>{t("liveRuntimeConnect")}</AsyncButton>
+          </div>
+        </div>
+        {preflight ? (
+          <div className="metric-grid compact">
+            <div className="metric"><span className="metric-label">{t("liveBroker")}</span><strong>{preflight.broker}</strong></div>
+            <div className="metric"><span className="metric-label">{t("status")}</span><StatusPill status={preflight.ok ? "ok" : "blocked"} /></div>
+            <div className="metric"><span className="metric-label">{t("liveGateway")}</span><StatusPill status={preflight.gateway_importable ? "ok" : "missing"} /></div>
+            <div className="metric"><span className="metric-label">{t("liveMissingEnv")}</span><strong>{preflight.missing_env.length}</strong></div>
+            <div className="metric"><span className="metric-label">{t("liveEndpoints")}</span><strong>{preflight.endpoints.filter((e) => e.ok).length}/{preflight.endpoints.length}</strong></div>
+          </div>
+        ) : null}
+        {runtimeState.error ? <Alert tone="error">{runtimeState.error}</Alert> : null}
+        {runtimeState.loading ? (
+          <Spinner />
+        ) : runtimeState.data?.exists && runtimeSnapshot && runtimeEngine ? (
+          <div className="metric-grid compact">
+            <div className="metric"><span className="metric-label">{t("liveModeState")}</span><StatusPill status={runtimeEngine.mode} /></div>
+            <div className="metric"><span className="metric-label">{t("liveConnection")}</span><StatusPill status={runtimeEngine.connection} /></div>
+            <div className="metric"><span className="metric-label">{t("liveBuyingPower")}</span><strong>{fmtMoney(runtimeEngine.buying_power)}</strong></div>
+            <div className="metric"><span className="metric-label">{t("livePositionsCount")}</span><strong>{runtimeEngine.positions}</strong></div>
+            <div className="metric"><span className="metric-label">{t("liveContracts")}</span><strong>{runtimeEngine.contracts ?? 0}</strong></div>
+            <div className="metric"><span className="metric-label">{t("liveActiveOrders")}</span><strong>{runtimeEngine.active_orders}</strong></div>
+            <div className="metric wide"><span className="metric-label">{t("liveStateFile")}</span><strong>{runtimeState.data?.state_path || ""}</strong></div>
+          </div>
+        ) : (
+          <Alert>{t("liveRuntimeNoState")}</Alert>
+        )}
+
+        <h3>{t("liveDaemon")}</h3>
+        {daemonStatus.error ? <Alert tone="error">{daemonStatus.error}</Alert> : null}
+        {daemonStatus.loading ? (
+          <Spinner />
+        ) : (
+          <div className="stack">
+            <div className="toolbar live-status-bar">
+              <label className="field">
+                <span>{t("liveSymbols")}</span>
+                <input value={daemonSymbols} onChange={(e) => setDaemonSymbols(e.target.value)} />
+              </label>
+              <label className="field">
+                <span>{t("liveTimingStrategy")}</span>
+                <input value={daemonTimingStrategy} onChange={(e) => setDaemonTimingStrategy(e.target.value)} placeholder="sma_filter" />
+              </label>
+              <label className="field">
+                <span>{t("liveTimingFreq")}</span>
+                <select value={daemonTimingFreq} onChange={(e) => setDaemonTimingFreq(e.target.value)}>
+                  <option value="day">day</option>
+                  <option value="min">min</option>
+                </select>
+              </label>
+            </div>
+            <div className="field">
+              <span>{t("liveTimingParams")}</span>
+              <textarea rows={3} value={daemonTimingParams.raw} onChange={(e) => daemonTimingParams.setRaw(e.target.value)} spellCheck={false} />
+            </div>
+            <div className="metric-grid compact">
+              <div className="metric"><span className="metric-label">PID</span><strong>{daemon?.pid || "-"}</strong></div>
+              <div className="metric"><span className="metric-label">{t("status")}</span><StatusPill status={daemon?.status || (daemon?.running ? "running" : "stopped")} /></div>
+              <div className="metric"><span className="metric-label">{t("liveConnection")}</span><StatusPill status={daemonEngine?.connection || "-"} /></div>
+              <div className="metric"><span className="metric-label">{t("liveKillState")}</span><StatusPill status={daemonEngine?.halted ? "halted" : "running"} /></div>
+              <div className="metric"><span className="metric-label">{t("livePositionsCount")}</span><strong>{daemonEngine?.positions ?? "-"}</strong></div>
+              <div className="metric"><span className="metric-label">{t("liveContracts")}</span><strong>{daemonEngine?.contracts ?? "-"}</strong></div>
+              <div className="metric"><span className="metric-label">{t("liveCommands")}</span><strong>{daemon?.commands_processed ?? 0}</strong></div>
+              <div className="metric"><span className="metric-label">{t("liveLastCommand")}</span><strong>{daemon?.last_command?.action || "-"}</strong></div>
+              <div className="metric"><span className="metric-label">{t("liveTimingStrategy")}</span><strong>{daemon?.runner?.strategy || "-"}</strong></div>
+            </div>
+            <div className="toolbar live-status-bar">
+              <div className="row-actions">
+                <AsyncButton onClick={startDaemon} disabled={Boolean(daemon?.alive)}>{t("liveDaemonStart")}</AsyncButton>
+                <AsyncButton className="button ghost" onClick={refreshDaemon} disabled={!daemon?.running}>{t("liveDaemonRefresh")}</AsyncButton>
+                {daemonEngine?.halted ? (
+                  <AsyncButton onClick={resumeDaemon} disabled={!daemon?.running}>{t("liveResume")}</AsyncButton>
+                ) : (
+                  <AsyncButton className="button danger" onClick={haltDaemon} disabled={!daemon?.running}>{t("liveHalt")}</AsyncButton>
+                )}
+                <AsyncButton className="button ghost" onClick={stopDaemon} disabled={!daemon?.alive}>{t("liveDaemonStop")}</AsyncButton>
+              </div>
+            </div>
+          </div>
+        )}
+      </section>
+
+      <Alert tone="info">{t("livePaperNote")}</Alert>
 
       <section className="panel">
         <div className="panel-head">

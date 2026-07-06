@@ -81,7 +81,87 @@ python scripts/live_smoke_connect_xtp.py --symbol 600000 --timeout 30 --dump-log
 
 显式加 `--order` 才会下单：1 手、约低于最新价 10% 的限价买单，等回报后撤单。
 
-## 4. 策略接入（择时 → 实盘）
+## 4. AlphaPilot live runtime / CLI
+
+脚本 smoke 只用于连通性验证；正式接入 AlphaPilot 时走 `alphapilot live_*`
+命令，它们复用 `LiveRuntime -> LiveEngine -> RiskGate -> BrokerGateway`，不会绕过
+风控或审计 ledger。
+
+```bash
+# 查看 broker 注册、SDK 可导入性、必填 env；加 --network=True 才做 TCP 端点探测
+alphapilot live_preflight --broker xtp --network=False
+
+# 连接一次、等待账户/合约 ready、写 runtime_state.json 后退出
+ALPHAPILOT_LIVE_MODE=live ALPHAPILOT_LIVE_BROKER=xtp \
+alphapilot live_connect --timeout 30
+
+# 前台运行一个最小 live runtime（不自动下单），周期写 git_ignore_folder/live_state/runtime_state.json
+ALPHAPILOT_LIVE_MODE=live ALPHAPILOT_LIVE_BROKER=xtp \
+alphapilot live_run --symbols 600000,000001 --interval 2
+
+# 后台 daemon：启动 / 查看 / 停止一个长驻 LiveRuntime（不自动下单，可接收显式命令）
+ALPHAPILOT_LIVE_MODE=live ALPHAPILOT_LIVE_BROKER=xtp \
+alphapilot live_daemon_start --symbols 600000,000001 --interval 2
+alphapilot live_daemon_status
+alphapilot live_daemon_halt --reason manual --wait True
+alphapilot live_daemon_resume --wait True
+alphapilot live_daemon_refresh --wait True
+alphapilot live_daemon_order --symbol SH600000 --side buy --volume 100 --price 10 --confirm_live True --wait True
+alphapilot live_daemon_stop
+
+# 显式挂载内置择时策略 runner（留空 timing_strategy 时只维护状态，不跑策略）
+alphapilot live_daemon_start \
+  --mode paper \
+  --symbols 600000 \
+  --timing_strategy sma_filter \
+  --timing_params '{"window": 20, "target_percent": 0.5}' \
+  --timing_freq min
+
+# 只生成目标组合执行计划（默认不路由）
+alphapilot live_submit_target \
+  --holdings '{"SH600000": 1000}' \
+  --prices '{"SH600000": 10.0}' \
+  --mode dry_run
+
+# paper 演练：实际走 LiveEngine.submit，但落到 PaperBroker
+alphapilot live_submit_target \
+  --holdings '{"SH600000": 1000}' \
+  --prices '{"SH600000": 10.0}' \
+  --mode paper --cash 100000 --route True
+
+# 真实路由必须显式确认；目标可来自 target JSON、inline holdings，或 daily-trade session
+ALPHAPILOT_LIVE_MODE=live ALPHAPILOT_LIVE_BROKER=xtp \
+alphapilot live_submit_target --session demo_session --route True --confirm_live True
+
+# 长驻 daemon 内路由目标组合；返回 planned/submitted/unrouted/fully_routed
+alphapilot live_daemon_submit_target \
+  --holdings '{"SH600000": 1000}' \
+  --prices '{"SH600000": 10.0}' \
+  --route True --confirm_live True --wait True
+```
+
+`live_state` 不连接券商，只读取最近一次 runtime 快照。`live_daemon_*` 是 vn.py
+no-UI/daemon 模式在 AlphaPilot 里的对应层：子进程持有 gateway/OMS/session，
+周期写 `runtime_state.json`，Portal 和 CLI 都可以读取它。`live_daemon_halt/resume/refresh/order/submit_target`
+通过 `runtime_commands.jsonl` 发进程内控制命令，由 daemon 心跳消费并回写
+`last_command`，适合做急停、恢复、账户/持仓刷新，以及显式人工/策略目标路由。
+路由结果会报告 `planned/submitted/unrouted/fully_routed`，风控拒单会留在 ledger
+并让 daemon 命令返回 `ok=False` 或 `fully_routed=False`。`live_daemon_start` 只有在显式传
+`--timing_strategy` 时才会挂载 `LiveTimingRunner`；策略产生的委托仍统一走
+`LiveEngine.submit -> RiskGate -> BrokerGateway`。`live_order` 仅用于人工调试，真实
+live 同样需要 `--confirm_live True`。默认 `dry_run` 不会路由任何订单。
+
+Portal 后端也暴露同一套控制面：
+
+- `GET /api/live/runtime/state`：读取最近一次状态，不连接券商；
+- `POST /api/live/runtime/preflight`：检查 broker 注册、SDK、env、可选网络；
+- `POST /api/live/runtime/connect`：一次性连接验证，只登录和查询，不下单；
+- `GET/POST /api/live/daemon/{status,start,stop}`：管理长驻 runtime daemon；
+- `POST /api/live/daemon/{halt,resume,refresh}`：向长驻 daemon 发送进程内控制命令；
+- `POST /api/live/daemon/{order,submit-target}`：显式向长驻 daemon 发送下单/目标组合命令；
+- `/api/live/paper/*`：纸面账户演练，内部同样复用 `LiveRuntime`。
+
+## 5. 策略接入（择时 → 实盘）
 
 链路：tick → `live/bars.py BarAggregator` → `timing/live_adapter.py
 BatchStrategyAdapter`（现有 8 个规则策略零改动包装，信号翻转才发意图）→

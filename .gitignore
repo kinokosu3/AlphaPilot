@@ -6,6 +6,7 @@ public
 release-notes.md
 Working_AlphaPilot.md
 important_data/stock_pools/
+secrets.txt
 
 # Broker SDKs / upstream trading dependencies
 #
@@ -18,14 +19,6 @@ important_data/stock_pools/
 # Large upstream working copies are ignored by default. If you decide to vendor
 # them, remove these rules or add them as proper git submodules/private forks.
 /vnpy/
-# /vnpy_xtp/ is intentionally left visible because Dockerfile.live currently
-# vendors it; remove its nested .git directory before committing as plain source.
-# /vnpy_emt/ is intentionally left visible for the same live-image reason.
-
-# Never commit nested repository metadata from vendored/checkouted dependencies.
-/vnpy/.git/
-/vnpy_emt/.git/
-/vnpy_xtp/.git/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

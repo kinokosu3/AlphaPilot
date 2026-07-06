@@ -65,6 +65,26 @@ _COMMON_FIELDS: tuple[SettingField, ...] = (
 
 
 @dataclass(frozen=True)
+class BrokerCapabilities:
+    """Feature flags exposed to the live runtime/control plane.
+
+    The gateway contract stays small, but real brokers differ in useful ways
+    (market data, contract replay, margin, history). Keeping those differences
+    in registry metadata lets CLI/Portal disable unsupported workflows without
+    leaking SDK-specific conditionals upward.
+    """
+
+    asset_classes: tuple[str, ...] = ("stock", "fund", "bond")
+    supports_tick: bool = True
+    supports_contract_query: bool = True
+    supports_account_query: bool = True
+    supports_position_query: bool = True
+    supports_cancel: bool = True
+    supports_margin: bool = False
+    supports_history: bool = False
+
+
+@dataclass(frozen=True)
 class BrokerSpec:
     """Everything the live system needs to drive one broker."""
 
@@ -73,6 +93,7 @@ class BrokerSpec:
     gateway_name: str              # vn.py gateway_name passed to MainEngine calls
     setting_fields: tuple[SettingField, ...] = field(default=_COMMON_FIELDS)
     description: str = ""
+    capabilities: BrokerCapabilities = field(default_factory=BrokerCapabilities)
 
 
 _BROKERS: dict[str, BrokerSpec] = {}

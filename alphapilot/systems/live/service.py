@@ -80,6 +80,37 @@ class LiveSystem(BaseSystem):
             risk=RiskGate(self.config.risk, enforce_session=False),
         )
 
+    def create_runtime(
+        self,
+        *,
+        mode: str | None = None,
+        broker: str | None = None,
+        ledger_dir: str | None = None,
+        state_dir: str | None = None,
+        now_fn=None,
+        is_trading_day_fn=None,
+    ):
+        """Build a reusable live runtime for CLI / Portal / daemon control.
+
+        This is the AlphaPilot analogue of vn.py's no-UI ``MainEngine`` process:
+        a wired engine plus broker, ready to connect, reconcile and route through
+        the same guarded submit path.
+        """
+        from alphapilot.systems.live.runtime import LiveRuntime, clone_config
+
+        cfg = clone_config(
+            self.config,
+            mode=mode,
+            broker=broker,
+            ledger_dir=ledger_dir,
+            state_dir=state_dir,
+        )
+        return LiveRuntime.create(
+            cfg,
+            now_fn=now_fn,
+            is_trading_day_fn=is_trading_day_fn,
+        )
+
     # ---- introspection (used by CLI / portal) ---------------------------- #
     def modes(self) -> list[str]:
         return [RunMode.DRY_RUN, RunMode.PAPER, RunMode.LIVE]
