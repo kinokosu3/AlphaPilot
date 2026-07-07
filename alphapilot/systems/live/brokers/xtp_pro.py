@@ -172,6 +172,7 @@ class _XtpMdApi(_SdkMdApi):
         self.connect_status = False
         self.login_status = False
         self.gateway.post_log(f"行情服务器连接断开, 原因{reason}", "warning")
+        self.gateway.post_gateway_disconnected("quote", str(reason), halt=False)
         # Re-login on a fresh thread: login blocks for seconds and must not
         # stall either the SDK callback thread or the dispatch thread.
         threading.Thread(target=self.login_server, daemon=True).start()
@@ -222,12 +223,16 @@ class _XtpMdApi(_SdkMdApi):
             self.connect_status = True
             self.login_status = True
             msg = "行情服务器登录成功"
+            level = "info"
+            self.gateway.post_gateway_connected("quote", "login_success")
             self.query_contract()
             self.init()
         else:
             error: dict = self.getApiLastError()
             msg = f"行情服务器登录失败，原因：{error['error_msg']}"
-        self.gateway.post_log(msg)
+            level = "error"
+            self.gateway.post_gateway_disconnected("quote", str(error.get("error_msg") or error), halt=False)
+        self.gateway.post_log(msg, level)
 
     def close(self) -> None:
         if self.connect_status:
@@ -271,6 +276,7 @@ class _XtpTdApi(_SdkTdApi):
         self.connect_status = False
         self.login_status = False
         self.gateway.post_log(f"交易服务器连接断开, 原因{reason}", "warning")
+        self.gateway.post_gateway_disconnected("trade", str(reason), halt=True)
         threading.Thread(target=self.login_server, daemon=True).start()
 
     def onError(self, error: dict) -> None:
@@ -287,6 +293,44 @@ class _XtpTdApi(_SdkTdApi):
     def onCancelOrderError(self, data: dict, error: dict, session: int) -> None:
         if error and error.get("error_id"):
             self.gateway.post_error("撤单失败", error)
+
+    def onQueryOrderEx(self, data: dict, error: dict, request: int, last: bool, session: int) -> None:
+        if error and error.get("error_id"):
+            self.gateway.post_error("委托查询失败", error)
+        if data:
+            self.gateway.post(self.gateway._handle_order_event, data)
+
+    def onQueryOrderByPageEx(
+        self,
+        data: dict,
+        req_count: int,
+        order_sequence: int,
+        query_reference: int,
+        request: int,
+        last: bool,
+        session: int,
+    ) -> None:
+        if data:
+            self.gateway.post(self.gateway._handle_order_event, data)
+
+    def onQueryTrade(self, data: dict, error: dict, request: int, last: bool, session: int) -> None:
+        if error and error.get("error_id"):
+            self.gateway.post_error("成交查询失败", error)
+        if data:
+            self.gateway.post(self.gateway._handle_trade_snapshot, data)
+
+    def onQueryTradeByPage(
+        self,
+        data: dict,
+        req_count: int,
+        trade_sequence: int,
+        query_reference: int,
+        request: int,
+        last: bool,
+        session: int,
+    ) -> None:
+        if data:
+            self.gateway.post(self.gateway._handle_trade_snapshot, data)
 
     def onQueryPosition(self, data: dict, error: dict, request: int, last: bool, session: int) -> None:
         self.gateway.post(self.gateway._handle_position, data)
@@ -330,11 +374,15 @@ class _XtpTdApi(_SdkTdApi):
             self.connect_status = True
             self.login_status = True
             msg = f"交易服务器登录成功, 会话编号：{self.session_id}"
+            level = "info"
+            self.gateway.post_gateway_connected("trade", str(self.session_id))
             self.init()
         else:
             error: dict = self.getApiLastError()
             msg = f"交易服务器登录失败，原因：{error['error_msg']}"
-        self.gateway.post_log(msg)
+            level = "error"
+            self.gateway.post_gateway_disconnected("trade", str(error.get("error_msg") or error), halt=True)
+        self.gateway.post_log(msg, level)
 
     def close(self) -> None:
         if self.connect_status:
@@ -399,6 +447,48 @@ class _XtpTdApi(_SdkTdApi):
             return
         self.reqid += 1
         self.queryPosition("", self.session_id, self.reqid)
+
+    def query_orders(self) -> bool:
+        if not self.connect_status:
+            return False
+
+        req = {"ticker": "", "begin_time": 0, "end_time": 0}
+        for name in ("queryOrders", "queryOrdersEx"):
+            fn = getattr(self, name, None)
+            if fn is None:
+                continue
+            self.reqid += 1
+            n = fn(req, self.session_id, self.reqid)
+            if n:
+                self.gateway.post_error("委托查询请求失败", self.getApiLastError())
+                return False
+            return True
+
+        fn = getattr(self, "queryUnfinishedOrders", None)
+        if fn is not None:
+            self.reqid += 1
+            n = fn(self.session_id, self.reqid)
+            if n:
+                self.gateway.post_error("未完成委托查询请求失败", self.getApiLastError())
+                return False
+            return True
+
+        self.gateway.post_log("委托查询不支持当前 XTP 绑定", "warning")
+        return False
+
+    def query_trades(self) -> bool:
+        if not self.connect_status:
+            return False
+        fn = getattr(self, "queryTrades", None)
+        if fn is None:
+            self.gateway.post_log("成交查询不支持当前 XTP 绑定", "warning")
+            return False
+        self.reqid += 1
+        n = fn({"ticker": "", "begin_time": 0, "end_time": 0}, self.session_id, self.reqid)
+        if n:
+            self.gateway.post_error("成交查询请求失败", self.getApiLastError())
+            return False
+        return True
 
 
 # ---- the gateway ------------------------------------------------------------ #
@@ -472,6 +562,12 @@ class XtpProGateway(AShareVendorGateway):
 
     def query_position(self) -> None:
         self.td_api.query_position()
+
+    def query_orders(self) -> bool:
+        return self.td_api.query_orders()
+
+    def query_trades(self) -> bool:
+        return self.td_api.query_trades()
 
     def subscribe(self, codes: list[str]) -> None:
         for raw in codes:

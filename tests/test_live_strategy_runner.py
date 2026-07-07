@@ -188,6 +188,33 @@ def test_min_mode_flushes_last_bar_at_lunch(tmp_path: Path) -> None:
     assert engine.oms.get_position(KEY) is not None
 
 
+def test_runner_pause_resume_stop_lifecycle(tmp_path: Path) -> None:
+    clock = SimulatedClock(datetime(2026, 7, 6, 9, 31))
+    engine = make_engine(tmp_path, clock)
+    adapter = BatchStrategyAdapter(MomentumToy(), min_bars=2)
+    runner = LiveTimingRunner(engine, adapter, ["600000"], freq="min", bar_seconds=60)
+    runner.start()
+    assert runner.status()["active"] is True
+
+    paused = runner.pause()
+    assert paused["paused"] is True
+    push_tick(engine, datetime(2026, 7, 6, 9, 31, 10), 10.0, 1_000)
+    push_tick(engine, datetime(2026, 7, 6, 9, 32, 10), 10.2, 2_000)
+    push_tick(engine, datetime(2026, 7, 6, 9, 33, 10), 10.4, 3_000)
+    assert engine.oms.get_position(KEY) is None
+
+    resumed = runner.resume()
+    assert resumed["active"] is True
+    push_tick(engine, datetime(2026, 7, 6, 9, 34, 10), 10.0, 4_000)
+    push_tick(engine, datetime(2026, 7, 6, 9, 35, 10), 10.2, 5_000)
+    push_tick(engine, datetime(2026, 7, 6, 9, 36, 10), 10.4, 6_000)
+    assert engine.oms.get_position(KEY) is not None
+
+    stopped = runner.stop()
+    assert stopped["stopped"] is True
+    assert runner.step()["session"] is None
+
+
 def test_runner_rejects_unknown_freq(tmp_path: Path) -> None:
     clock = SimulatedClock(datetime(2026, 7, 6, 9, 31))
     engine = make_engine(tmp_path, clock)

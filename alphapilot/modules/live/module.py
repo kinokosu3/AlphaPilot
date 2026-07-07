@@ -78,6 +78,8 @@ class LiveModule(BaseModule):
                         "supports_contract_query": spec.capabilities.supports_contract_query,
                         "supports_account_query": spec.capabilities.supports_account_query,
                         "supports_position_query": spec.capabilities.supports_position_query,
+                        "supports_order_query": spec.capabilities.supports_order_query,
+                        "supports_trade_query": spec.capabilities.supports_trade_query,
                         "supports_cancel": spec.capabilities.supports_cancel,
                         "supports_margin": spec.capabilities.supports_margin,
                         "supports_history": spec.capabilities.supports_history,
@@ -85,6 +87,58 @@ class LiveModule(BaseModule):
                 }
             )
         return rows
+
+    def live_risk_status(
+        self,
+        mode: str | None = None,
+        broker: str | None = None,
+        state_dir: str | None = None,
+        ledger_dir: str | None = None,
+        tail: int = 20,
+    ) -> dict[str, Any]:
+        """Show persisted risk/recovery status without connecting to a broker."""
+        runtime = self._runtime(mode=mode, broker=broker, state_dir=state_dir, ledger_dir=ledger_dir)
+        status = self.live_state(mode=mode, broker=broker, state_dir=state_dir)
+        state = status.get("state") if status.get("exists") else runtime.snapshot()
+        engine = state.get("engine") if isinstance(state, dict) else {}
+        return {
+            "exists": bool(status.get("exists")),
+            "state_path": str(runtime.state_path),
+            "ledger_dir": str(runtime.config.ledger_dir),
+            "config": state.get("config") if isinstance(state, dict) else runtime.snapshot()["config"],
+            "risk": (engine or {}).get("risk"),
+            "recovery": state.get("recovery") if isinstance(state, dict) else None,
+            "recent_rejections": runtime.engine.ledger.tail(int(tail), kind="rejected"),
+        }
+
+    def live_ledger_events(
+        self,
+        kind: str | None = None,
+        command_id: str | None = None,
+        order_id: str | None = None,
+        reference: str | None = None,
+        day: str | None = None,
+        limit: int = 50,
+        mode: str | None = None,
+        broker: str | None = None,
+        ledger_dir: str | None = None,
+        state_dir: str | None = None,
+    ) -> dict[str, Any]:
+        """Query live audit ledger events by common correlation fields."""
+        runtime = self._runtime(mode=mode, broker=broker, ledger_dir=ledger_dir, state_dir=state_dir)
+        events = runtime.engine.ledger.events(
+            kind=kind,
+            command_id=command_id,
+            order_id=order_id,
+            reference=reference,
+            day=day,
+            limit=int(limit),
+        )
+        return {
+            "ledger_dir": str(runtime.config.ledger_dir),
+            "count": len(events),
+            "events": events,
+        }
 
     def live_state(
         self,
@@ -329,6 +383,171 @@ class LiveModule(BaseModule):
             timeout=timeout,
         )
 
+    def live_daemon_reconnect(
+        self,
+        state_dir: str | None = None,
+        wait: bool = False,
+        timeout: float = 20.0,
+        auto_resume: bool = False,
+        confirm_live: bool = False,
+    ) -> dict[str, Any]:
+        """Ask the running daemon to reconnect and reconcile broker state.
+
+        Conservative by default: reconnect keeps the kill-switch engaged. Only
+        pass ``auto_resume=True`` after explicit operator confirmation.
+        """
+        from alphapilot.systems.live.daemon import send_daemon_command
+
+        if auto_resume:
+            _require_daemon_live_confirmation(self.live_daemon_status(state_dir=state_dir), confirm_live=confirm_live)
+        return send_daemon_command(
+            self._system().config,
+            "reconnect",
+            payload={
+                "auto_resume": bool(auto_resume),
+                "confirm_live": bool(confirm_live),
+            },
+            state_dir=state_dir,
+            wait=wait,
+            timeout=timeout,
+        )
+
+    def live_daemon_cancel(
+        self,
+        order_id: str,
+        symbol: str | None = None,
+        force: bool = False,
+        state_dir: str | None = None,
+        wait: bool = False,
+        timeout: float = 5.0,
+        event_timeout: float = 3.0,
+    ) -> dict[str, Any]:
+        """Ask the running daemon to cancel one active order.
+
+        By default only active OMS orders are cancellable. ``force=True`` sends a
+        raw broker cancel and requires ``symbol`` when the OMS does not know the
+        order.
+        """
+        from alphapilot.systems.live.daemon import send_daemon_command
+
+        return send_daemon_command(
+            self._system().config,
+            "cancel",
+            payload={
+                "order_id": order_id,
+                "symbol": symbol,
+                "force": bool(force),
+                "event_timeout": float(event_timeout),
+            },
+            state_dir=state_dir,
+            wait=wait,
+            timeout=timeout,
+        )
+
+    def live_daemon_strategy_status(
+        self,
+        state_dir: str | None = None,
+        wait: bool = True,
+        timeout: float = 5.0,
+    ) -> dict[str, Any]:
+        """Ask the running daemon for strategy runner status."""
+        from alphapilot.systems.live.daemon import send_daemon_command
+
+        return send_daemon_command(
+            self._system().config,
+            "strategy_status",
+            state_dir=state_dir,
+            wait=wait,
+            timeout=timeout,
+        )
+
+    def live_daemon_strategy_start(
+        self,
+        timing_strategy: str,
+        symbols: str | list[str] | None = None,
+        timing_params: str | dict | None = None,
+        timing_freq: str = "day",
+        bar_seconds: int = 60,
+        min_bars: int = 30,
+        window: int = 250,
+        state_dir: str | None = None,
+        wait: bool = True,
+        timeout: float = 5.0,
+        confirm_live: bool = False,
+    ) -> dict[str, Any]:
+        """Start a timing strategy runner inside the running daemon."""
+        from alphapilot.systems.live.daemon import send_daemon_command
+
+        _require_daemon_live_confirmation(self.live_daemon_status(state_dir=state_dir), confirm_live=confirm_live)
+        return send_daemon_command(
+            self._system().config,
+            "strategy_start",
+            payload={
+                "timing_strategy": timing_strategy,
+                "symbols": _split_symbols(symbols),
+                "timing_params": _parse_mapping(timing_params),
+                "timing_freq": timing_freq,
+                "bar_seconds": int(bar_seconds),
+                "min_bars": int(min_bars),
+                "window": int(window),
+                "confirm_live": bool(confirm_live),
+            },
+            state_dir=state_dir,
+            wait=wait,
+            timeout=timeout,
+        )
+
+    def live_daemon_strategy_pause(
+        self,
+        state_dir: str | None = None,
+        wait: bool = True,
+        timeout: float = 5.0,
+    ) -> dict[str, Any]:
+        """Pause the daemon strategy runner."""
+        from alphapilot.systems.live.daemon import send_daemon_command
+
+        return send_daemon_command(
+            self._system().config,
+            "strategy_pause",
+            state_dir=state_dir,
+            wait=wait,
+            timeout=timeout,
+        )
+
+    def live_daemon_strategy_resume(
+        self,
+        state_dir: str | None = None,
+        wait: bool = True,
+        timeout: float = 5.0,
+    ) -> dict[str, Any]:
+        """Resume the daemon strategy runner."""
+        from alphapilot.systems.live.daemon import send_daemon_command
+
+        return send_daemon_command(
+            self._system().config,
+            "strategy_resume",
+            state_dir=state_dir,
+            wait=wait,
+            timeout=timeout,
+        )
+
+    def live_daemon_strategy_stop(
+        self,
+        state_dir: str | None = None,
+        wait: bool = True,
+        timeout: float = 5.0,
+    ) -> dict[str, Any]:
+        """Stop the daemon strategy runner."""
+        from alphapilot.systems.live.daemon import send_daemon_command
+
+        return send_daemon_command(
+            self._system().config,
+            "strategy_stop",
+            state_dir=state_dir,
+            wait=wait,
+            timeout=timeout,
+        )
+
     def live_daemon_order(
         self,
         symbol: str,
@@ -339,6 +558,7 @@ class LiveModule(BaseModule):
         state_dir: str | None = None,
         wait: bool = False,
         timeout: float = 5.0,
+        event_timeout: float = 3.0,
         confirm_live: bool = False,
         reference: str = "daemon_manual",
     ) -> dict[str, Any]:
@@ -357,6 +577,7 @@ class LiveModule(BaseModule):
                 "order_type": order_type,
                 "reference": reference,
                 "confirm_live": confirm_live,
+                "event_timeout": float(event_timeout),
             },
             state_dir=state_dir,
             wait=wait,
@@ -426,6 +647,9 @@ class LiveModule(BaseModule):
         broker: str | None = None,
         cash: float | None = None,
         timeout: float = 20.0,
+        event_timeout: float = 3.0,
+        ledger_dir: str | None = None,
+        state_dir: str | None = None,
         confirm_live: bool = False,
         reference: str = "manual",
     ) -> dict[str, Any]:
@@ -436,12 +660,12 @@ class LiveModule(BaseModule):
         """
         from alphapilot.systems.live.runtime import require_live_confirmation
 
-        runtime = self._runtime(mode=mode, broker=broker)
+        runtime = self._runtime(mode=mode, broker=broker, ledger_dir=ledger_dir, state_dir=state_dir)
         require_live_confirmation(runtime.config, confirm_live=confirm_live)
         try:
             runtime.connect(paper_cash=cash)
             runtime.wait_ready(timeout=timeout)
-            return runtime.submit_order(
+            result = runtime.submit_order(
                 symbol,
                 side=side,
                 volume=volume,
@@ -449,6 +673,52 @@ class LiveModule(BaseModule):
                 order_type=order_type,
                 reference=reference,
             )
+            if result.get("submitted"):
+                ack = runtime.wait_for_order_ack(str(result.get("order_id")), timeout=event_timeout)
+                result.update({
+                    "order_ack": ack,
+                    "order_acknowledged": bool(ack.get("acknowledged")),
+                    "order_status": ack.get("status"),
+                    "order_active": ack.get("active"),
+                })
+            return result
+        finally:
+            runtime.close()
+
+    def live_cancel(
+        self,
+        order_id: str,
+        symbol: str | None = None,
+        force: bool = False,
+        mode: str | None = None,
+        broker: str | None = None,
+        cash: float | None = None,
+        timeout: float = 20.0,
+        event_timeout: float = 3.0,
+        ledger_dir: str | None = None,
+        state_dir: str | None = None,
+    ) -> dict[str, Any]:
+        """Connect once and cancel one order.
+
+        One-shot cancel can only cancel OMS-known active orders unless
+        ``force=True`` and ``symbol`` are supplied for a raw broker cancel.
+        """
+        runtime = self._runtime(mode=mode, broker=broker, ledger_dir=ledger_dir, state_dir=state_dir)
+        try:
+            runtime.connect(paper_cash=cash)
+            runtime.wait_ready(timeout=timeout)
+            result = runtime.cancel_order(order_id, symbol=symbol, force=force)
+            confirmation = (
+                runtime.wait_for_order_terminal(str(result.get("order_id")), timeout=event_timeout)
+                if result.get("cancelled")
+                else runtime.order_state(str(result.get("order_id") or order_id))
+            )
+            result.update({
+                "cancel_confirmation": confirmation,
+                "cancel_confirmed": confirmation.get("status") == "cancelled",
+                "cancel_terminal": bool(confirmation.get("terminal")),
+            })
+            return result
         finally:
             runtime.close()
 
@@ -470,6 +740,8 @@ class LiveModule(BaseModule):
         broker: str | None = None,
         cash: float | None = None,
         timeout: float = 20.0,
+        ledger_dir: str | None = None,
+        state_dir: str | None = None,
         confirm_live: bool = False,
     ) -> dict[str, Any]:
         """Plan or route a target portfolio through the live executor.
@@ -480,7 +752,7 @@ class LiveModule(BaseModule):
         """
         from alphapilot.systems.live.runtime import require_live_confirmation
 
-        runtime = self._runtime(mode=mode, broker=broker)
+        runtime = self._runtime(mode=mode, broker=broker, ledger_dir=ledger_dir, state_dir=state_dir)
         if route:
             require_live_confirmation(runtime.config, confirm_live=confirm_live)
         target = self._load_target(
@@ -564,6 +836,8 @@ class LiveModule(BaseModule):
             "live_status": self.live_status,
             "live_modes": self.live_modes,
             "live_brokers": self.live_brokers,
+            "live_risk_status": self.live_risk_status,
+            "live_ledger_events": self.live_ledger_events,
             "live_state": self.live_state,
             "live_connect": self.live_connect,
             "live_preflight": self.live_preflight,
@@ -574,9 +848,17 @@ class LiveModule(BaseModule):
             "live_daemon_halt": self.live_daemon_halt,
             "live_daemon_resume": self.live_daemon_resume,
             "live_daemon_refresh": self.live_daemon_refresh,
+            "live_daemon_reconnect": self.live_daemon_reconnect,
+            "live_daemon_cancel": self.live_daemon_cancel,
+            "live_daemon_strategy_status": self.live_daemon_strategy_status,
+            "live_daemon_strategy_start": self.live_daemon_strategy_start,
+            "live_daemon_strategy_pause": self.live_daemon_strategy_pause,
+            "live_daemon_strategy_resume": self.live_daemon_strategy_resume,
+            "live_daemon_strategy_stop": self.live_daemon_strategy_stop,
             "live_daemon_order": self.live_daemon_order,
             "live_daemon_submit_target": self.live_daemon_submit_target,
             "live_order": self.live_order,
+            "live_cancel": self.live_cancel,
             "live_submit_target": self.live_submit_target,
         }
 

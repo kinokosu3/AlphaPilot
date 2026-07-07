@@ -120,6 +120,12 @@ class SdkBrokerGateway(BrokerGateway):
             msg = f"{msg}，代码：{error.get('error_id')}，信息：{error.get('error_msg')}"
         self.post_log(msg, "error")
 
+    def post_gateway_connected(self, channel: str, detail: str = "") -> None:
+        self.post(self._emit_gateway_connected, str(channel), str(detail))
+
+    def post_gateway_disconnected(self, channel: str, reason: str = "", *, halt: bool = True) -> None:
+        self.dispatcher.put(lambda: self._emit_gateway_disconnected(str(channel), str(reason), halt=halt))
+
     # ---- internals ---------------------------------------------------------- #
     def _install_polling(self) -> None:
         tasks = [self.query_account, self.query_position]

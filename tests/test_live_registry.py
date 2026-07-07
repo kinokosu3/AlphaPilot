@@ -51,6 +51,24 @@ def test_build_connect_setting_json_override() -> None:
         reg.build_connect_setting("emt", {"ALPHAPILOT_LIVE_EMT_SETTING_JSON": "[1]"})
 
 
+def test_emt_quote_credentials_are_optional_separate_fields() -> None:
+    env = {
+        "ALPHAPILOT_LIVE_EMT_ACCOUNT": "trade-user",
+        "ALPHAPILOT_LIVE_EMT_PASSWORD": "trade-pass",
+        "ALPHAPILOT_LIVE_EMT_QUOTE_ACCOUNT": "quote-user",
+        "ALPHAPILOT_LIVE_EMT_QUOTE_PASSWORD": "quote-pass",
+        "ALPHAPILOT_LIVE_EMT_QUOTE_HOST": "1.1.1.1",
+        "ALPHAPILOT_LIVE_EMT_QUOTE_PORT": "1001",
+        "ALPHAPILOT_LIVE_EMT_TRADE_HOST": "2.2.2.2",
+        "ALPHAPILOT_LIVE_EMT_TRADE_PORT": "1002",
+    }
+    setting = reg.build_connect_setting("emt", env)
+    assert setting["账号"] == "trade-user"
+    assert setting["密码"] == "trade-pass"
+    assert setting["行情账号"] == "quote-user"
+    assert setting["行情密码"] == "quote-pass"
+
+
 def test_missing_setting_fields() -> None:
     missing = reg.missing_setting_fields("emt", {})
     assert "ALPHAPILOT_LIVE_EMT_ACCOUNT" in missing

@@ -201,6 +201,7 @@ class RecordingCallback:
     def __init__(self) -> None:
         self.orders, self.trades, self.ticks = [], [], []
         self.positions, self.accounts, self.contracts, self.logs = [], [], [], []
+        self.gateway_connected, self.gateway_disconnected = [], []
 
     def on_order(self, o): self.orders.append(o)
     def on_trade(self, t): self.trades.append(t)
@@ -209,6 +210,15 @@ class RecordingCallback:
     def on_contract(self, c): self.contracts.append(c)
     def on_tick(self, t): self.ticks.append(t)
     def on_log(self, e): self.logs.append(e)
+    def on_gateway_connected(self, gateway, channel, detail=""):
+        self.gateway_connected.append({"gateway": gateway, "channel": channel, "detail": detail})
+    def on_gateway_disconnected(self, gateway, channel, reason="", *, halt=True):
+        self.gateway_disconnected.append({
+            "gateway": gateway,
+            "channel": channel,
+            "reason": reason,
+            "halt": halt,
+        })
 
 
 @pytest.fixture()
@@ -232,6 +242,54 @@ def test_handle_order_event_creates_then_updates(gateway) -> None:
     assert gw.orders["123456789"].status == OrderStatus.ALLTRADED
 
 
+def test_sdk_disconnect_callbacks_emit_gateway_events(gateway, monkeypatch) -> None:
+    gw, cb = gateway
+
+    class DummyThread:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+    monkeypatch.setattr(xp.threading, "Thread", DummyThread)
+
+    gw.md_api.onDisconnected(7)
+    gw.td_api.onDisconnected(1, 8)
+    gw.dispatcher.run_pending()
+
+    assert cb.gateway_disconnected == [
+        {"gateway": "xtp", "channel": "quote", "reason": "7", "halt": False},
+        {"gateway": "xtp", "channel": "trade", "reason": "8", "halt": True},
+    ]
+    assert any("行情服务器连接断开" in log.msg for log in cb.logs)
+    assert any("交易服务器连接断开" in log.msg for log in cb.logs)
+
+
+def test_trade_login_failure_emits_halt_disconnect(gateway) -> None:
+    gw, cb = gateway
+    gw.td_api.login = lambda *args: 0
+    gw.td_api.getApiLastError = lambda: {"error_id": 12130005, "error_msg": "Login xgw failed"}
+
+    gw.td_api.login_server()
+    gw.dispatcher.run_pending()
+
+    assert cb.gateway_disconnected == [
+        {"gateway": "xtp", "channel": "trade", "reason": "Login xgw failed", "halt": True},
+    ]
+    assert cb.logs[-1].level == "error"
+    assert "交易服务器登录失败" in cb.logs[-1].msg
+
+
+def test_gateway_connected_helper_is_dispatched(gateway) -> None:
+    gw, cb = gateway
+
+    gw.post_gateway_connected("trade", "42")
+    gw.dispatcher.run_pending()
+
+    assert cb.gateway_connected == [{"gateway": "xtp", "channel": "trade", "detail": "42"}]
+
+
 def test_handle_trade_event_accumulates_fills(gateway) -> None:
     gw, cb = gateway
     gw.td_api.onOrderEvent(make_order_data(), {"error_id": 0}, 1)
@@ -249,6 +307,48 @@ def test_handle_trade_event_accumulates_fills(gateway) -> None:
     statuses = [o.status for o in cb.orders]
     assert statuses == [OrderStatus.NOTTRADED, OrderStatus.PARTTRADED, OrderStatus.ALLTRADED]
     assert cb.orders[-1].traded == 200
+
+
+def test_query_callbacks_replay_snapshots_without_double_counting(gateway) -> None:
+    gw, cb = gateway
+    gw.td_api.onQueryOrderEx(
+        make_order_data(qty_traded=200, order_status=1),
+        {"error_id": 0},
+        1,
+        True,
+        1,
+    )
+    gw.td_api.onQueryTrade(
+        {
+            "ticker": "600000", "market": 2, "order_xtp_id": 123456789,
+            "exec_id": 10, "side": 1, "price": 12.30, "quantity": 100,
+            "trade_time": 20260706100000000,
+        },
+        {"error_id": 0},
+        2,
+        True,
+        1,
+    )
+    gw.dispatcher.run_pending()
+
+    assert cb.orders[-1].status is OrderStatus.ALLTRADED
+    assert cb.orders[-1].traded == 200
+    assert gw.orders["123456789"].traded == 200
+    assert cb.trades[0].trade_id == "10"
+
+
+def test_query_trade_request_and_unsupported_order_query(gateway) -> None:
+    gw, cb = gateway
+    gw.td_api.connect_status = True
+    gw.td_api.session_id = 42
+    calls = []
+    gw.td_api.queryTrades = lambda req, session, reqid: calls.append((req, session, reqid)) or 0
+
+    assert gw.query_trades() is True
+    assert calls == [({"ticker": "", "begin_time": 0, "end_time": 0}, 42, 1)]
+    assert gw.query_orders() is False
+    gw.dispatcher.run_pending()
+    assert any("委托查询不支持" in log.msg for log in cb.logs)
 
 
 def test_handle_trade_without_order_logs_warning(gateway) -> None:

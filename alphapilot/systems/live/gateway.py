@@ -48,6 +48,15 @@ class GatewayCallback(Protocol):
     def on_contract(self, contract: Contract) -> None: ...
     def on_tick(self, tick: TickData) -> None: ...
     def on_log(self, log: LogEvent) -> None: ...
+    def on_gateway_connected(self, gateway: str, channel: str, detail: str = "") -> None: ...
+    def on_gateway_disconnected(
+        self,
+        gateway: str,
+        channel: str,
+        reason: str = "",
+        *,
+        halt: bool = True,
+    ) -> None: ...
 
 
 class BrokerGateway(ABC):
@@ -102,6 +111,18 @@ class BrokerGateway(ABC):
         if self._callback is not None:
             self._callback.on_log(LogEvent(msg=msg, level=level, gateway=self.name))
 
+    def _emit_gateway_connected(self, channel: str, detail: str = "") -> None:
+        callback = self._callback
+        handler = getattr(callback, "on_gateway_connected", None)
+        if handler is not None:
+            handler(self.name, channel, detail)
+
+    def _emit_gateway_disconnected(self, channel: str, reason: str = "", *, halt: bool = True) -> None:
+        callback = self._callback
+        handler = getattr(callback, "on_gateway_disconnected", None)
+        if handler is not None:
+            handler(self.name, channel, str(reason), halt=halt)
+
     # ---- abstract broker interface --------------------------------------- #
     @abstractmethod
     def connect(self, setting: dict) -> None:
@@ -129,6 +150,24 @@ class BrokerGateway(ABC):
     @abstractmethod
     def query_position(self) -> None:
         """Refresh positions (result via ``on_position``)."""
+
+    def query_orders(self) -> bool:  # noqa: B027 - optional
+        """Refresh today's broker orders when supported.
+
+        Returns ``True`` when a query request was sent and ``False`` when the
+        gateway does not support order snapshots. Results arrive through
+        ``on_order`` callbacks.
+        """
+        return False
+
+    def query_trades(self) -> bool:  # noqa: B027 - optional
+        """Refresh today's broker trades when supported.
+
+        Returns ``True`` when a query request was sent and ``False`` when the
+        gateway does not support trade snapshots. Results arrive through
+        ``on_trade`` callbacks.
+        """
+        return False
 
     def subscribe(self, codes: list[str]) -> None:  # noqa: B027 - optional
         """Subscribe to real-time quotes for ``codes`` (result via ``on_tick``).

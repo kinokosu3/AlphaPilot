@@ -29,6 +29,11 @@ def commands_path(state_dir: str | Path | None = None) -> Path:
     return root / "runtime_commands.jsonl"
 
 
+def command_status_path(state_dir: str | Path | None = None) -> Path:
+    root = Path(state_dir).expanduser() if state_dir else LiveConfig.load().state_dir
+    return root / "runtime_command_status.jsonl"
+
+
 def load_daemon(state_dir: str | Path | None = None) -> dict[str, Any]:
     path = daemon_path(state_dir)
     if not path.exists():
@@ -71,6 +76,55 @@ def write_daemon(state_dir: str | Path, payload: dict[str, Any]) -> Path:
     return path
 
 
+def record_command_status(
+    state_dir: str | Path,
+    command: dict[str, Any],
+    *,
+    stage: str,
+    result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Append one command lifecycle event for Portal/CLI/recovery inspection."""
+    entry = {
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "id": command.get("id"),
+        "action": command.get("action"),
+        "stage": stage,
+        "ok": None if result is None else bool(result.get("ok", False)),
+    }
+    if result is not None:
+        entry["result"] = result
+    path = command_status_path(state_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+    return entry
+
+
+def command_status_tail(state_dir: str | Path, *, limit: int = 50) -> list[dict[str, Any]]:
+    path = command_status_path(state_dir)
+    if not path.exists():
+        return []
+    entries: list[dict[str, Any]] = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            item = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict):
+            entries.append(item)
+    return entries[-int(limit):]
+
+
+def command_status_entry(state_dir: str | Path, command_id: str) -> dict[str, Any] | None:
+    for entry in reversed(command_status_tail(state_dir, limit=500)):
+        if entry.get("id") == command_id and entry.get("stage") in {"done", "failed"}:
+            return entry
+    return None
+
+
 def send_daemon_command(
     config: LiveConfig,
     action: str,
@@ -96,6 +150,7 @@ def send_daemon_command(
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(command, ensure_ascii=False, default=str) + "\n")
+    record_command_status(cfg.state_dir, command, stage="accepted")
 
     result: dict[str, Any] = {
         "accepted": True,
@@ -114,9 +169,16 @@ def wait_for_command(config: LiveConfig, command_id: str, *, timeout: float = 5.
         status = load_daemon(config.state_dir)
         last = status.get("last_command") or {}
         if last.get("id") == command_id:
-            return status
+            return daemon_status(config)
+        completed = command_status_entry(config.state_dir, command_id)
+        if completed is not None:
+            resolved = daemon_status(config)
+            resolved_last = resolved.get("last_command") if isinstance(resolved.get("last_command"), dict) else {}
+            if resolved_last.get("id") != command_id and isinstance(completed.get("result"), dict):
+                resolved["last_command"] = completed["result"]
+            return resolved
         time.sleep(0.1)
-    status = load_daemon(config.state_dir)
+    status = daemon_status(config)
     status["wait_timeout"] = True
     status["waited_command_id"] = command_id
     return status
@@ -132,6 +194,8 @@ def daemon_status(config: LiveConfig, *, state_dir: str | Path | None = None) ->
             status["state"] = json.loads(runtime_state.read_text(encoding="utf-8"))
         except Exception as exc:  # noqa: BLE001 - keep daemon status available
             status["state_error"] = str(exc)
+    status["command_status_path"] = str(command_status_path(cfg.state_dir))
+    status["command_status_tail"] = command_status_tail(cfg.state_dir)
     return status
 
 
@@ -291,7 +355,13 @@ def _read_new_commands(path: Path, offset: int) -> tuple[int, list[dict[str, Any
         return fh.tell(), commands
 
 
-def _apply_command(runtime: Any, command: dict[str, Any]) -> dict[str, Any]:
+def _apply_command(
+    runtime: Any,
+    command: dict[str, Any],
+    *,
+    runner_holder: dict[str, Any] | None = None,
+    default_symbols: list[str] | None = None,
+) -> dict[str, Any]:
     action = str(command.get("action") or "").lower()
     payload = command.get("payload")
     if not isinstance(payload, dict):
@@ -302,6 +372,7 @@ def _apply_command(runtime: Any, command: dict[str, Any]) -> dict[str, Any]:
         "ts": datetime.now().isoformat(timespec="seconds"),
         "ok": True,
     }
+    record_command_status(runtime.config.state_dir, command, stage="processing")
     try:
         if action == "halt":
             runtime.engine.halt(str(payload.get("reason") or "daemon command"))
@@ -312,7 +383,47 @@ def _apply_command(runtime: Any, command: dict[str, Any]) -> dict[str, Any]:
         elif action == "refresh":
             runtime.refresh_broker_state()
             result["message"] = "refreshed"
+        elif action == "reconnect":
+            auto_resume = bool(payload.get("auto_resume", False))
+            if auto_resume:
+                require_live_confirmation(runtime.config, confirm_live=bool(payload.get("confirm_live", False)))
+            reconnect = runtime.reconnect(auto_resume=auto_resume)
+            result.update({
+                "message": "reconnected",
+                "auto_resume": auto_resume,
+                "reconnect": reconnect.get("reconnect"),
+                "recovery": reconnect.get("recovery"),
+                "state": reconnect.get("state"),
+            })
+        elif action == "cancel":
+            event_timeout = _event_timeout(payload)
+            cancel = runtime.cancel_order(
+                str(payload.get("order_id") or "").strip(),
+                symbol=payload.get("symbol") or payload.get("code"),
+                force=bool(payload.get("force", False)),
+            )
+            confirmation = (
+                runtime.wait_for_order_terminal(str(cancel.get("order_id") or payload.get("order_id")), timeout=event_timeout)
+                if cancel.get("cancelled")
+                else runtime.order_state(str(cancel.get("order_id") or payload.get("order_id") or ""))
+            )
+            result.update({
+                "message": (
+                    "cancel_confirmed" if confirmation.get("status") == "cancelled"
+                    else "cancel_requested" if cancel.get("cancelled")
+                    else "cancel_not_sent"
+                ),
+                "cancelled": cancel.get("cancelled"),
+                "order_id": cancel.get("order_id"),
+                "cancel": cancel.get("result"),
+                "cancel_confirmation": confirmation,
+                "cancel_confirmed": confirmation.get("status") == "cancelled",
+                "cancel_terminal": bool(confirmation.get("terminal")),
+            })
+            if not cancel.get("cancelled"):
+                result["ok"] = False
         elif action == "order":
+            event_timeout = _event_timeout(payload)
             require_live_confirmation(runtime.config, confirm_live=bool(payload.get("confirm_live", False)))
             order = runtime.submit_order(
                 str(payload.get("symbol") or payload.get("code") or "").strip(),
@@ -322,11 +433,27 @@ def _apply_command(runtime: Any, command: dict[str, Any]) -> dict[str, Any]:
                 order_type=str(payload.get("order_type") or "limit"),
                 reference=str(payload.get("reference") or "daemon"),
             )
+            ack = (
+                runtime.wait_for_order_ack(str(order.get("order_id")), timeout=event_timeout)
+                if order.get("submitted")
+                else runtime.order_state(str(order.get("order_id") or ""))
+            )
             result.update({
-                "message": "order_submitted" if order.get("submitted") else "order_not_routed",
+                "message": (
+                    "order_acknowledged" if ack.get("acknowledged")
+                    else "order_submitted" if order.get("submitted")
+                    else "order_not_routed"
+                ),
                 "submitted": order.get("submitted"),
                 "order_id": order.get("order_id"),
                 "request": order.get("request"),
+                "routing_event": order.get("routing_event"),
+                "routing_rule": order.get("routing_rule"),
+                "routing_reason": order.get("routing_reason"),
+                "order_ack": ack,
+                "order_acknowledged": bool(ack.get("acknowledged")),
+                "order_status": ack.get("status"),
+                "order_active": ack.get("active"),
             })
             if not order.get("submitted"):
                 result["ok"] = False
@@ -362,6 +489,62 @@ def _apply_command(runtime: Any, command: dict[str, Any]) -> dict[str, Any]:
                 result["ok"] = False
         elif action == "snapshot":
             result["message"] = "snapshotted"
+        elif action == "strategy_status":
+            result["message"] = "strategy_status"
+            result["runner_status"] = _runner_status(runner_holder)
+        elif action == "strategy_pause":
+            runner = _require_runner(runner_holder)
+            result["message"] = "strategy_paused"
+            result["runner_status"] = runner.pause()
+        elif action == "strategy_resume":
+            runner = _require_runner(runner_holder)
+            result["message"] = "strategy_resumed"
+            result["runner_status"] = runner.resume()
+        elif action == "strategy_stop":
+            runner = _require_runner(runner_holder)
+            result["message"] = "strategy_stopped"
+            result["runner_status"] = runner.stop()
+            if runner_holder is not None:
+                runner_holder["config"] = {**(runner_holder.get("config") or {}), "enabled": False}
+        elif action == "strategy_start":
+            require_live_confirmation(runtime.config, confirm_live=bool(payload.get("confirm_live", False)))
+            current = None if runner_holder is None else runner_holder.get("runner")
+            if current is not None and current.status().get("active"):
+                raise ValueError("strategy runner is already active")
+            strategy_name = str(payload.get("timing_strategy") or payload.get("strategy") or "").strip()
+            if not strategy_name:
+                raise ValueError("timing_strategy is required")
+            symbols = _split_symbols_payload(payload.get("symbols")) or list(default_symbols or [])
+            if not symbols:
+                raise ValueError("symbols are required when timing_strategy is enabled")
+            params = _parse_runner_params(payload.get("timing_params") or payload.get("params"))
+            freq = str(payload.get("timing_freq") or payload.get("freq") or "day")
+            bar_seconds = int(payload.get("bar_seconds") or 60)
+            min_bars = int(payload.get("min_bars") or 30)
+            window = int(payload.get("window") or 250)
+            runner = _build_timing_runner(
+                runtime.engine,
+                symbols,
+                timing_strategy=strategy_name,
+                timing_params=params,
+                timing_freq=freq,
+                bar_seconds=bar_seconds,
+                min_bars=min_bars,
+                window=window,
+            )
+            if runner_holder is not None:
+                runner_holder["runner"] = runner
+                runner_holder["config"] = _runner_config(
+                    timing_strategy=strategy_name,
+                    timing_params=params,
+                    timing_freq=freq,
+                    bar_seconds=bar_seconds,
+                    min_bars=min_bars,
+                    window=window,
+                )
+            result["message"] = "strategy_started"
+            result["runner_status"] = runner.status() if runner is not None else None
+            result["runner_config"] = None if runner_holder is None else runner_holder.get("config")
         else:
             raise ValueError(f"unsupported daemon command: {action!r}")
         runtime.engine.ledger.record("daemon_command", result)
@@ -370,7 +553,55 @@ def _apply_command(runtime: Any, command: dict[str, Any]) -> dict[str, Any]:
         result.update({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
         runtime.engine.ledger.record("daemon_command_error", result)
         runtime.write_state()
+    record_command_status(
+        runtime.config.state_dir,
+        command,
+        stage="done" if result.get("ok") else "failed",
+        result=result,
+    )
     return result
+
+
+def _require_runner(runner_holder: dict[str, Any] | None):
+    runner = None if runner_holder is None else runner_holder.get("runner")
+    if runner is None:
+        raise ValueError("strategy runner is not enabled")
+    return runner
+
+
+def _runner_status(runner_holder: dict[str, Any] | None) -> dict[str, Any]:
+    runner = None if runner_holder is None else runner_holder.get("runner")
+    config = {} if runner_holder is None else dict(runner_holder.get("config") or {})
+    if runner is None:
+        return {"enabled": False, "config": config}
+    return {"enabled": True, "config": config, **runner.status()}
+
+
+def _parse_runner_params(raw: Any) -> dict[str, Any]:
+    if raw is None or raw == "":
+        return {}
+    if isinstance(raw, dict):
+        return dict(raw)
+    parsed = json.loads(str(raw))
+    if not isinstance(parsed, dict):
+        raise ValueError("timing_params must be a JSON object")
+    return parsed
+
+
+def _split_symbols_payload(raw: Any) -> list[str]:
+    if raw is None or raw == "":
+        return []
+    if isinstance(raw, (list, tuple, set)):
+        return [str(item).strip() for item in raw if str(item).strip()]
+    return [part.strip() for part in str(raw).replace("，", ",").split(",") if part.strip()]
+
+
+def _event_timeout(payload: dict[str, Any], default: float = 3.0) -> float:
+    raw = payload.get("event_timeout", payload.get("ack_timeout", default))
+    try:
+        return max(float(raw), 0.0)
+    except (TypeError, ValueError):
+        return float(default)
 
 
 def _runner_config(
@@ -477,6 +708,7 @@ def run_daemon(
         "broker": cfg.broker,
         "symbols": symbols or [],
         "commands_processed": 0,
+        "recovery": None,
         "runner": _runner_config(
             timing_strategy=timing_strategy,
             timing_params=timing_params,
@@ -507,14 +739,30 @@ def run_daemon(
         )
         if symbols and runner is None:
             runtime.engine.gateway.subscribe(symbols)
-        _write_status(status="running", ready=ready, started_at=datetime.now().isoformat(timespec="seconds"))
+        runner_holder = {
+            "runner": runner,
+            "config": meta["runner"],
+        }
+        _write_status(
+            status="running",
+            ready=ready,
+            recovery=runtime.recovery,
+            started_at=datetime.now().isoformat(timespec="seconds"),
+        )
         started = time.time()
         command_path = commands_path(cfg.state_dir)
         command_offset = command_path.stat().st_size if command_path.exists() else 0
         while not stop:
             command_offset, commands = _read_new_commands(command_path, command_offset)
             for command in commands:
-                result = _apply_command(runtime, command)
+                result = _apply_command(
+                    runtime,
+                    command,
+                    runner_holder=runner_holder,
+                    default_symbols=symbols or [],
+                )
+                runner = runner_holder.get("runner")
+                meta["runner"] = runner_holder.get("config") or meta.get("runner")
                 meta["commands_processed"] = int(meta.get("commands_processed") or 0) + 1
                 _write_status(last_command=result)
             if runner is not None:

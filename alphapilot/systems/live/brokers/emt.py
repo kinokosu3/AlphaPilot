@@ -22,6 +22,7 @@ for the A-share cash-equity live stack (margin direction mapping is kept).
 
 from __future__ import annotations
 
+import os
 import threading
 
 from alphapilot.systems.live.brokers.base import sdk_log_path
@@ -61,13 +62,20 @@ except ImportError:  # pragma: no cover - exercised only without the SDK
     SDK_AVAILABLE = False
 
 
+def _td_native_exit_enabled() -> bool:
+    return os.environ.get("ALPHAPILOT_LIVE_EMT_TD_EXIT", "").lower() in {"1", "true", "yes", "on"}
+
+
 # ---- vendor-specific converters (EMT field semantics) ------------------------ #
 def position_from_emt(data: dict, gateway: str) -> Position | None:
     if not data or data.get("market") == 100:
         return None
+    exchange = MARKET_VENDOR2VT.get(data.get("market"))
+    if exchange is None:
+        return None
     return Position(
         code=data["ticker"],
-        exchange=MARKET_VENDOR2VT[data["market"]],
+        exchange=exchange,
         direction=POSITION_DIRECTION_VENDOR2VT.get(data["position_direction"], Direction.LONG),
         volume=data["total_qty"],
         frozen=data["total_qty"] - data["sellable_qty"],
@@ -110,12 +118,14 @@ class _EmtMdApi(_SdkMdApi):
 
         self.connect_status = False
         self.login_status = False
+        self._contract_queries_pending = 0
 
     # -- SDK callbacks ------------------------------------------------------ #
     def onDisconnected(self, reason: int) -> None:
         self.connect_status = False
         self.login_status = False
         self.gateway.post_log(f"行情服务器连接断开, 原因{reason}", "warning")
+        self.gateway.post_gateway_disconnected("quote", str(reason), halt=False)
         threading.Thread(target=self.login_server, daemon=True).start()
 
     def onError(self, error: dict) -> None:
@@ -129,6 +139,8 @@ class _EmtMdApi(_SdkMdApi):
         self.gateway.post(self.gateway._handle_tick, data)
 
     def onQueryAllTickers(self, data: dict, error: dict, last: bool) -> None:
+        if last and self._contract_queries_pending:
+            self._contract_queries_pending -= 1
         self.gateway.post(self.gateway._handle_contract, data, last)
 
     # -- driver methods ----------------------------------------------------- #
@@ -164,24 +176,32 @@ class _EmtMdApi(_SdkMdApi):
             self.connect_status = True
             self.login_status = True
             msg = "行情服务器登录成功"
+            level = "info"
+            self.gateway.post_gateway_connected("quote", "login_success")
             self.query_contract()
             self.init()
         else:
             error: dict = self.getApiLastError()
             msg = f"行情服务器登录失败，原因：{error['error_msg']}"
-        self.gateway.post_log(msg)
+            level = "error"
+            self.gateway.post_gateway_disconnected("quote", str(error.get("error_msg") or error), halt=False)
+        self.gateway.post_log(msg, level)
 
     def close(self) -> None:
         if self.connect_status:
             self.connect_status = False
             self.login_status = False
-            self.exit()
+            if self._contract_queries_pending:
+                self.release()
+            else:
+                self.exit()
 
     def subscribe_symbol(self, code: str, exchange: Exchange) -> None:
         if self.login_status:
             self.subscribeMarketData(code, 1, EXCHANGE_VT2VENDOR.get(exchange, 0))
 
     def query_contract(self) -> None:
+        self._contract_queries_pending = len(EXCHANGE_VENDOR2VT)
         for exchange_id in EXCHANGE_VENDOR2VT:
             self.queryAllTickers(exchange_id)
 
@@ -208,10 +228,14 @@ class _EmtTdApi(_SdkTdApi):
         self.login_status = False
 
     # -- SDK callbacks ------------------------------------------------------ #
-    def onDisconnected(self, session: int, reason: int) -> None:
+    def onDisconnected(self, session: int = 0, reason: int | None = None) -> None:
+        if reason is None:
+            reason = session
+            session = self.session_id
         self.connect_status = False
         self.login_status = False
         self.gateway.post_log(f"交易服务器连接断开, 原因{reason}", "warning")
+        self.gateway.post_gateway_disconnected("trade", str(reason), halt=True)
         threading.Thread(target=self.login_server, daemon=True).start()
 
     def onError(self, error: dict) -> None:
@@ -228,6 +252,44 @@ class _EmtTdApi(_SdkTdApi):
     def onCancelOrderError(self, data: dict, error: dict, session: int) -> None:
         if error and error.get("error_id"):
             self.gateway.post_error("撤单失败", error)
+
+    def onQueryOrder(self, data: dict, error: dict, request: int, last: bool, session: int) -> None:
+        if error and error.get("error_id"):
+            self.gateway.post_error("委托查询失败", error)
+        if data:
+            self.gateway.post(self.gateway._handle_order_event, data)
+
+    def onQueryOrderByPage(
+        self,
+        data: dict,
+        req_count: int,
+        order_sequence: int,
+        query_reference: int,
+        request: int,
+        last: bool,
+        session: int,
+    ) -> None:
+        if data:
+            self.gateway.post(self.gateway._handle_order_event, data)
+
+    def onQueryTrade(self, data: dict, error: dict, request: int, last: bool, session: int) -> None:
+        if error and error.get("error_id"):
+            self.gateway.post_error("成交查询失败", error)
+        if data:
+            self.gateway.post(self.gateway._handle_trade_snapshot, data)
+
+    def onQueryTradeByPage(
+        self,
+        data: dict,
+        req_count: int,
+        trade_sequence: int,
+        query_reference: int,
+        request: int,
+        last: bool,
+        session: int,
+    ) -> None:
+        if data:
+            self.gateway.post(self.gateway._handle_trade_snapshot, data)
 
     def onQueryPosition(self, data: dict, error: dict, request: int, last: bool, session: int) -> None:
         self.gateway.post(self.gateway._handle_position, data)
@@ -268,17 +330,26 @@ class _EmtTdApi(_SdkTdApi):
             self.connect_status = True
             self.login_status = True
             msg = f"交易服务器登录成功, 会话编号：{self.session_id}"
+            level = "info"
+            self.gateway.post_gateway_connected("trade", str(self.session_id))
             self.init()
         else:
             error: dict = self.getApiLastError()
             msg = f"交易服务器登录失败，原因：{error['error_msg']}"
-        self.gateway.post_log(msg)
+            level = "error"
+            self.gateway.post_gateway_disconnected("trade", str(error.get("error_msg") or error), halt=True)
+        self.gateway.post_log(msg, level)
 
     def close(self) -> None:
         if self.connect_status:
             self.connect_status = False
             self.login_status = False
-            self.exit()
+            if _td_native_exit_enabled():
+                self.exit()
+                return
+            if self.session_id:
+                self.logout(self.session_id)
+            self.release()
 
     def send_order(self, req: OrderRequest) -> str:
         if req.exchange not in MARKET_VT2VENDOR:
@@ -339,6 +410,34 @@ class _EmtTdApi(_SdkTdApi):
         self.reqid += 1
         self.queryPosition("", self.session_id, self.reqid, 0)
 
+    def query_orders(self) -> bool:
+        if not self.connect_status:
+            return False
+        fn = getattr(self, "queryOrders", None)
+        if fn is None:
+            self.gateway.post_log("委托查询不支持当前 EMT 绑定", "warning")
+            return False
+        self.reqid += 1
+        n = fn({"ticker": "", "begin_time": 0, "end_time": 0}, self.session_id, self.reqid)
+        if n:
+            self.gateway.post_error("委托查询请求失败", self.getApiLastError())
+            return False
+        return True
+
+    def query_trades(self) -> bool:
+        if not self.connect_status:
+            return False
+        fn = getattr(self, "queryTrades", None)
+        if fn is None:
+            self.gateway.post_log("成交查询不支持当前 EMT 绑定", "warning")
+            return False
+        self.reqid += 1
+        n = fn({"ticker": "", "begin_time": 0, "end_time": 0}, self.session_id, self.reqid)
+        if n:
+            self.gateway.post_error("成交查询请求失败", self.getApiLastError())
+            return False
+        return True
+
 
 # ---- the gateway ------------------------------------------------------------ #
 class EmtGateway(AShareVendorGateway):
@@ -354,6 +453,8 @@ class EmtGateway(AShareVendorGateway):
         "行情端口": 0,
         "交易地址": "",
         "交易端口": 0,
+        "行情账号": "",
+        "行情密码": "",
         "行情协议": "TCP",
         "日志级别": "INFO",
     }
@@ -378,12 +479,14 @@ class EmtGateway(AShareVendorGateway):
 
         userid = setting["账号"]
         password = setting["密码"]
+        quote_userid = str(setting.get("行情账号") or userid)
+        quote_password = str(setting.get("行情密码") or password)
         client_id = int(setting["客户号"])
         log_level = LOGLEVEL_VT2VENDOR.get(str(setting.get("日志级别", "INFO")), 3)
 
         self.start()  # dispatcher + account/position polling
         self.md_api.connect(
-            userid, password, client_id,
+            quote_userid, quote_password, client_id,
             setting["行情地址"], int(setting["行情端口"]),
             str(setting.get("行情协议", "TCP")), log_level,
         )
@@ -394,9 +497,9 @@ class EmtGateway(AShareVendorGateway):
         self.post_log("emt gateway connect requested")
 
     def close(self) -> None:
+        self.shutdown()
         self.md_api.close()
         self.td_api.close()
-        self.shutdown()
 
     def send_order(self, req: OrderRequest) -> str:
         return self.td_api.send_order(req)
@@ -409,6 +512,12 @@ class EmtGateway(AShareVendorGateway):
 
     def query_position(self) -> None:
         self.td_api.query_position()
+
+    def query_orders(self) -> bool:
+        return self.td_api.query_orders()
+
+    def query_trades(self) -> bool:
+        return self.td_api.query_trades()
 
     def subscribe(self, codes: list[str]) -> None:
         for raw in codes:

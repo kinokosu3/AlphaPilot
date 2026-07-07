@@ -23,10 +23,14 @@ from alphapilot.systems.live.executor import reconcile
 from alphapilot.systems.live.risk import RiskGate
 from alphapilot.systems.live.targets import TargetPortfolio
 from alphapilot.systems.live.types import (
+    CancelRequest,
     Direction,
     Exchange,
+    Order,
     OrderRequest,
+    OrderStatus,
     OrderType,
+    TickData,
     normalize_symbol,
 )
 
@@ -62,6 +66,7 @@ class LiveRuntime:
         self.config = config
         self.engine = engine
         self.state_path = Path(config.state_dir).expanduser() / "runtime_state.json"
+        self.recovery: dict[str, Any] | None = None
 
     # ---- construction ----------------------------------------------------- #
     @classmethod
@@ -91,19 +96,129 @@ class LiveRuntime:
             setting = build_runtime_setting(self.config, paper_cash=paper_cash)
         self.engine.connect(setting)
         self.refresh_broker_state()
+        self.recover()
         return self.write_state()
 
-    def refresh_broker_state(self) -> None:
-        """Ask the broker for fresh account/position snapshots when supported."""
-        for fn in (self.engine.gateway.query_account, self.engine.gateway.query_position):
+    def refresh_broker_state(
+        self,
+        *,
+        include_orders: bool = False,
+        include_trades: bool = False,
+    ) -> dict[str, Any]:
+        """Ask the broker for fresh snapshots and report what was requested."""
+        tasks: list[tuple[str, Any, bool]] = [
+            ("account", self.engine.gateway.query_account, True),
+            ("position", self.engine.gateway.query_position, True),
+            ("orders", getattr(self.engine.gateway, "query_orders", None), include_orders),
+            ("trades", getattr(self.engine.gateway, "query_trades", None), include_trades),
+        ]
+        report: dict[str, Any] = {"requested": [], "unsupported": [], "errors": []}
+        for kind, fn, enabled in tasks:
+            if not enabled:
+                continue
+            if fn is None:
+                report["unsupported"].append(kind)
+                continue
             try:
-                fn()
+                sent = fn()
+            except NotImplementedError:
+                report["unsupported"].append(kind)
             except Exception as exc:  # noqa: BLE001 - broker refresh is best-effort
-                self.engine.ledger.record("refresh_error", {"error": str(exc)})
+                error = {"kind": kind, "error": str(exc)}
+                report["errors"].append(error)
+                self.engine.ledger.record("refresh_error", error)
+            else:
+                if sent is False:
+                    report["unsupported"].append(kind)
+                else:
+                    report["requested"].append(kind)
+        return report
+
+    def settle_broker_events(self, seconds: float = 0.0) -> None:
+        """Give async SDK callbacks a short window to enter the OMS."""
+        if seconds <= 0:
+            return
+        deadline = time.time() + float(seconds)
+        dispatcher = getattr(self.engine.gateway, "dispatcher", None)
+        drain = getattr(dispatcher, "drain", None)
+        while time.time() < deadline:
+            remaining = max(deadline - time.time(), 0.0)
+            if drain is not None:
+                drain(timeout=min(0.2, remaining))
+            time.sleep(min(0.05, remaining))
+
+    def wait_for_order_ack(self, order_id: str, *, timeout: float = 5.0) -> dict[str, Any]:
+        """Wait until an order is visible and no longer only locally submitting."""
+        return self._wait_for_order(order_id, timeout=timeout, require_ack=True)
+
+    def wait_for_order_terminal(self, order_id: str, *, timeout: float = 5.0) -> dict[str, Any]:
+        """Wait until an order reaches a non-active terminal state."""
+        return self._wait_for_order(order_id, timeout=timeout, require_terminal=True)
+
+    def order_state(self, order_id: str) -> dict[str, Any]:
+        """Return the current OMS projection for one order without waiting."""
+        order = self.engine.oms.get_order(str(order_id).strip())
+        return _order_wait_report(str(order_id).strip(), order, elapsed=0.0, timed_out=False)
+
+    def _wait_for_order(
+        self,
+        order_id: str,
+        *,
+        timeout: float,
+        require_ack: bool = False,
+        require_terminal: bool = False,
+    ) -> dict[str, Any]:
+        oid = str(order_id).strip()
+        started = time.time()
+        deadline = started + max(float(timeout), 0.0)
+        last_order = self.engine.oms.get_order(oid)
+        while True:
+            self._drain_gateway_callbacks(timeout=0.05)
+            order = self.engine.oms.get_order(oid)
+            if order is not None:
+                last_order = order
+                acknowledged = _order_acknowledged(order)
+                terminal = not order.is_active()
+                if (not require_ack or acknowledged) and (not require_terminal or terminal):
+                    return _order_wait_report(oid, order, elapsed=time.time() - started, timed_out=False)
+            if time.time() >= deadline:
+                return _order_wait_report(oid, last_order, elapsed=time.time() - started, timed_out=True)
+            time.sleep(0.05)
+
+    def _drain_gateway_callbacks(self, *, timeout: float = 0.05) -> None:
+        dispatcher = getattr(self.engine.gateway, "dispatcher", None)
+        drain = getattr(dispatcher, "drain", None)
+        if drain is not None:
+            drain(timeout=max(float(timeout), 0.0))
 
     def close(self) -> None:
         self.engine.close()
         self.write_state()
+
+    def recover(self) -> dict[str, Any]:
+        """Refresh broker snapshots and restore local runtime counters."""
+        from alphapilot.systems.live.recovery import RecoveryService
+
+        self.recovery = RecoveryService(self).run()
+        return self.recovery
+
+    def reconnect(
+        self,
+        *,
+        setting: dict | None = None,
+        auto_resume: bool = False,
+    ) -> dict[str, Any]:
+        """Reconnect and reconcile broker state.
+
+        By default this leaves the runtime halted after a disconnect; callers can
+        explicitly ``resume`` after inspecting the recovery report.
+        """
+        if setting is None:
+            setting = build_runtime_setting(self.config)
+        reconnect = self.engine.reconcile_after_reconnect(setting=setting, auto_resume=auto_resume)
+        recovery = self.recover()
+        state = self.write_state()
+        return {"reconnect": reconnect, "recovery": recovery, "state": state}
 
     def wait_ready(
         self,
@@ -150,10 +265,53 @@ class LiveRuntime:
         factory = OrderRequest.buy if side_l in ("buy", "long") else OrderRequest.sell
         req = factory(code, exchange, float(volume), float(price), type=typ, reference=reference)
         order_id = self.engine.submit(req)
+        routing_event = None if order_id else _last_routing_event(self.engine.ledger, reference=req.reference)
+        routing_payload = routing_event.get("payload") if isinstance(routing_event, dict) else {}
+        if not isinstance(routing_payload, dict):
+            routing_payload = {}
         return {
             "order_id": order_id,
             "submitted": bool(order_id),
             "request": order_request_to_dict(req),
+            "routing_event": routing_event,
+            "routing_rule": routing_payload.get("rule"),
+            "routing_reason": routing_payload.get("reason"),
+            "state": self.write_state(),
+        }
+
+    def cancel_order(
+        self,
+        order_id: str,
+        *,
+        symbol: str | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Cancel an active order through the guarded engine path.
+
+        The default is intentionally conservative: only known active OMS orders
+        are cancelled. ``force=True`` allows an operator to send a raw broker
+        cancel by ``order_id`` and ``symbol`` when recovering from an OMS gap.
+        """
+        oid = str(order_id).strip()
+        if not oid:
+            raise ValueError("order_id is required")
+        known = self.engine.oms.get_order(oid)
+        if known is not None:
+            result = self.engine.cancel(known, active_only=not force)
+        elif force:
+            if not symbol:
+                raise ValueError("symbol is required for force cancel when order is not in OMS")
+            code, exchange = normalize_symbol(symbol)
+            result = self.engine.cancel_request(
+                CancelRequest(order_id=oid, code=code, exchange=exchange),
+                force=True,
+            )
+        else:
+            result = self.engine.cancel(oid)
+        return {
+            "cancelled": bool(result.get("cancelled")),
+            "order_id": oid,
+            "result": result,
             "state": self.write_state(),
         }
 
@@ -226,6 +384,7 @@ class LiveRuntime:
                 "state_dir": str(self.config.state_dir),
             },
             "engine": self.engine.snapshot(),
+            "recovery": self.recovery,
             "account": None if account is None else {
                 "account_id": account.account_id,
                 "balance": account.balance,
@@ -248,19 +407,7 @@ class LiveRuntime:
                 for p in oms.get_positions()
             ],
             "orders": [
-                {
-                    "order_id": o.order_id,
-                    "code": o.code,
-                    "exchange": o.exchange.value,
-                    "side": side_from_direction(o.direction),
-                    "price": o.price,
-                    "volume": o.volume,
-                    "traded": o.traded,
-                    "status": o.status.value,
-                    "active": o.is_active(),
-                    "reference": o.reference,
-                    "gateway": o.gateway,
-                }
+                order_to_dict(o)
                 for o in oms.orders.values()
             ],
             "trades": [
@@ -275,6 +422,10 @@ class LiveRuntime:
                     "gateway": t.gateway,
                 }
                 for t in oms.get_trades()
+            ],
+            "ticks": [
+                tick_to_dict(tick)
+                for tick in oms.ticks.values()
             ],
             "logs": [
                 {"level": log.level, "msg": log.msg, "gateway": log.gateway}
@@ -317,6 +468,45 @@ def side_from_direction(direction: Direction) -> str:
     return "buy" if direction == Direction.LONG else "sell"
 
 
+def order_to_dict(order: Order) -> dict[str, Any]:
+    return {
+        "order_id": order.order_id,
+        "code": order.code,
+        "exchange": order.exchange.value if isinstance(order.exchange, Exchange) else str(order.exchange),
+        "side": side_from_direction(order.direction),
+        "price": order.price,
+        "volume": order.volume,
+        "traded": order.traded,
+        "status": _status_value(order.status),
+        "active": order.is_active(),
+        "reference": order.reference,
+        "gateway": order.gateway,
+        "message": order.message,
+    }
+
+
+def tick_to_dict(tick: TickData) -> dict[str, Any]:
+    return {
+        "code": tick.code,
+        "exchange": tick.exchange.value if isinstance(tick.exchange, Exchange) else str(tick.exchange),
+        "key": tick.key,
+        "name": tick.name,
+        "last_price": tick.last_price,
+        "pre_close": tick.pre_close,
+        "open_price": tick.open_price,
+        "high_price": tick.high_price,
+        "low_price": tick.low_price,
+        "limit_up": tick.limit_up,
+        "limit_down": tick.limit_down,
+        "bid_price_1": tick.bid_price_1,
+        "ask_price_1": tick.ask_price_1,
+        "bid_volume_1": tick.bid_volume_1,
+        "ask_volume_1": tick.ask_volume_1,
+        "gateway": tick.gateway,
+        "datetime": None if tick.datetime is None else tick.datetime.isoformat(),
+    }
+
+
 def order_request_to_dict(req: OrderRequest) -> dict[str, Any]:
     return {
         "code": req.code,
@@ -338,3 +528,44 @@ def target_to_dict(target: TargetPortfolio) -> dict[str, Any]:
         "source": target.source,
         "market": target.market,
     }
+
+
+def _status_value(status: Any) -> str:
+    return str(getattr(status, "value", status))
+
+
+def _order_acknowledged(order: Order) -> bool:
+    return _status_value(order.status) != OrderStatus.SUBMITTING.value
+
+
+def _order_wait_report(
+    order_id: str,
+    order: Order | None,
+    *,
+    elapsed: float,
+    timed_out: bool,
+) -> dict[str, Any]:
+    acknowledged = False if order is None else _order_acknowledged(order)
+    terminal = False if order is None else not order.is_active()
+    return {
+        "order_id": order_id,
+        "found": order is not None,
+        "status": None if order is None else _status_value(order.status),
+        "active": None if order is None else order.is_active(),
+        "acknowledged": acknowledged,
+        "terminal": terminal,
+        "timed_out": bool(timed_out),
+        "elapsed": round(float(elapsed), 3),
+        "order": None if order is None else order_to_dict(order),
+    }
+
+
+def _last_routing_event(ledger: Any, *, reference: str = "") -> dict[str, Any] | None:
+    if reference:
+        events = ledger.events(reference=reference, limit=10)
+    else:
+        events = ledger.events(limit=10)
+    for event in reversed(events):
+        if event.get("kind") in {"rejected", "blocked", "dry_run_intent"}:
+            return event
+    return None

@@ -1469,16 +1469,27 @@ void TdApi::init()
 
 void TdApi::release()
 {
-	this->api->Release();
+	if (this->api && this->active)
+	{
+		// The EMT TD SDK can segfault when Release() is called on the pybind
+		// subclass used as the SPI.  Logout happens at the gateway layer; here
+		// we detach callbacks and mark the wrapper inactive so object
+		// destruction will not call exit() and double-release.
+		this->api->RegisterSpi(NULL);
+		this->api = NULL;
+		this->active = false;
+	}
 };
 
 int TdApi::exit()
 {	
-	this->api->RegisterSpi(NULL);
-	this->api->Release();
-	this->api = NULL;
-	
-	this->active = false;
+	if (this->api && this->active)
+	{
+		this->api->RegisterSpi(NULL);
+		this->api->Release();
+		this->api = NULL;
+		this->active = false;
+	}
 	return 1;
 };
 
@@ -2916,5 +2927,3 @@ PYBIND11_MODULE(vnemttd, m)
 		.def("onQuerySecurityByPage", &TdApi::onQuerySecurityByPage)
 		;
 }
-
-

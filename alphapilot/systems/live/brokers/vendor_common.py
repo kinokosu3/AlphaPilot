@@ -275,6 +275,8 @@ class AShareVendorGateway(SdkBrokerGateway):
         self._emit_order(copy(order))
 
     def _handle_order_event(self, data: dict) -> None:
+        if not data:
+            return
         incoming = order_from_vendor(data, self.order_id_field, self.name)
         if incoming is None:
             return
@@ -290,6 +292,8 @@ class AShareVendorGateway(SdkBrokerGateway):
         self._emit_order(copy(cached))
 
     def _handle_trade_event(self, data: dict) -> None:
+        if not data:
+            return
         trade = trade_from_vendor(data, self.order_id_field, self.name)
         if trade is None:
             return
@@ -303,6 +307,14 @@ class AShareVendorGateway(SdkBrokerGateway):
         else:
             self._emit_log(f"成交找不到对应委托{trade.order_id}", level="warning")
         self._emit_trade(trade)
+
+    def _handle_trade_snapshot(self, data: dict) -> None:
+        """Replay queried trades without mutating cached order fill totals."""
+        if not data:
+            return
+        trade = trade_from_vendor(data, self.order_id_field, self.name)
+        if trade is not None:
+            self._emit_trade(trade)
 
     def _handle_position(self, data: dict) -> None:
         position = self._convert_position(data)

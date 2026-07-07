@@ -305,7 +305,16 @@ void MdApi::init()
 
 void MdApi::release()
 {
-	this->exit();
+	if (this->api && this->active)
+	{
+		// The quote SDK exposes no safe Release().  For shutdown windows where
+		// Logout() may block (for example while all-ticker callbacks are still
+		// in flight), detach the SPI and mark inactive so the destructor will
+		// not call exit().
+		this->api->RegisterSpi(NULL);
+		this->active = false;
+		this->api = NULL;
+	}
 };
 
 int MdApi::exit()

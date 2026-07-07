@@ -3497,7 +3497,18 @@ type LiveConfigSnapshot = {
   risk: Record<string, number>;
 };
 type LivePosition = { code: string; exchange: string; volume: number; available: number; yd_volume: number; frozen: number; price: number };
-type LiveOrder = { order_id: string; code: string; side: string; price: number; volume: number; traded: number; status: string; active: boolean };
+  type LiveOrder = {
+    [key: string]: unknown;
+    order_id: string;
+    code: string;
+    exchange?: string;
+    side: string;
+    price: number;
+    volume: number;
+    traded: number;
+    status: string;
+    active: boolean;
+  };
 type LiveTrade = { trade_id: string; code: string; side: string; price: number; volume: number };
 type LiveEngineSnapshot = {
   mode: string;
@@ -3558,12 +3569,65 @@ type LiveDaemonStatus = {
   broker?: string;
   commands_processed?: number;
   runner?: { enabled?: boolean; strategy?: string; freq?: string };
+  runner_status?: LiveRunnerStatus | null;
   last_command?: { id?: string; action?: string; ok?: boolean; error?: string };
+  command_status_tail?: LiveCommandStatus[];
   state_path?: string;
   log_path?: string;
   state?: LiveRuntimeSnapshot;
 };
 type LiveDaemonCommandResult = { accepted: boolean; command?: { id: string; action: string }; daemon?: LiveDaemonStatus; reason?: string };
+type LiveRunnerStatus = {
+  [key: string]: unknown;
+  enabled?: boolean;
+  active?: boolean;
+  paused?: boolean;
+  stopped?: boolean;
+  started?: boolean;
+  freq?: string;
+  symbols?: string[];
+  pending_requests?: number;
+  algo_armed?: boolean;
+  last_session?: string | null;
+  config?: { strategy?: string; freq?: string; enabled?: boolean; params?: Record<string, unknown> };
+};
+type LiveCommandStatus = {
+  [key: string]: unknown;
+  ts?: string;
+  id?: string;
+  action?: string;
+  stage?: string;
+  result?: { ok?: boolean; message?: string; error?: string; action?: string };
+};
+type LiveLedgerEvent = {
+  [key: string]: unknown;
+  ts: string;
+  kind: string;
+  source?: string;
+  order_id?: string;
+  reference?: string;
+  command_id?: string;
+  payload?: Record<string, unknown>;
+};
+type LiveRiskStatus = {
+  exists: boolean;
+  state_path: string;
+  ledger_dir: string;
+  risk?: {
+    limits?: Record<string, number>;
+    enforce_session?: boolean;
+    orders_today?: number;
+    value_today?: number;
+    seen_refs?: string[];
+  } | null;
+  recovery?: {
+    risk_restored?: boolean;
+    warnings?: Array<{ kind?: string; detail?: string; order_ids?: string[] }>;
+    reconciliation?: Record<string, unknown>;
+  } | null;
+  recent_rejections?: LiveLedgerEvent[];
+};
+type LiveLedgerEvents = { count: number; events: LiveLedgerEvent[] };
 
 export function LivePage() {
   const { t } = useI18n();
@@ -3583,6 +3647,23 @@ export function LivePage() {
     [runtimeMode, selectedRuntimeBroker],
   );
   const [preflight, setPreflight] = useState<LivePreflight | null>(null);
+  const [ledgerKind, setLedgerKind] = useState("");
+  const [ledgerReference, setLedgerReference] = useState("");
+  const [ledgerLimit, setLedgerLimit] = useState("25");
+  const riskStatus = useAsync(
+    () => api.get<LiveRiskStatus>(`/api/live/risk/status${qs({ mode: runtimeMode, broker: selectedRuntimeBroker, tail: 10 })}`),
+    [runtimeMode, selectedRuntimeBroker],
+  );
+  const ledgerEvents = useAsync(
+    () => api.get<LiveLedgerEvents>(`/api/live/ledger/events${qs({
+      mode: runtimeMode,
+      broker: selectedRuntimeBroker,
+      kind: ledgerKind.trim(),
+      reference: ledgerReference.trim(),
+      limit: Number(ledgerLimit) || 25,
+    })}`),
+    [runtimeMode, selectedRuntimeBroker, ledgerKind, ledgerReference, ledgerLimit],
+  );
   const [daemonSymbols, setDaemonSymbols] = useState("600000");
   const [daemonTimingStrategy, setDaemonTimingStrategy] = useState("");
   const [daemonTimingFreq, setDaemonTimingFreq] = useState("day");
@@ -3603,6 +3684,22 @@ export function LivePage() {
   const runtimeEngine = runtimeSnapshot?.engine;
   const daemon = daemonStatus.data;
   const daemonEngine = daemon?.state?.engine;
+  const runnerStatus = daemon?.runner_status;
+  const risk = riskStatus.data?.risk;
+  const recovery = riskStatus.data?.recovery;
+  const riskLimits = risk?.limits || {};
+  const rejectionRows = riskStatus.data?.recent_rejections || [];
+  const commandRows = daemon?.command_status_tail || [];
+  const daemonOrders = daemon?.state?.orders || [];
+  const ledgerRows = ledgerEvents.data?.events || [];
+
+  const refreshLiveOps = async () => {
+    await Promise.all([runtimeState.refresh(), daemonStatus.refresh(), riskStatus.refresh(), ledgerEvents.refresh()]);
+  };
+  const compactJson = (value: unknown, max = 120) => {
+    const text = value === undefined || value === null ? "" : JSON.stringify(value);
+    return text.length > max ? `${text.slice(0, max)}...` : text;
+  };
 
   const checkRuntime = () =>
     run(async () => {
@@ -3617,8 +3714,7 @@ export function LivePage() {
         broker: selectedRuntimeBroker || undefined,
         timeout: 30,
       });
-      await runtimeState.refresh();
-      await daemonStatus.refresh();
+      await refreshLiveOps();
     }, t("liveRuntimeConnected"));
   };
   const startDaemon = async () => {
@@ -3635,37 +3731,89 @@ export function LivePage() {
         timing_params: timingParams,
         timing_freq: daemonTimingFreq,
       });
-      await daemonStatus.refresh();
+      await refreshLiveOps();
     }, t("liveDaemonStarted"));
   };
   const stopDaemon = async () => {
     if (!(await confirm({ message: t("liveDaemonStopConfirm"), danger: true }))) return;
     await run(async () => {
       await api.post("/api/live/daemon/stop", { timeout: 5 });
-      await daemonStatus.refresh();
-      await runtimeState.refresh();
+      await refreshLiveOps();
     }, t("liveDaemonStopped"));
   };
   const haltDaemon = async () => {
     if (!(await confirm({ message: t("liveHaltConfirm"), danger: true }))) return;
     await run(async () => {
       await api.post<LiveDaemonCommandResult>("/api/live/daemon/halt", { reason: "portal", wait: true, timeout: 5 });
-      await daemonStatus.refresh();
-      await runtimeState.refresh();
+      await refreshLiveOps();
     }, t("liveHaltedDone"));
   };
   const resumeDaemon = () =>
     run(async () => {
       await api.post<LiveDaemonCommandResult>("/api/live/daemon/resume", { wait: true, timeout: 5 });
-      await daemonStatus.refresh();
-      await runtimeState.refresh();
+      await refreshLiveOps();
     }, t("liveResumedDone"));
   const refreshDaemon = () =>
     run(async () => {
       await api.post<LiveDaemonCommandResult>("/api/live/daemon/refresh", { wait: true, timeout: 5 });
-      await daemonStatus.refresh();
-      await runtimeState.refresh();
+      await refreshLiveOps();
     }, t("liveDaemonRefreshed"));
+  const reconnectDaemon = async () => {
+    if (runtimeMode === "live" && !(await confirm({ message: t("liveDaemonReconnectConfirm"), danger: true }))) return;
+    await run(async () => {
+      await api.post<LiveDaemonCommandResult>("/api/live/daemon/reconnect", { wait: true, timeout: 20, auto_resume: false });
+      await refreshLiveOps();
+    }, t("liveDaemonReconnected"));
+  };
+  const cancelDaemonOrder = async (order: LiveOrder) => {
+    if (!(await confirm({ message: t("liveCancelConfirm"), danger: true }))) return;
+    await run(async () => {
+      await api.post<LiveDaemonCommandResult>("/api/live/daemon/cancel", {
+        order_id: order.order_id,
+        symbol: `${order.code}.${order.exchange || ""}`.replace(/\.$/, ""),
+        wait: true,
+        timeout: 5,
+      });
+      await refreshLiveOps();
+    }, t("liveCancelRequested"));
+  };
+  const strategyStart = async () => {
+    if (runtimeMode === "live" && !(await confirm({ message: t("liveStrategyStartConfirm"), danger: true }))) return;
+    await run(async () => {
+      await api.post<LiveDaemonCommandResult>("/api/live/daemon/strategy/start", {
+        timing_strategy: daemonTimingStrategy.trim(),
+        symbols: daemonSymbols,
+        timing_params: daemonTimingParams.parse(),
+        timing_freq: daemonTimingFreq,
+        wait: true,
+        timeout: 5,
+        confirm_live: runtimeMode === "live",
+      });
+      await refreshLiveOps();
+    }, t("liveStrategyStarted"));
+  };
+  const strategyStatus = () =>
+    run(async () => {
+      await api.post<LiveDaemonCommandResult>("/api/live/daemon/strategy/status", { wait: true, timeout: 5 });
+      await refreshLiveOps();
+    }, t("liveStrategyStatusDone"));
+  const strategyPause = () =>
+    run(async () => {
+      await api.post<LiveDaemonCommandResult>("/api/live/daemon/strategy/pause", { wait: true, timeout: 5 });
+      await refreshLiveOps();
+    }, t("liveStrategyPaused"));
+  const strategyResume = () =>
+    run(async () => {
+      await api.post<LiveDaemonCommandResult>("/api/live/daemon/strategy/resume", { wait: true, timeout: 5 });
+      await refreshLiveOps();
+    }, t("liveStrategyResumed"));
+  const strategyStop = async () => {
+    if (!(await confirm({ message: t("liveStrategyStopConfirm"), danger: true }))) return;
+    await run(async () => {
+      await api.post<LiveDaemonCommandResult>("/api/live/daemon/strategy/stop", { wait: true, timeout: 5 });
+      await refreshLiveOps();
+    }, t("liveStrategyStopped"));
+  };
   const connect = () =>
     run(async () => {
       await api.post("/api/live/paper/connect", { cash: Number(cash) || undefined });
@@ -3796,6 +3944,38 @@ export function LivePage() {
           <Alert>{t("liveRuntimeNoState")}</Alert>
         )}
 
+        <h3>{t("liveRiskRecovery")}</h3>
+        {riskStatus.error ? <Alert tone="error">{riskStatus.error}</Alert> : null}
+        {riskStatus.loading ? (
+          <Spinner />
+        ) : (
+          <div className="stack">
+            <div className="metric-grid compact">
+              <div className="metric"><span className="metric-label">{t("liveRiskOrdersToday")}</span><strong>{risk?.orders_today ?? 0}</strong></div>
+              <div className="metric"><span className="metric-label">{t("liveRiskValueToday")}</span><strong>{fmtMoney(risk?.value_today ?? 0)}</strong></div>
+              <div className="metric"><span className="metric-label">{t("liveRiskSeenRefs")}</span><strong>{risk?.seen_refs?.length ?? 0}</strong></div>
+              <div className="metric"><span className="metric-label">{t("liveRecovery")}</span><StatusPill status={recovery?.risk_restored ? "restored" : "pending"} /></div>
+              <div className="metric"><span className="metric-label">{t("liveRecoveryWarnings")}</span><strong>{recovery?.warnings?.length ?? 0}</strong></div>
+              <div className="metric"><span className="metric-label">{t("liveRecentRejections")}</span><strong>{rejectionRows.length}</strong></div>
+              <div className="metric"><span className="metric-label">{t("liveRiskMaxOrder")}</span><strong>{fmtMoney(Number(riskLimits.max_order_value ?? 0))}</strong></div>
+              <div className="metric"><span className="metric-label">{t("liveRiskLot")}</span><strong>{String(riskLimits.lot_size ?? "-")}</strong></div>
+            </div>
+            {recovery?.warnings?.length ? (
+              <Alert tone="warning">{recovery.warnings.map((item) => item.kind || item.detail || "").filter(Boolean).join(", ")}</Alert>
+            ) : null}
+            <DataTable<LiveLedgerEvent>
+              rows={rejectionRows}
+              empty={t("empty")}
+              columns={[
+                { key: "ts", label: t("time"), ellipsis: true },
+                { key: "kind", label: t("kind") },
+                { key: "reference", label: t("liveReference"), ellipsis: true },
+                { key: "payload", label: t("reason"), ellipsis: true, render: (r) => String(r.payload?.reason || r.payload?.rule || "") },
+              ]}
+            />
+          </div>
+        )}
+
         <h3>{t("liveDaemon")}</h3>
         {daemonStatus.error ? <Alert tone="error">{daemonStatus.error}</Alert> : null}
         {daemonStatus.loading ? (
@@ -3833,11 +4013,24 @@ export function LivePage() {
               <div className="metric"><span className="metric-label">{t("liveCommands")}</span><strong>{daemon?.commands_processed ?? 0}</strong></div>
               <div className="metric"><span className="metric-label">{t("liveLastCommand")}</span><strong>{daemon?.last_command?.action || "-"}</strong></div>
               <div className="metric"><span className="metric-label">{t("liveTimingStrategy")}</span><strong>{daemon?.runner?.strategy || "-"}</strong></div>
+              <div className="metric"><span className="metric-label">{t("liveRunnerState")}</span><StatusPill status={runnerStatus?.active ? "active" : runnerStatus?.paused ? "paused" : runnerStatus?.stopped ? "stopped" : runnerStatus?.enabled ? "idle" : "disabled"} /></div>
+              <div className="metric"><span className="metric-label">{t("liveRunnerPending")}</span><strong>{runnerStatus?.pending_requests ?? 0}</strong></div>
+              <div className="metric"><span className="metric-label">{t("liveRunnerAlgo")}</span><StatusPill status={runnerStatus?.algo_armed ? "armed" : "idle"} /></div>
+            </div>
+            <div className="toolbar live-status-bar">
+              <div className="row-actions">
+                <AsyncButton className="button ghost" onClick={strategyStatus} disabled={!daemon?.running}>{t("liveStrategyStatus")}</AsyncButton>
+                <AsyncButton onClick={strategyStart} disabled={!daemon?.running || !daemonTimingStrategy.trim() || Boolean(runnerStatus?.active)}>{t("liveStrategyStart")}</AsyncButton>
+                <AsyncButton className="button ghost" onClick={strategyPause} disabled={!daemon?.running || !runnerStatus?.active}>{t("liveStrategyPause")}</AsyncButton>
+                <AsyncButton className="button ghost" onClick={strategyResume} disabled={!daemon?.running || !runnerStatus?.paused}>{t("liveStrategyResume")}</AsyncButton>
+                <AsyncButton className="button danger" onClick={strategyStop} disabled={!daemon?.running || !runnerStatus?.enabled}>{t("liveStrategyStop")}</AsyncButton>
+              </div>
             </div>
             <div className="toolbar live-status-bar">
               <div className="row-actions">
                 <AsyncButton onClick={startDaemon} disabled={Boolean(daemon?.alive)}>{t("liveDaemonStart")}</AsyncButton>
                 <AsyncButton className="button ghost" onClick={refreshDaemon} disabled={!daemon?.running}>{t("liveDaemonRefresh")}</AsyncButton>
+                <AsyncButton className="button ghost" onClick={reconnectDaemon} disabled={!daemon?.running}>{t("liveDaemonReconnect")}</AsyncButton>
                 {daemonEngine?.halted ? (
                   <AsyncButton onClick={resumeDaemon} disabled={!daemon?.running}>{t("liveResume")}</AsyncButton>
                 ) : (
@@ -3846,8 +4039,76 @@ export function LivePage() {
                 <AsyncButton className="button ghost" onClick={stopDaemon} disabled={!daemon?.alive}>{t("liveDaemonStop")}</AsyncButton>
               </div>
             </div>
+            <DataTable<LiveOrder>
+              rows={daemonOrders.slice(-8).reverse()}
+              empty={t("empty")}
+              columns={[
+                { key: "order_id", label: t("liveOrderId"), ellipsis: true },
+                { key: "code", label: t("liveCode") },
+                { key: "side", label: t("liveSideCol"), render: (r) => t(r.side === "buy" ? "liveBuy" : "liveSell") },
+                { key: "price", label: t("livePrice"), align: "right", render: (r) => fmtMoney(r.price) },
+                { key: "volume", label: t("liveVolume"), align: "right" },
+                { key: "traded", label: t("liveTraded"), align: "right" },
+                { key: "status", label: t("status"), render: (r) => <StatusPill status={r.status} /> },
+                {
+                  key: "action",
+                  label: t("action"),
+                  render: (r) => r.active ? (
+                    <AsyncButton className="button small danger" onClick={() => cancelDaemonOrder(r)}>{t("liveCancelOrder")}</AsyncButton>
+                  ) : "—",
+                },
+              ]}
+            />
+            <DataTable<LiveCommandStatus>
+              rows={commandRows.slice(-8).reverse()}
+              empty={t("empty")}
+              columns={[
+                { key: "ts", label: t("time"), ellipsis: true },
+                { key: "action", label: t("action") },
+                { key: "stage", label: t("status"), render: (r) => <StatusPill status={String(r.stage || "")} /> },
+                { key: "result", label: t("result"), ellipsis: true, render: (r) => String(r.result?.error || r.result?.message || r.result?.action || "") },
+              ]}
+            />
           </div>
         )}
+      </section>
+
+      <section className="panel">
+        <div className="panel-head">
+          <div className="panel-title-inline">
+            <h2>{t("liveLedger")}</h2>
+            <InfoDot tip={t("liveLedgerTip")} />
+          </div>
+          <RefreshButton onClick={ledgerEvents.refresh} />
+        </div>
+        <div className="toolbar live-status-bar">
+          <label className="field">
+            <span>{t("kind")}</span>
+            <input value={ledgerKind} onChange={(e) => setLedgerKind(e.target.value)} placeholder="submit" />
+          </label>
+          <label className="field">
+            <span>{t("liveReference")}</span>
+            <input value={ledgerReference} onChange={(e) => setLedgerReference(e.target.value)} />
+          </label>
+          <label className="field">
+            <span>{t("limit")}</span>
+            <input value={ledgerLimit} onChange={(e) => setLedgerLimit(e.target.value)} inputMode="numeric" />
+          </label>
+        </div>
+        {ledgerEvents.error ? <Alert tone="error">{ledgerEvents.error}</Alert> : null}
+        <DataTable<LiveLedgerEvent>
+          rows={ledgerRows}
+          loading={ledgerEvents.loading}
+          empty={t("empty")}
+          columns={[
+            { key: "ts", label: t("time"), ellipsis: true },
+            { key: "kind", label: t("kind") },
+            { key: "source", label: t("source") },
+            { key: "order_id", label: t("liveOrderId"), ellipsis: true },
+            { key: "reference", label: t("liveReference"), ellipsis: true },
+            { key: "payload", label: t("payload"), ellipsis: true, render: (r) => compactJson(r.payload) },
+          ]}
+        />
       </section>
 
       <Alert tone="info">{t("livePaperNote")}</Alert>

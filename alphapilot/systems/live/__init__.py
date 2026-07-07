@@ -7,6 +7,7 @@ risk gate and executor live in submodules and are imported on demand so that
 """
 
 from alphapilot.systems.live.config import LiveConfig, RiskLimits, RunMode
+from alphapilot.systems.live.events import LiveEvent, LiveEventBus
 from alphapilot.systems.live.gateway import BrokerGateway, GatewayCallback
 from alphapilot.systems.live.types import (
     ACTIVE_STATUSES,
@@ -39,6 +40,8 @@ __all__ = [
     "Direction",
     "Exchange",
     "GatewayCallback",
+    "LiveEvent",
+    "LiveEventBus",
     "LiveConfig",
     "Offset",
     "Order",

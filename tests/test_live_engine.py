@@ -84,6 +84,20 @@ def test_sim_partial_then_cancel(tmp_path: Path) -> None:
     assert engine.oms.get_active_orders() == []
 
 
+def test_cancel_inactive_order_is_skipped(tmp_path: Path) -> None:
+    broker = PaperBroker(cash=100_000.0, prices={KEY: 10.0}, open_cost=0.0, min_cost=0.0)
+    engine = _engine(tmp_path, broker)
+    engine.connect({})
+    order_id = engine.submit(OrderRequest.buy("600000", Exchange.SSE, 100, 10.0))
+    assert engine.oms.get_order(order_id).status is OrderStatus.ALLTRADED
+
+    result = engine.cancel(order_id)
+
+    assert result["cancelled"] is False
+    assert result["reason"] == "not_active"
+    assert engine.ledger.events(kind="cancel_skipped")[-1]["payload"]["status"] == "alltraded"
+
+
 def test_kill_switch_blocks_and_flattens(tmp_path: Path) -> None:
     broker = SimBroker(cash=100_000.0, prices={KEY: 10.0}, partial_ratio=0.5,
                        open_cost=0.0, min_cost=0.0)
@@ -114,6 +128,39 @@ def test_disconnect_halts_then_reconcile_resumes(tmp_path: Path) -> None:
 
     engine.reconcile_and_resume()
     assert not engine.runmode.halted
+    assert engine.connection.is_ready()
+    assert {"disconnected", "reconciled"} <= _kinds(engine)
+
+
+def test_reconnect_reconcile_keeps_halted_by_default(tmp_path: Path) -> None:
+    broker = PaperBroker(cash=100_000.0, prices={KEY: 10.0})
+    engine = _engine(tmp_path, broker)
+    engine.connect({})
+
+    engine.handle_disconnect("socket drop")
+    report = engine.reconcile_after_reconnect()
+
+    assert report["resumed"] is False
+    assert engine.runmode.halted
+    assert engine.connection.is_ready()
+    assert engine.submit(OrderRequest.buy("600000", Exchange.SSE, 100, 10.0)) is None
+    reconciled = engine.ledger.events(kind="reconciled")[-1]
+    assert reconciled["payload"]["auto_resume"] is False
+    assert reconciled["payload"]["resumed"] is False
+
+    engine.resume()
+    assert not engine.runmode.halted
+
+
+def test_reconnect_from_logged_in_is_conservative(tmp_path: Path) -> None:
+    broker = PaperBroker(cash=100_000.0, prices={KEY: 10.0})
+    engine = _engine(tmp_path, broker)
+    engine.connect({})
+
+    report = engine.reconcile_after_reconnect()
+
+    assert report["resumed"] is False
+    assert engine.runmode.halted
     assert engine.connection.is_ready()
     assert {"disconnected", "reconciled"} <= _kinds(engine)
 

@@ -1478,6 +1478,58 @@ def create_app(
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
+    @app.get("/api/live/risk/status")
+    def live_risk_status(
+        mode: str | None = Query(default=None),
+        broker: str | None = Query(default=None),
+        state_dir: str | None = Query(default=None),
+        ledger_dir: str | None = Query(default=None),
+        tail: int = Query(default=20),
+    ) -> dict[str, Any]:
+        try:
+            return _jsonable(
+                _live_module().live_risk_status(
+                    mode=mode,
+                    broker=broker,
+                    state_dir=state_dir,
+                    ledger_dir=ledger_dir,
+                    tail=tail,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.get("/api/live/ledger/events")
+    def live_ledger_events(
+        kind: str | None = Query(default=None),
+        command_id: str | None = Query(default=None),
+        order_id: str | None = Query(default=None),
+        reference: str | None = Query(default=None),
+        day: str | None = Query(default=None),
+        limit: int = Query(default=50),
+        mode: str | None = Query(default=None),
+        broker: str | None = Query(default=None),
+        ledger_dir: str | None = Query(default=None),
+        state_dir: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        try:
+            return _jsonable(
+                _live_module().live_ledger_events(
+                    kind=kind,
+                    command_id=command_id,
+                    order_id=order_id,
+                    reference=reference,
+                    day=day,
+                    limit=limit,
+                    mode=mode,
+                    broker=broker,
+                    ledger_dir=ledger_dir,
+                    state_dir=state_dir,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
     @app.get("/api/live/daemon/status")
     def live_daemon_status(
         mode: str | None = Query(default=None),
@@ -1566,6 +1618,111 @@ def create_app(
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
+    @app.post("/api/live/daemon/reconnect")
+    def live_daemon_reconnect(payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _jsonable(
+                _live_module().live_daemon_reconnect(
+                    state_dir=payload.get("state_dir"),
+                    wait=bool(payload.get("wait", False)),
+                    timeout=float(payload.get("timeout") or 20.0),
+                    auto_resume=bool(payload.get("auto_resume", False)),
+                    confirm_live=bool(payload.get("confirm_live", False)),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/live/daemon/cancel")
+    def live_daemon_cancel(payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _jsonable(
+                _live_module().live_daemon_cancel(
+                    order_id=str(payload.get("order_id") or ""),
+                    symbol=payload.get("symbol") or payload.get("code"),
+                    force=bool(payload.get("force", False)),
+                    state_dir=payload.get("state_dir"),
+                    wait=bool(payload.get("wait", False)),
+                    timeout=float(payload.get("timeout") or 5.0),
+                    event_timeout=float(payload.get("event_timeout") or 3.0),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/live/daemon/strategy/status")
+    def live_daemon_strategy_status(payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _jsonable(
+                _live_module().live_daemon_strategy_status(
+                    state_dir=payload.get("state_dir"),
+                    wait=bool(payload.get("wait", True)),
+                    timeout=float(payload.get("timeout") or 5.0),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/live/daemon/strategy/start")
+    def live_daemon_strategy_start(payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _jsonable(
+                _live_module().live_daemon_strategy_start(
+                    timing_strategy=str(payload.get("timing_strategy") or payload.get("strategy") or ""),
+                    symbols=payload.get("symbols"),
+                    timing_params=payload.get("timing_params") or payload.get("params"),
+                    timing_freq=str(payload.get("timing_freq") or payload.get("freq") or "day"),
+                    bar_seconds=int(payload.get("bar_seconds") or 60),
+                    min_bars=int(payload.get("min_bars") or 30),
+                    window=int(payload.get("window") or 250),
+                    state_dir=payload.get("state_dir"),
+                    wait=bool(payload.get("wait", True)),
+                    timeout=float(payload.get("timeout") or 5.0),
+                    confirm_live=bool(payload.get("confirm_live", False)),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/live/daemon/strategy/pause")
+    def live_daemon_strategy_pause(payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _jsonable(
+                _live_module().live_daemon_strategy_pause(
+                    state_dir=payload.get("state_dir"),
+                    wait=bool(payload.get("wait", True)),
+                    timeout=float(payload.get("timeout") or 5.0),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/live/daemon/strategy/resume")
+    def live_daemon_strategy_resume(payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _jsonable(
+                _live_module().live_daemon_strategy_resume(
+                    state_dir=payload.get("state_dir"),
+                    wait=bool(payload.get("wait", True)),
+                    timeout=float(payload.get("timeout") or 5.0),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/live/daemon/strategy/stop")
+    def live_daemon_strategy_stop(payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _jsonable(
+                _live_module().live_daemon_strategy_stop(
+                    state_dir=payload.get("state_dir"),
+                    wait=bool(payload.get("wait", True)),
+                    timeout=float(payload.get("timeout") or 5.0),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
     @app.post("/api/live/daemon/order")
     def live_daemon_order(payload: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -1579,6 +1736,7 @@ def create_app(
                     state_dir=payload.get("state_dir"),
                     wait=bool(payload.get("wait", False)),
                     timeout=float(payload.get("timeout") or 5.0),
+                    event_timeout=float(payload.get("event_timeout") or 3.0),
                     confirm_live=bool(payload.get("confirm_live", False)),
                     reference=str(payload.get("reference") or "portal_daemon"),
                 )

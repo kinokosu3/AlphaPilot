@@ -79,6 +79,8 @@ class PaperBroker(BrokerGateway):
         self._prices: dict[str, float] = dict(prices or {})
         self._holdings: dict[str, _Holding] = {}
         self._working: dict[str, Order] = {}
+        self._orders: dict[str, Order] = {}
+        self._trades: dict[str, Trade] = {}
         self._seq = 0
 
     # ---- test/seed helpers ----------------------------------------------- #
@@ -114,6 +116,7 @@ class PaperBroker(BrokerGateway):
         self._seq += 1
         order_id = f"{self.name}-{self._seq}-{uuid.uuid4().hex[:6]}"
         order = req.create_order(order_id, self.name, status=OrderStatus.SUBMITTING)
+        self._orders[order_id] = copy(order)
         self._emit_order(copy(order))
 
         decision = self._decide(req)
@@ -126,6 +129,7 @@ class PaperBroker(BrokerGateway):
 
         if decision.fill_volume > 0:
             trade = self._apply_fill(req, order, decision)
+            self._trades[trade.trade_id] = trade
             self._emit_trade(trade)
             order.traded = min(order.traded + decision.fill_volume, order.volume)
             status = (
@@ -159,6 +163,16 @@ class PaperBroker(BrokerGateway):
             if h.volume > 0:
                 self._emit_position_of(h)
 
+    def query_orders(self) -> bool:
+        for order in self._orders.values():
+            self._emit_order(copy(order))
+        return True
+
+    def query_trades(self) -> bool:
+        for trade in self._trades.values():
+            self._emit_trade(trade)
+        return True
+
     # ---- fill policy (overridden by SimBroker) --------------------------- #
     def _decide(self, req: OrderRequest) -> FillDecision:
         """Default: full fill at the resolved price."""
@@ -174,6 +188,7 @@ class PaperBroker(BrokerGateway):
         order.status = status
         if message:
             order.message = message
+        self._orders[order.order_id] = copy(order)
         # Emit a *copy* so the OMS never aliases the broker's mutable order (a
         # shared reference would make ``prior is current`` and defeat the FSM guard).
         self._emit_order(copy(order))

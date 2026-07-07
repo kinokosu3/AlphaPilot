@@ -6,7 +6,7 @@ Ownership:
 * owns the safety FSMs (:class:`RunModeMachine`, :class:`ConnectionMachine`,
   :class:`SessionClock`);
 * exposes the single guarded path for acting on the market — :meth:`submit` /
-  :meth:`cancel` / :meth:`halt` / :meth:`reconcile_and_resume`.
+  :meth:`cancel` / :meth:`halt` / :meth:`reconcile_after_reconnect`.
 
 The engine is broker-agnostic: it talks only to the :class:`BrokerGateway` port,
 so PAPER (PaperBroker), SIM (SimBroker) and LIVE (native XTP Pro / EMT gateways)
@@ -20,6 +20,7 @@ from datetime import datetime
 from typing import Any, Callable
 
 from alphapilot.systems.live.config import LiveConfig, RunMode
+from alphapilot.systems.live.events import LiveEvent, LiveEventBus
 from alphapilot.systems.live.fsm.connection_fsm import ConnectionMachine, ConnectionState
 from alphapilot.systems.live.fsm.runmode_fsm import RunModeMachine
 from alphapilot.systems.live.fsm.session_fsm import SessionClock
@@ -28,6 +29,7 @@ from alphapilot.systems.live.ledger import Ledger
 from alphapilot.systems.live.oms import OMS
 from alphapilot.systems.live.types import (
     Account,
+    CancelRequest,
     Contract,
     LogEvent,
     Order,
@@ -49,6 +51,7 @@ class LiveEngine:
         now_fn: Callable[[], Any] | None = None,
         is_trading_day_fn: Callable[[Any], bool] | None = None,
         ledger: Ledger | None = None,
+        event_bus: LiveEventBus | None = None,
         risk: Any = None,
     ) -> None:
         self.config = config
@@ -58,6 +61,8 @@ class LiveEngine:
         self.connection = ConnectionMachine()
         self.session = SessionClock(now_fn or datetime.now, is_trading_day_fn)
         self.ledger = ledger or Ledger(config.ledger_dir)
+        self.events = event_bus or LiveEventBus()
+        self._event_now = getattr(self.ledger, "_now_fn", datetime.now)
         self.risk = risk  # installed in Phase 3; None => no pre-trade checks
         self._tick_listeners: list[Callable[[TickData], None]] = []
         gateway.register_callback(self)
@@ -73,28 +78,61 @@ class LiveEngine:
     # ---- GatewayCallback (fan-out to OMS + ledger) ----------------------- #
     def on_order(self, order: Order) -> None:
         self.oms.on_order(order)
-        self.ledger.record("order", order)
+        self._audit("order", order, order_id=order.order_id, reference=order.reference, source=_source(order, self))
 
     def on_trade(self, trade: Trade) -> None:
         self.oms.on_trade(trade)
-        self.ledger.record("trade", trade)
+        self._audit("trade", trade, order_id=trade.order_id, source=_source(trade, self))
 
     def on_position(self, position: Position) -> None:
         self.oms.on_position(position)
+        self._publish("position", position, source=_source(position, self))
 
     def on_account(self, account: Account) -> None:
         self.oms.on_account(account)
+        self._publish("account", account, source=_source(account, self))
 
     def on_contract(self, contract: Contract) -> None:
         self.oms.on_contract(contract)
+        self._publish("contract", contract, source=_source(contract, self))
 
     def on_tick(self, tick: TickData) -> None:
         self.oms.on_tick(tick)
+        self._publish("tick", tick, source=_source(tick, self))
         for listener in self._tick_listeners:
             listener(tick)
 
     def on_log(self, log: LogEvent) -> None:
         self.oms.on_log(log)
+        self._publish("log", log, source=_source(log, self))
+
+    def on_gateway_connected(self, gateway: str, channel: str, detail: str = "") -> None:
+        self._audit(
+            "gateway_connected",
+            {"gateway": gateway, "channel": channel, "detail": detail},
+            source=gateway or self.gateway.name,
+        )
+
+    def on_gateway_disconnected(
+        self,
+        gateway: str,
+        channel: str,
+        reason: str = "",
+        *,
+        halt: bool = True,
+    ) -> None:
+        if halt:
+            self.handle_disconnect(f"{channel}:{reason}" if reason else channel)
+        self._audit(
+            "gateway_disconnected",
+            {
+                "gateway": gateway,
+                "channel": channel,
+                "reason": reason,
+                "halt": bool(halt),
+            },
+            source=gateway or self.gateway.name,
+        )
 
     # ---- lifecycle ------------------------------------------------------- #
     def connect(self, setting: dict | None = None) -> None:
@@ -103,17 +141,17 @@ class LiveEngine:
             self.gateway.connect(setting or {})
         except Exception as exc:  # noqa: BLE001 - surface as connection error
             self.connection.transition(ConnectionState.ERROR)
-            self.ledger.record("connect_error", {"error": str(exc)})
+            self._audit("connect_error", {"error": str(exc)}, source=self.gateway.name)
             raise
         self.connection.transition(ConnectionState.CONNECTED)
         self.connection.transition(ConnectionState.LOGGED_IN)
-        self.ledger.record("connected", {"broker": self.gateway.name, "mode": self.config.mode})
+        self._audit("connected", {"broker": self.gateway.name, "mode": self.config.mode}, source=self.gateway.name)
 
     def close(self) -> None:
         self.gateway.close()
         if self.connection.state != ConnectionState.DISCONNECTED:
             self.connection.transition(ConnectionState.DISCONNECTED)
-        self.ledger.record("closed", {"broker": self.gateway.name})
+        self._audit("closed", {"broker": self.gateway.name}, source=self.gateway.name)
 
     # ---- guarded actions ------------------------------------------------- #
     def submit(self, req: OrderRequest) -> str | None:
@@ -123,62 +161,123 @@ class LiveEngine:
         (dry-run, halted, or rejected by the risk gate — all audited).
         """
         if self.runmode.is_dry_run():
-            self.ledger.record("dry_run_intent", req)
+            self._audit("dry_run_intent", req, reference=req.reference)
             return None
         if not self.runmode.can_submit_orders():
-            self.ledger.record("blocked", {"reason": f"halted:{self.runmode.halt_reason}", "req": _req(req)})
+            self._audit("blocked", {"reason": f"halted:{self.runmode.halt_reason}", "req": _req(req)}, reference=req.reference)
             return None
         if self.risk is not None:
             verdict = self.risk.check(req, self.oms, self.session, self.runmode)
             if not verdict.ok:
-                self.ledger.record("rejected", {"reason": verdict.reason, "req": _req(req)})
+                self._audit(
+                    "rejected",
+                    {"rule": verdict.rule, "reason": verdict.reason, "req": _req(req)},
+                    reference=req.reference,
+                )
                 return None
         order_id = self.gateway.send_order(req)
-        self.ledger.record("submit", {"order_id": order_id, "req": _req(req)})
+        self._audit("submit", {"order_id": order_id, "req": _req(req)}, order_id=order_id, reference=req.reference)
         return order_id
 
-    def cancel(self, order: Order | str) -> None:
+    def cancel(self, order: Order | str, *, active_only: bool = True) -> dict[str, Any]:
         if isinstance(order, str):
             found = self.oms.get_order(order)
             if found is None:
-                self.ledger.record("cancel_miss", {"order_id": order})
-                return
+                self._audit("cancel_miss", {"order_id": order}, order_id=order)
+                return {"cancelled": False, "order_id": order, "reason": "not_found"}
             order = found
+        if active_only and not order.is_active():
+            self._audit(
+                "cancel_skipped",
+                {"order_id": order.order_id, "reason": "not_active", "status": order.status.value},
+                order_id=order.order_id,
+                reference=order.reference,
+            )
+            return {"cancelled": False, "order_id": order.order_id, "reason": "not_active"}
         self.gateway.cancel_order(order.create_cancel())
-        self.ledger.record("cancel", {"order_id": order.order_id})
+        self._audit("cancel", {"order_id": order.order_id}, order_id=order.order_id, reference=order.reference)
+        return {"cancelled": True, "order_id": order.order_id, "reference": order.reference}
+
+    def cancel_request(self, req: CancelRequest, *, force: bool = False) -> dict[str, Any]:
+        """Send a raw cancel request when the order is not in the OMS.
+
+        This is intended for operator recovery only; the normal path is
+        :meth:`cancel`, which verifies the order is known and active.
+        """
+        self.gateway.cancel_order(req)
+        payload = {
+            "order_id": req.order_id,
+            "code": req.code,
+            "exchange": req.exchange.value,
+            "force": bool(force),
+        }
+        self._audit("cancel", payload, order_id=req.order_id)
+        return {"cancelled": True, **payload}
 
     # ---- safety controls ------------------------------------------------- #
     def halt(self, reason: str = "manual") -> None:
         """Kill-switch: stop new orders and cancel every working order."""
         self.runmode.halt(reason)
-        self.ledger.record("halt", {"reason": reason})
+        self._audit("halt", {"reason": reason})
         for order in self.oms.get_active_orders():
             try:
                 self.gateway.cancel_order(order.create_cancel())
             except Exception as exc:  # noqa: BLE001 - best-effort flatten of working orders
-                self.ledger.record("halt_cancel_error", {"order_id": order.order_id, "error": str(exc)})
+                self._audit("halt_cancel_error", {"order_id": order.order_id, "error": str(exc)}, order_id=order.order_id)
 
     def resume(self) -> None:
         self.runmode.resume()
-        self.ledger.record("resume", {})
+        self._audit("resume", {})
 
     def handle_disconnect(self, reason: str = "disconnected") -> None:
         """Gateway dropped: halt immediately (no new orders until reconciled)."""
         if self.connection.state != ConnectionState.DISCONNECTED:
             self.connection.transition(ConnectionState.DISCONNECTED)
         self.runmode.halt(reason)
-        self.ledger.record("disconnected", {"reason": reason})
+        self._audit("disconnected", {"reason": reason}, source=self.gateway.name)
 
-    def reconcile_and_resume(self) -> None:
-        """After reconnect: re-query the real account/positions, then resume."""
+    def reconcile_after_reconnect(
+        self,
+        *,
+        setting: dict | None = None,
+        auto_resume: bool = False,
+    ) -> dict[str, Any]:
+        """After reconnect, re-query broker state before trading can resume.
+
+        The conservative default keeps the kill-switch engaged. Operators or
+        higher-level runtimes can pass ``auto_resume=True`` only after they have
+        decided the broker/ledger state is safe.
+        """
+        if self.connection.state != ConnectionState.DISCONNECTED:
+            try:
+                self.gateway.close()
+            except Exception as exc:  # noqa: BLE001 - reconnect still records the safety halt
+                self._audit("reconnect_close_error", {"error": str(exc)}, source=self.gateway.name)
+            self.handle_disconnect("reconnect")
+        elif not auto_resume and not self.runmode.halted:
+            self.runmode.halt("reconnect")
+            self._audit("halt", {"reason": "reconnect"})
         self.connection.transition(ConnectionState.CONNECTING)
-        self.gateway.connect({})
+        self.gateway.connect(setting or {})
         self.connection.transition(ConnectionState.CONNECTED)
         self.connection.transition(ConnectionState.LOGGED_IN)
         self.gateway.query_account()
         self.gateway.query_position()
-        self.runmode.resume()
-        self.ledger.record("reconciled", {"buying_power": self.oms.buying_power()})
+        if auto_resume:
+            self.runmode.resume()
+        report = {
+            "buying_power": self.oms.buying_power(),
+            "auto_resume": bool(auto_resume),
+            "resumed": not self.runmode.halted,
+            "active_orders": len(self.oms.get_active_orders()),
+            "positions": len(self.oms.get_positions()),
+        }
+        self._audit("reconciled", report, source=self.gateway.name)
+        return report
+
+    def reconcile_and_resume(self) -> dict[str, Any]:
+        """Backward-compatible reconnect helper that resumes after reconciliation."""
+        return self.reconcile_after_reconnect(auto_resume=True)
 
     # ---- introspection --------------------------------------------------- #
     def tick_session(self):
@@ -188,6 +287,7 @@ class LiveEngine:
         return {
             "mode": self.runmode.mode,
             "halted": self.runmode.halted,
+            "halt_reason": self.runmode.halt_reason,
             "connection": self.connection.state.value,
             "session": self.session.state.value,
             "buying_power": self.oms.buying_power(),
@@ -195,7 +295,38 @@ class LiveEngine:
             "positions": len(self.oms.get_positions()),
             "contracts": len(self.oms.contracts),
             "ticks": len(self.oms.ticks),
+            "risk": self.risk.snapshot() if self.risk is not None and hasattr(self.risk, "snapshot") else None,
         }
+
+    def _publish(
+        self,
+        kind: str,
+        payload: Any = None,
+        *,
+        order_id: str | None = None,
+        reference: str | None = None,
+        source: str = "live",
+    ) -> LiveEvent:
+        return self.events.publish(
+            kind,
+            payload,
+            order_id=order_id,
+            reference=reference,
+            source=source,
+            now_fn=self._event_now,
+        )
+
+    def _audit(
+        self,
+        kind: str,
+        payload: Any = None,
+        *,
+        order_id: str | None = None,
+        reference: str | None = None,
+        source: str = "live",
+    ) -> dict[str, Any]:
+        event = self._publish(kind, payload, order_id=order_id, reference=reference, source=source)
+        return self.ledger.append_event(event)
 
 
 def _req(req: OrderRequest) -> dict[str, Any]:
@@ -203,3 +334,7 @@ def _req(req: OrderRequest) -> dict[str, Any]:
         "code": req.code, "exchange": req.exchange.value, "direction": req.direction.value,
         "volume": req.volume, "price": req.price, "type": req.type.value, "reference": req.reference,
     }
+
+
+def _source(value: Any, engine: LiveEngine) -> str:
+    return str(getattr(value, "gateway", "") or engine.gateway.name or "live")

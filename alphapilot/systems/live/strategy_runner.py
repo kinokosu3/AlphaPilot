@@ -71,23 +71,72 @@ class LiveTimingRunner:
         self._last_session_state: SessionState | None = None
         self._finalized_day: date | None = None
         self._started = False
+        self._paused = False
+        self._stopped = False
 
     # ---- lifecycle ---------------------------------------------------------- #
     def start(self) -> None:
         """Attach to the engine's tick stream and subscribe market data."""
-        if self._started:
+        if self._started and not self._stopped:
             return
+        self._stopped = False
+        self._paused = False
         self.engine.add_tick_listener(self.on_tick)
         self.engine.gateway.subscribe(self.symbols)
         self._started = True
 
+    def pause(self) -> dict[str, Any]:
+        """Pause strategy signal generation without disconnecting market data."""
+        if not self._stopped:
+            self._paused = True
+        return self.status()
+
+    def resume(self) -> dict[str, Any]:
+        """Resume a paused runner."""
+        if self._started and not self._stopped:
+            self._paused = False
+        return self.status()
+
+    def stop(self) -> dict[str, Any]:
+        """Stop strategy actions for the lifetime of this runner instance."""
+        self._paused = False
+        self._stopped = True
+        self.pending_requests = []
+        self.algo = None
+        return self.status()
+
+    def status(self) -> dict[str, Any]:
+        """Return a compact lifecycle/status projection."""
+        return {
+            "started": self._started,
+            "paused": self._paused,
+            "stopped": self._stopped,
+            "active": self._started and not self._paused and not self._stopped,
+            "symbols": list(self.symbols),
+            "freq": self.freq,
+            "pending_requests": len(self.pending_requests),
+            "algo_armed": self.algo is not None,
+            "last_session": None if self._last_session_state is None else self._last_session_state.value,
+        }
+
     # ---- event inputs -------------------------------------------------------- #
     def on_tick(self, tick: TickData) -> None:
+        if self._paused or self._stopped:
+            return
         self.bars.on_tick(tick)
 
     def step(self) -> dict[str, Any]:
         """Advance time-driven work; call periodically from the owner loop."""
+        if self._stopped:
+            status = self.status()
+            status["session"] = None
+            return status
+
         state = self.engine.session.tick()
+        if self._paused:
+            status = self.status()
+            status["session"] = state.value
+            return status
 
         # Close partial bars at session boundaries so the last bar of a half-day
         # doesn't wait for a tick that will never come.
@@ -103,13 +152,14 @@ class LiveTimingRunner:
                 self.algo = None
 
         return {
+            **self.status(),
             "session": state.value,
-            "pending_requests": len(self.pending_requests),
-            "algo_armed": self.algo is not None,
         }
 
     # ---- internals ------------------------------------------------------------ #
     def _on_bar_closed(self, bar: Bar) -> None:
+        if self._paused or self._stopped:
+            return
         intents = self.strategy.on_bar(bar)
         if not intents:
             return

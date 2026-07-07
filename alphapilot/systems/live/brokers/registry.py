@@ -63,6 +63,11 @@ _COMMON_FIELDS: tuple[SettingField, ...] = (
     SettingField("LOG_LEVEL", "日志级别", str, "INFO"),
 )
 
+_EMT_FIELDS: tuple[SettingField, ...] = _COMMON_FIELDS + (
+    SettingField("QUOTE_ACCOUNT", "行情账号", str, ""),
+    SettingField("QUOTE_PASSWORD", "行情密码", str, ""),
+)
+
 
 @dataclass(frozen=True)
 class BrokerCapabilities:
@@ -79,6 +84,8 @@ class BrokerCapabilities:
     supports_contract_query: bool = True
     supports_account_query: bool = True
     supports_position_query: bool = True
+    supports_order_query: bool = False
+    supports_trade_query: bool = False
     supports_cancel: bool = True
     supports_margin: bool = False
     supports_history: bool = False
@@ -213,6 +220,7 @@ register_broker(
         gateway_name="XTP",
         setting_fields=_COMMON_FIELDS + (SettingField("SOFTWARE_KEY", "授权码", required=True),),
         description="中泰证券 XTP PRO（SDK 1.2.1，XTPX 新一代柜台）",
+        capabilities=BrokerCapabilities(supports_order_query=False, supports_trade_query=True),
     )
 )
 register_broker(
@@ -220,6 +228,8 @@ register_broker(
         name="emt",
         gateway_path="alphapilot.systems.live.brokers.emt:EmtGateway",
         gateway_name="EMT",
+        setting_fields=_EMT_FIELDS,
         description="东方财富证券 EMT（trade ~2.27 / quote ~2.19，原生网关）",
+        capabilities=BrokerCapabilities(supports_order_query=True, supports_trade_query=True),
     )
 )

@@ -61,13 +61,23 @@ EXPECTED_COMMANDS = {
     "live_daemon_status",
     "live_daemon_stop",
     "live_daemon_halt",
+    "live_daemon_cancel",
     "live_daemon_order",
     "live_daemon_resume",
     "live_daemon_refresh",
+    "live_daemon_reconnect",
+    "live_daemon_strategy_pause",
+    "live_daemon_strategy_resume",
+    "live_daemon_strategy_start",
+    "live_daemon_strategy_status",
+    "live_daemon_strategy_stop",
     "live_daemon_submit_target",
     "live_modes",
+    "live_ledger_events",
+    "live_cancel",
     "live_order",
     "live_preflight",
+    "live_risk_status",
     "live_run",
     "live_state",
     "live_status",
@@ -416,6 +426,8 @@ def test_real_cli_command_smoke(cli_ctx: CliContext) -> None:
     _run_ok(ctx, "live_brokers")
     _run_ok(ctx, "live_preflight", "--broker=paper")
     _run_ok(ctx, "live_state", "--mode=paper", f"--state_dir={live_state}")
+    _run_ok(ctx, "live_risk_status", "--mode=paper", f"--state_dir={live_state}", f"--ledger_dir={live_ledger}")
+    _run_ok(ctx, "live_ledger_events", "--mode=paper", f"--ledger_dir={live_ledger}")
     _run_ok(
         ctx,
         "live_connect",
@@ -450,6 +462,16 @@ def test_real_cli_command_smoke(cli_ctx: CliContext) -> None:
     )
     _run_ok(
         ctx,
+        "live_cancel",
+        "--mode=paper",
+        "--order_id=paper-missing",
+        "--symbol=SH600000",
+        "--force=True",
+        "--cash=10000",
+        "--timeout=1",
+    )
+    _run_ok(
+        ctx,
         "live_submit_target",
         "--mode=paper",
         "--holdings={\"SH600000\":100}",
@@ -474,6 +496,22 @@ def test_real_cli_command_smoke(cli_ctx: CliContext) -> None:
         )
         started_daemon = True
         time.sleep(1)
+        _run_ok(ctx, "live_daemon_strategy_status", "--wait=True", "--timeout=5", f"--state_dir={daemon_state}")
+        _run_ok(
+            ctx,
+            "live_daemon_strategy_start",
+            "--timing_strategy=sma_filter",
+            "--symbols=600000",
+            "--timing_params={\"window\":2,\"target_percent\":0.5}",
+            "--timing_freq=min",
+            "--min_bars=2",
+            "--wait=True",
+            "--timeout=5",
+            f"--state_dir={daemon_state}",
+        )
+        _run_ok(ctx, "live_daemon_strategy_pause", "--wait=True", "--timeout=5", f"--state_dir={daemon_state}")
+        _run_ok(ctx, "live_daemon_strategy_resume", "--wait=True", "--timeout=5", f"--state_dir={daemon_state}")
+        _run_ok(ctx, "live_daemon_strategy_stop", "--wait=True", "--timeout=5", f"--state_dir={daemon_state}")
         _run_ok(
             ctx,
             "live_daemon_halt",
@@ -484,6 +522,8 @@ def test_real_cli_command_smoke(cli_ctx: CliContext) -> None:
         )
         _run_ok(ctx, "live_daemon_resume", "--wait=True", "--timeout=5", f"--state_dir={daemon_state}")
         _run_ok(ctx, "live_daemon_refresh", "--wait=True", "--timeout=5", f"--state_dir={daemon_state}")
+        _run_ok(ctx, "live_daemon_reconnect", "--wait=True", "--timeout=5", f"--state_dir={daemon_state}")
+        _run_ok(ctx, "live_daemon_resume", "--wait=True", "--timeout=5", f"--state_dir={daemon_state}")
         _run_ok(
             ctx,
             "live_daemon_order",
@@ -491,6 +531,16 @@ def test_real_cli_command_smoke(cli_ctx: CliContext) -> None:
             "--side=buy",
             "--volume=100",
             "--price=10",
+            "--wait=True",
+            "--timeout=5",
+            f"--state_dir={daemon_state}",
+        )
+        _run_ok(
+            ctx,
+            "live_daemon_cancel",
+            "--order_id=paper-missing",
+            "--symbol=SH600000",
+            "--force=True",
             "--wait=True",
             "--timeout=5",
             f"--state_dir={daemon_state}",
@@ -530,6 +580,7 @@ def test_real_cli_command_smoke(cli_ctx: CliContext) -> None:
     _run_ok(ctx, "factor_category_add", "--factor_names=cli_factor_renamed", "--category=bulk_smoke")
     _run_ok(ctx, "factor_category_remove", "--factor_names=cli_factor_renamed", "--category=bulk_smoke")
     _run_ok(ctx, "factor_list")
+    _run_ok(ctx, "factor_duplicates")
     _run_ok(ctx, "category_delete", "--name=cli_smoke_renamed")
 
     _run_ok(

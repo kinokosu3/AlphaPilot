@@ -141,6 +141,28 @@ class VnpyBrokerAdapter(BrokerGateway):
         if gw is not None and hasattr(gw, "query_position"):
             gw.query_position()
 
+    def query_orders(self) -> bool:
+        gw = self._get_gateway()
+        if gw is None:
+            return False
+        for name in ("query_orders", "query_order"):
+            fn = getattr(gw, name, None)
+            if fn is not None:
+                fn()
+                return True
+        return False
+
+    def query_trades(self) -> bool:
+        gw = self._get_gateway()
+        if gw is None:
+            return False
+        for name in ("query_trades", "query_trade"):
+            fn = getattr(gw, name, None)
+            if fn is not None:
+                fn()
+                return True
+        return False
+
     def subscribe(self, codes: list[str]) -> None:
         from alphapilot.systems.live.types import normalize_symbol
 
@@ -179,6 +201,8 @@ class VnpyBrokerAdapter(BrokerGateway):
         self._emit_tick(self.to_tick(event.data))
 
     def _get_gateway(self) -> Any:
+        if self._binding is None:
+            return None
         me = self._binding.main_engine
         getter = getattr(me, "get_gateway", None)
         return getter(self.gateway_name) if getter else None

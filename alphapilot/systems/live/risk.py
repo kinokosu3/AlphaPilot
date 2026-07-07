@@ -6,6 +6,8 @@ routes an order only on ``ok``. Rules (fail-fast, each names itself):
 
 * **session** — reject outside legal submit windows (auction / continuous);
 * **lot_size** — A-share board-lot integrality;
+* **unknown_contract** / **price_tick** / **price_limit** — contract metadata
+  and daily limit guards when available;
 * **duplicate** — idempotency on the client reference (no double-submits);
 * **max_orders_per_day** — runaway / throttle guard;
 * **price_guard** — reject a limit price deviating too far from the reference
@@ -21,9 +23,11 @@ call :meth:`reset_day` at the session roll.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from typing import Any
 
 from alphapilot.systems.live.config import RiskLimits
+from alphapilot.systems.live.config import RunMode
 from alphapilot.systems.live.types import Direction, OrderRequest, OrderType
 
 
@@ -57,6 +61,25 @@ class RiskGate:
         self._value_today = 0.0
         self._seen_refs.clear()
 
+    def snapshot(self) -> dict[str, Any]:
+        """Return the mutable risk state for runtime status/recovery."""
+        return {
+            "limits": asdict(self.limits),
+            "enforce_session": self.enforce_session,
+            "orders_today": int(self._orders_today),
+            "value_today": float(self._value_today),
+            "seen_refs": sorted(self._seen_refs),
+        }
+
+    def restore(self, state: dict[str, Any] | None) -> None:
+        """Restore mutable counters from a trusted recovery snapshot."""
+        if not state:
+            return
+        self._orders_today = int(state.get("orders_today") or 0)
+        self._value_today = float(state.get("value_today") or 0.0)
+        refs = state.get("seen_refs") or []
+        self._seen_refs = {str(ref) for ref in refs if str(ref)}
+
     # ------------------------------------------------------------------ #
     def check(self, req: OrderRequest, oms, session, runmode) -> RiskVerdict:
         lim = self.limits
@@ -64,10 +87,16 @@ class RiskGate:
         if self.enforce_session and session is not None and not session.can_submit():
             return RiskVerdict.reject("session", f"submission not allowed in {session.state.value}")
 
-        if lim.lot_size > 0 and abs(req.volume) % lim.lot_size != 0:
-            return RiskVerdict.reject("lot_size", f"volume {req.volume} is not a multiple of {lim.lot_size}")
         if req.volume <= 0:
             return RiskVerdict.reject("volume", "order volume must be positive")
+
+        contract = oms.get_contract(req.key) if hasattr(oms, "get_contract") else None
+        if getattr(runmode, "mode", None) == RunMode.LIVE and contract is None:
+            return RiskVerdict.reject("unknown_contract", f"{req.key} contract metadata is required in LIVE mode")
+
+        lot_size = int(getattr(contract, "lot_size", 0) or lim.lot_size)
+        if lot_size > 0 and abs(req.volume) % lot_size != 0:
+            return RiskVerdict.reject("lot_size", f"volume {req.volume} is not a multiple of {lot_size}")
 
         if req.reference and req.reference in self._seen_refs:
             return RiskVerdict.reject("duplicate", f"duplicate client reference {req.reference}")
@@ -76,6 +105,10 @@ class RiskGate:
             return RiskVerdict.reject("max_orders_per_day", f"daily order cap {lim.max_orders_per_day} reached")
 
         ref = self._ref_price(oms, req)
+        if req.type == OrderType.LIMIT and req.price > 0:
+            tick_verdict = self._check_contract_price(req, oms, contract)
+            if not tick_verdict.ok:
+                return tick_verdict
         if req.type == OrderType.LIMIT and req.price > 0 and ref > 0 and lim.price_guard_pct > 0:
             if abs(req.price - ref) / ref > lim.price_guard_pct:
                 return RiskVerdict.reject(
@@ -117,6 +150,22 @@ class RiskGate:
             self._seen_refs.add(req.reference)
         return RiskVerdict.passed()
 
+    @staticmethod
+    def _check_contract_price(req: OrderRequest, oms, contract) -> RiskVerdict:
+        if contract is not None:
+            tick_size = float(getattr(contract, "price_tick", 0.0) or 0.0)
+            if tick_size > 0 and not _is_multiple(req.price, tick_size):
+                return RiskVerdict.reject("price_tick", f"limit {req.price} is not aligned to tick {tick_size}")
+        tick = oms.get_tick(req.key) if hasattr(oms, "get_tick") else None
+        if tick is not None:
+            limit_up = float(getattr(tick, "limit_up", 0.0) or 0.0)
+            limit_down = float(getattr(tick, "limit_down", 0.0) or 0.0)
+            if limit_up > 0 and req.price > limit_up + 1e-9:
+                return RiskVerdict.reject("price_limit", f"limit {req.price} > limit_up {limit_up}")
+            if limit_down > 0 and req.price < limit_down - 1e-9:
+                return RiskVerdict.reject("price_limit", f"limit {req.price} < limit_down {limit_down}")
+        return RiskVerdict.passed()
+
     # ------------------------------------------------------------------ #
     def _check_concentration(self, req: OrderRequest, oms, ref: float, notional: float) -> RiskVerdict:
         lim = self.limits
@@ -147,3 +196,10 @@ class RiskGate:
         if oms.account is not None and oms.account.balance > 0:
             return float(oms.account.balance)
         return float(oms.buying_power())
+
+
+def _is_multiple(value: float, step: float, *, tolerance: float = 1e-9) -> bool:
+    if step <= 0:
+        return True
+    units = round(float(value) / float(step))
+    return abs(float(value) - units * float(step)) <= tolerance

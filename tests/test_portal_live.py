@@ -97,6 +97,27 @@ def test_live_runtime_control_endpoints(engine, isolated_env) -> None:
     assert connected["state"]["account"]["available"] == 12345
     assert connected["state"]["engine"]["mode"] == "paper"
 
+    risk = client.get(
+        "/api/live/risk/status",
+        params={
+            "mode": "paper",
+            "state_dir": str(isolated_env.root / "portal_live_state"),
+            "ledger_dir": str(isolated_env.root / "portal_live_ledger"),
+        },
+    ).json()
+    assert risk["exists"] is True
+    assert risk["recovery"]["risk_restored"] is True
+
+    events = client.get(
+        "/api/live/ledger/events",
+        params={
+            "kind": "connected",
+            "state_dir": str(isolated_env.root / "portal_live_state"),
+            "ledger_dir": str(isolated_env.root / "portal_live_ledger"),
+        },
+    ).json()
+    assert events["count"] >= 1
+
 
 def test_live_daemon_control_endpoints(engine, isolated_env) -> None:
     client = _client(engine)
@@ -126,6 +147,47 @@ def test_live_daemon_control_endpoints(engine, isolated_env) -> None:
             status = client.get("/api/live/daemon/status", params={"mode": "paper", "state_dir": str(state_dir)}).json()
         assert status["running"] is True, status
         assert status["pid"] == started["pid"]
+
+        runner_status = client.post(
+            "/api/live/daemon/strategy/status",
+            json={"state_dir": str(state_dir), "wait": True, "timeout": 5},
+        ).json()
+        assert runner_status["accepted"] is True
+        assert runner_status["daemon"]["last_command"]["runner_status"]["enabled"] is False
+
+        strategy_started = client.post(
+            "/api/live/daemon/strategy/start",
+            json={
+                "state_dir": str(state_dir),
+                "timing_strategy": "sma_filter",
+                "symbols": ["600000"],
+                "timing_params": {"window": 2, "target_percent": 0.5},
+                "timing_freq": "min",
+                "min_bars": 2,
+                "wait": True,
+                "timeout": 5,
+            },
+        ).json()
+        assert strategy_started["accepted"] is True
+        assert strategy_started["daemon"]["last_command"]["runner_status"]["active"] is True
+
+        strategy_paused = client.post(
+            "/api/live/daemon/strategy/pause",
+            json={"state_dir": str(state_dir), "wait": True, "timeout": 5},
+        ).json()
+        assert strategy_paused["daemon"]["last_command"]["runner_status"]["paused"] is True
+
+        strategy_resumed = client.post(
+            "/api/live/daemon/strategy/resume",
+            json={"state_dir": str(state_dir), "wait": True, "timeout": 5},
+        ).json()
+        assert strategy_resumed["daemon"]["last_command"]["runner_status"]["active"] is True
+
+        strategy_stopped = client.post(
+            "/api/live/daemon/strategy/stop",
+            json={"state_dir": str(state_dir), "wait": True, "timeout": 5},
+        ).json()
+        assert strategy_stopped["daemon"]["last_command"]["runner_status"]["stopped"] is True
 
         halted = client.post(
             "/api/live/daemon/halt",
@@ -160,6 +222,17 @@ def test_live_daemon_control_endpoints(engine, isolated_env) -> None:
         ).json()
         assert order["accepted"] is True
         assert order["daemon"]["last_command"]["ok"] is True
+        order_id = order["daemon"]["last_command"]["order_id"]
+
+        cancel = client.post(
+            "/api/live/daemon/cancel",
+            json={"state_dir": str(state_dir), "order_id": order_id, "wait": True, "timeout": 5},
+        ).json()
+        assert cancel["accepted"] is True
+        assert cancel["daemon"]["last_command"]["action"] == "cancel"
+        assert cancel["daemon"]["last_command"]["ok"] is False
+        assert cancel["daemon"]["last_command"]["cancel"]["reason"] == "not_active"
+
         status = client.get("/api/live/daemon/status", params={"mode": "paper", "state_dir": str(state_dir)}).json()
         positions = {row["code"]: row for row in status["state"]["positions"]}
         assert positions["600000"]["volume"] == 100
@@ -188,6 +261,14 @@ def test_live_daemon_control_endpoints(engine, isolated_env) -> None:
         ).json()
         assert refreshed["accepted"] is True
         assert refreshed["daemon"]["last_command"]["action"] == "refresh"
+
+        reconnected = client.post(
+            "/api/live/daemon/reconnect",
+            json={"state_dir": str(state_dir), "wait": True, "timeout": 5},
+        ).json()
+        assert reconnected["accepted"] is True
+        assert reconnected["daemon"]["last_command"]["action"] == "reconnect"
+        assert reconnected["daemon"]["state"]["engine"]["halted"] is True
     finally:
         stopped = client.post("/api/live/daemon/stop", json={"state_dir": str(state_dir), "timeout": 5}).json()
     assert stopped["running"] is False

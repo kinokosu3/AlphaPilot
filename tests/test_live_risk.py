@@ -9,7 +9,7 @@ from alphapilot.systems.live.fsm.runmode_fsm import RunModeMachine
 from alphapilot.systems.live.fsm.session_fsm import SessionClock
 from alphapilot.systems.live.oms import OMS
 from alphapilot.systems.live.risk import RiskGate
-from alphapilot.systems.live.types import Account, Exchange, OrderRequest, Position, TickData
+from alphapilot.systems.live.types import Account, Contract, Exchange, OrderRequest, Position, TickData
 
 
 def _permissive() -> RiskLimits:
@@ -19,12 +19,18 @@ def _permissive() -> RiskLimits:
     )
 
 
-def _oms(cash: float = 1_000_000.0, ticks=None, positions=None) -> OMS:
+def _oms(cash: float = 1_000_000.0, ticks=None, positions=None, contracts=None) -> OMS:
     oms = OMS()
     oms.on_account(Account(account_id="acc", balance=cash, available=cash))
+    for code, kwargs in (contracts or {}).items():
+        c, ex = _split(code)
+        oms.on_contract(Contract(code=c, exchange=ex, **kwargs))
     for code, px in (ticks or {}).items():
         c, ex = _split(code)
-        oms.on_tick(TickData(code=c, exchange=ex, last_price=px))
+        if isinstance(px, dict):
+            oms.on_tick(TickData(code=c, exchange=ex, **px))
+        else:
+            oms.on_tick(TickData(code=c, exchange=ex, last_price=px))
     for code, (vol, yd) in (positions or {}).items():
         c, ex = _split(code)
         oms.on_position(Position(code=c, exchange=ex, volume=vol, yd_volume=yd))
@@ -52,6 +58,43 @@ def test_lot_size_rejected() -> None:
     gate = RiskGate(_permissive(), enforce_session=False)
     v = gate.check(OrderRequest.buy("600000", Exchange.SSE, 150, 10.0), _oms(), *_ctx())
     assert not v.ok and v.rule == "lot_size"
+
+
+def test_contract_lot_size_overrides_global_limit() -> None:
+    gate = RiskGate(_permissive(), enforce_session=False)
+    oms = _oms(ticks={"600000": 10.0}, contracts={"600000": {"lot_size": 10, "price_tick": 0.01}})
+    assert gate.check(OrderRequest.buy("600000", Exchange.SSE, 50, 10.0), oms, *_ctx()).ok
+    rejected = gate.check(OrderRequest.buy("600000", Exchange.SSE, 55, 10.0), oms, *_ctx())
+    assert not rejected.ok and rejected.rule == "lot_size"
+
+
+def test_contract_price_tick_rejected() -> None:
+    gate = RiskGate(_permissive(), enforce_session=False)
+    oms = _oms(ticks={"600000": 10.0}, contracts={"600000": {"price_tick": 0.01}})
+    v = gate.check(OrderRequest.buy("600000", Exchange.SSE, 100, 10.005), oms, *_ctx())
+    assert not v.ok and v.rule == "price_tick"
+
+
+def test_tick_price_limits_rejected() -> None:
+    limits = _permissive()
+    limits.price_guard_pct = 1.0
+    gate = RiskGate(limits, enforce_session=False)
+    oms = _oms(
+        ticks={"600000": {"last_price": 10.0, "limit_up": 11.0, "limit_down": 9.0}},
+        contracts={"600000": {"price_tick": 0.01}},
+    )
+    high = gate.check(OrderRequest.buy("600000", Exchange.SSE, 100, 11.01), oms, *_ctx())
+    low = gate.check(OrderRequest.sell("600000", Exchange.SSE, 100, 8.99), oms, *_ctx())
+    assert not high.ok and high.rule == "price_limit"
+    assert not low.ok and low.rule == "price_limit"
+
+
+def test_live_mode_requires_contract_metadata() -> None:
+    gate = RiskGate(_permissive(), enforce_session=False)
+    session = SessionClock(now_fn=lambda: datetime(2026, 7, 1, 10, 0))
+    live_mode = RunModeMachine(RunMode.LIVE)
+    v = gate.check(OrderRequest.buy("600000", Exchange.SSE, 100, 10.0), _oms(ticks={"600000": 10.0}), session, live_mode)
+    assert not v.ok and v.rule == "unknown_contract"
 
 
 def test_insufficient_cash_rejected() -> None:
@@ -103,6 +146,14 @@ def test_duplicate_reference_rejected() -> None:
     assert gate.check(req, oms, *_ctx()).ok
     dup = gate.check(OrderRequest.buy("600000", Exchange.SSE, 100, 10.0, reference="cid-1"), oms, *_ctx())
     assert not dup.ok and dup.rule == "duplicate"
+    snap = gate.snapshot()
+    restored = RiskGate(_permissive(), enforce_session=False)
+    restored.restore(snap)
+    assert restored.snapshot()["seen_refs"] == ["cid-1"]
+    dup_after_restore = restored.check(
+        OrderRequest.buy("600000", Exchange.SSE, 100, 10.0, reference="cid-1"), oms, *_ctx()
+    )
+    assert not dup_after_restore.ok and dup_after_restore.rule == "duplicate"
 
 
 def test_max_orders_per_day_rejected() -> None:
