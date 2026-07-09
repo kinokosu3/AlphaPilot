@@ -1,0 +1,3 @@
+/* Live trading page: status bar wraps; controls hug the right edge. */
+.live-status-bar { flex-wrap: wrap; align-items: center; }
+.live-status-bar .row-actions { margin-left: auto; }

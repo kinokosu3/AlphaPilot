@@ -284,12 +284,30 @@ def test_trade_close_native_exit_is_explicit_opt_in(gateway, monkeypatch) -> Non
     assert gw.td_api.login_status is False
 
 
-def test_quote_close_soft_releases_while_contract_query_pending(gateway, monkeypatch) -> None:
+def test_disconnect_during_close_does_not_reconnect(gateway, monkeypatch) -> None:
+    gw, cb = gateway
+
+    def fail_thread(*args, **kwargs):
+        raise AssertionError("close-time disconnect must not start reconnect")
+
+    monkeypatch.setattr(em.threading, "Thread", fail_thread)
+
+    gw.md_api._closing = True
+    gw.td_api._closing = True
+    gw.md_api.onDisconnected(7)
+    gw.td_api.onDisconnected(8)
+    gw.dispatcher.run_pending()
+
+    assert cb.gateway_disconnected == []
+
+
+def test_quote_close_soft_releases_by_default(gateway, monkeypatch) -> None:
     gw, _ = gateway
     calls = []
     gw.md_api.connect_status = True
     gw.md_api.login_status = True
-    gw.md_api._contract_queries_pending = 1
+    gw.md_api._contract_queries_pending = 0
+    monkeypatch.delenv("ALPHAPILOT_LIVE_EMT_MD_LOGOUT", raising=False)
     monkeypatch.setattr(gw.md_api, "release", lambda: calls.append(("release",)), raising=False)
     monkeypatch.setattr(gw.md_api, "exit", lambda: calls.append(("exit",)), raising=False)
 
@@ -300,16 +318,35 @@ def test_quote_close_soft_releases_while_contract_query_pending(gateway, monkeyp
     assert gw.md_api.login_status is False
 
 
-def test_gateway_close_stops_dispatcher_before_sdk_close(gateway, monkeypatch) -> None:
+def test_quote_close_native_logout_is_explicit_opt_in(gateway, monkeypatch) -> None:
+    gw, _ = gateway
+    calls = []
+    gw.md_api.connect_status = True
+    gw.md_api.login_status = True
+    monkeypatch.setenv("ALPHAPILOT_LIVE_EMT_MD_LOGOUT", "1")
+    monkeypatch.setattr(gw.md_api, "release", lambda: calls.append(("release",)), raising=False)
+    monkeypatch.setattr(gw.md_api, "exit", lambda: calls.append(("exit",)), raising=False)
+
+    gw.md_api.close()
+
+    assert calls == [("exit",)]
+    assert gw.md_api.connect_status is False
+    assert gw.md_api.login_status is False
+
+
+def test_gateway_close_stops_dispatcher_without_draining(gateway, monkeypatch) -> None:
     gw, _ = gateway
     calls = []
     monkeypatch.setattr(gw, "shutdown", lambda: calls.append("shutdown"))
+    monkeypatch.setattr(gw.dispatcher, "stop", lambda: calls.append("stop"))
     monkeypatch.setattr(gw.md_api, "close", lambda: calls.append("md"))
     monkeypatch.setattr(gw.td_api, "close", lambda: calls.append("td"))
 
     gw.close()
 
-    assert calls == ["shutdown", "md", "td"]
+    assert calls == ["stop", "md", "td"]
+    assert gw.md_api._closing is True
+    assert gw.td_api._closing is True
 
 
 def test_trade_login_failure_emits_halt_disconnect(gateway) -> None:

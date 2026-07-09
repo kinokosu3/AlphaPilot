@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
-import Plot from "react-plotly.js";
 import { api } from "./api";
+import { LazyPlot as Plot } from "./components/LazyPlot";
 import { Alert, chartHeight, DataTable, Spinner, Tabs } from "./components";
 import { useAsync } from "./hooks";
 import { useI18n } from "./i18n";

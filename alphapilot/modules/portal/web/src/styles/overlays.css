@@ -1,0 +1,195 @@
+/* Spinner */
+@keyframes spin { to { transform: rotate(360deg); } }
+.spin { animation: spin 0.8s linear infinite; vertical-align: -2px; }
+.button .spin, .button > svg { margin-right: 6px; }
+.button.icon-only > svg { margin-right: 0; }
+.icon-button > .spin, .icon-button > svg { margin-right: 0; }
+
+/* Live "syncing" dot for auto-polling panels (Jobs, daemon chip). */
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 0 var(--accent-ring); }
+  50% { box-shadow: 0 0 0 4px rgba(79, 70, 229, 0); }
+}
+.live-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-left: 7px;
+  border-radius: 50%;
+  background: var(--border-strong);
+  vertical-align: middle;
+  opacity: 0.5;
+  transition: opacity 0.2s ease;
+}
+.live-dot.on { background: var(--accent-600); opacity: 1; animation: pulse 1s ease-in-out infinite; }
+.loading-row { display: flex; align-items: center; justify-content: center; gap: 8px; }
+
+/* Toasts */
+.toast-stack {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 50;
+  max-width: min(380px, calc(100vw - 32px));
+}
+@keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+.toast {
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  font-size: 13px;
+  box-shadow: var(--shadow-lg);
+  cursor: pointer;
+  word-break: break-word;
+  animation: toast-in 0.18s ease-out;
+}
+.toast.success { border-color: var(--success-border); background: var(--success-bg); color: var(--success-fg); }
+.toast.error { border-color: var(--danger-border); background: var(--danger-bg); color: var(--danger-fg); }
+.toast.info { border-color: var(--info-border); background: var(--info-bg); color: var(--info-fg); }
+
+/* Headers inside a panel-head/title-inline sit tight so title + help + actions line up. */
+.panel-head h2, .panel-head h3,
+.panel-title-inline h2, .panel-title-inline h3 { margin: 0; }
+
+/* Hover/focus tooltip bubble */
+.tooltip { position: relative; display: inline-flex; align-items: center; }
+.tooltip > .tooltip-bubble {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  z-index: 40;
+  width: max-content;
+  max-width: 260px;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--text);
+  color: var(--surface);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: normal;
+  text-align: left;
+  box-shadow: var(--shadow-md);
+  opacity: 0;
+  transform: translateX(-50%) translateY(4px);
+  pointer-events: none;
+  transition: opacity 0.14s ease, transform 0.14s ease;
+}
+.tooltip:hover > .tooltip-bubble,
+.tooltip:focus-visible > .tooltip-bubble,
+.tooltip:focus-within > .tooltip-bubble {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+.tooltip.info-dot { cursor: help; color: var(--text-muted); outline: none; }
+.tooltip.info-dot:hover, .tooltip.info-dot:focus-visible { color: var(--accent-600); }
+.tooltip.info-dot > svg { vertical-align: middle; }
+
+/* Removable pill tag (stock-pool members, etc.) — replaces ad-hoc inline styles. */
+.tag.removable { display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px 2px 10px; }
+.tag.removable button {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  line-height: 1;
+  cursor: pointer;
+}
+.tag.removable button:hover:not(:disabled) { background: var(--danger-bg); color: var(--danger-fg); }
+.tag.removable button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Field-level hint under a manually built <label> (mirrors .dynamic-form small). */
+.field-hint { display: block; margin-top: -4px; color: var(--text-muted); font-size: 12px; line-height: 1.35; }
+
+/* Downloaded-symbol picker (stock pool creation / add members) */
+.symbol-picker-wrap { background: var(--surface); }
+.symbol-picker-wrap > summary { font-size: 13px; }
+.symbol-picker { display: grid; gap: 8px; margin-top: 10px; }
+.symbol-picker .picker-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.symbol-picker .picker-toolbar select { width: auto; min-width: 140px; margin-bottom: 0; }
+.symbol-picker .picker-toolbar input { flex: 1 1 120px; min-width: 0; margin-bottom: 0; }
+.symbol-picker .picker-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.symbol-list {
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  padding: 4px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
+  gap: 2px;
+  align-content: start;
+}
+.symbol-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 4px 6px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--text-soft);
+  cursor: pointer;
+}
+.symbol-item:hover { background: var(--accent-50); }
+.symbol-item input { width: 15px; height: 15px; min-height: 15px; margin: 0; flex-shrink: 0; accent-color: var(--accent-600); }
+.symbol-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.symbol-item.added { color: var(--text-muted); opacity: 0.7; }
+
+/* Confirm dialog / modal */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(16, 24, 40, 0.45);
+  backdrop-filter: blur(2px);
+  animation: toast-in 0.14s ease-out;
+}
+.modal-card {
+  width: min(440px, 100%);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  padding: 18px;
+}
+.modal-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.modal-head strong { font-size: 15px; }
+.modal-danger-icon { color: var(--danger-fg); flex-shrink: 0; }
+.modal-info-icon { color: var(--accent-600); flex-shrink: 0; }
+.modal-body { margin: 0 0 16px; color: var(--text-soft); font-size: 14px; line-height: 1.5; word-break: break-word; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.chart-skeleton,
+.route-skeleton {
+  min-height: 320px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: linear-gradient(90deg, var(--surface-2), var(--surface), var(--surface-2));
+  background-size: 220% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+.route-skeleton {
+  min-height: 220px;
+  margin: 18px 0;
+}
+@keyframes skeleton-shimmer {
+  from { background-position: 100% 0; }
+  to { background-position: -100% 0; }
+}
+

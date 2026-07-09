@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import socket
 import time
 
 from fastapi.testclient import TestClient
@@ -13,6 +14,13 @@ def _client(engine):
     return TestClient(create_app(engine=engine))
 
 
+def _listen_local() -> socket.socket:
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(1)
+    return sock
+
+
 def test_live_status_before_connect(engine) -> None:
     client = _client(engine)
     data = client.get("/api/live/status").json()
@@ -20,6 +28,19 @@ def test_live_status_before_connect(engine) -> None:
     assert data["config"]["mode"] in set(data["modes"])
     assert data["running"] is False
     assert "state" not in data
+
+
+def test_live_broker_catalog_exposes_capabilities_without_secret_values(engine, monkeypatch) -> None:
+    monkeypatch.setenv("ALPHAPILOT_LIVE_XTP_ACCOUNT", "portal-secret-account")
+    client = _client(engine)
+    resp = client.get("/api/live/brokers")
+    brokers = {row["name"]: row for row in resp.json()}
+
+    assert {"emt", "xtp"} <= set(brokers)
+    assert brokers["emt"]["capabilities"]["supports_order_query"] is True
+    assert brokers["xtp"]["capabilities"]["supports_trade_query"] is True
+    assert "ALPHAPILOT_LIVE_XTP_ACCOUNT" in brokers["xtp"]["env_fields"]
+    assert "portal-secret-account" not in resp.text
 
 
 def test_live_paper_full_flow(engine) -> None:
@@ -117,6 +138,35 @@ def test_live_runtime_control_endpoints(engine, isolated_env) -> None:
         },
     ).json()
     assert events["count"] >= 1
+
+
+def test_live_runtime_preflight_can_probe_configured_network_endpoints(engine, monkeypatch) -> None:
+    quote_sock = _listen_local()
+    trade_sock = _listen_local()
+    try:
+        quote_port = quote_sock.getsockname()[1]
+        trade_port = trade_sock.getsockname()[1]
+        monkeypatch.setenv("ALPHAPILOT_LIVE_EMT_ACCOUNT", "portal-test-account")
+        monkeypatch.setenv("ALPHAPILOT_LIVE_EMT_PASSWORD", "portal-test-password")
+        monkeypatch.setenv("ALPHAPILOT_LIVE_EMT_QUOTE_ACCOUNT", "portal-test-quote-account")
+        monkeypatch.setenv("ALPHAPILOT_LIVE_EMT_QUOTE_PASSWORD", "portal-test-quote-password")
+        monkeypatch.setenv("ALPHAPILOT_LIVE_EMT_QUOTE_HOST", "127.0.0.1")
+        monkeypatch.setenv("ALPHAPILOT_LIVE_EMT_QUOTE_PORT", str(quote_port))
+        monkeypatch.setenv("ALPHAPILOT_LIVE_EMT_TRADE_HOST", "127.0.0.1")
+        monkeypatch.setenv("ALPHAPILOT_LIVE_EMT_TRADE_PORT", str(trade_port))
+
+        preflight = _client(engine).post(
+            "/api/live/runtime/preflight",
+            json={"broker": "emt", "network": True, "timeout": 0.5},
+        ).json()
+    finally:
+        quote_sock.close()
+        trade_sock.close()
+
+    assert preflight["broker"] == "emt"
+    assert preflight["network_checked"] is True
+    assert preflight["missing_env"] == []
+    assert {item["name"]: item["ok"] for item in preflight["endpoints"]} == {"quote": True, "trade": True}
 
 
 def test_live_daemon_control_endpoints(engine, isolated_env) -> None:
