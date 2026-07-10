@@ -3,7 +3,7 @@
 AlphaPilot 使用的 EMT 底层 Python 绑定包。
 
 本包只包含券商 SDK 的动态库、头文件和 pybind11 封装，不注册 AlphaPilot
-交易通道，也不依赖 vn.py。可发现的交易/行情通道由上层
+交易通道。可发现的交易/行情通道由上层
 `alphapilot-broker-emt` 插件提供。
 
 ## 安装
