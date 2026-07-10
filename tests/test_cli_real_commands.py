@@ -57,6 +57,7 @@ EXPECTED_COMMANDS = {
     "mine_rl",
     "live_brokers",
     "live_plugins",
+    "live_quote_providers",
     "live_connect",
     "live_daemon_start",
     "live_daemon_status",
@@ -87,6 +88,16 @@ EXPECTED_COMMANDS = {
     "notify_commands",
     "portal",
     "portal_restart",
+    "pool_add",
+    "pool_create",
+    "pool_delete",
+    "pool_export",
+    "pool_list",
+    "pool_remove",
+    "pool_rename",
+    "pool_save",
+    "pool_set_description",
+    "pool_show",
     "prepare_data",
     "qlib_yaml_generate",
     "qlib_yaml_validate",
@@ -426,6 +437,7 @@ def test_real_cli_command_smoke(cli_ctx: CliContext) -> None:
     _run_ok(ctx, "live_modes")
     _run_ok(ctx, "live_brokers")
     _run_ok(ctx, "live_plugins")
+    _run_ok(ctx, "live_quote_providers")
     _run_ok(ctx, "live_preflight", "--broker=paper")
     _run_ok(ctx, "live_state", "--mode=paper", f"--state_dir={live_state}")
     _run_ok(ctx, "live_risk_status", "--mode=paper", f"--state_dir={live_state}", f"--ledger_dir={live_ledger}")
@@ -584,6 +596,24 @@ def test_real_cli_command_smoke(cli_ctx: CliContext) -> None:
     _run_ok(ctx, "factor_list")
     _run_ok(ctx, "factor_duplicates")
     _run_ok(ctx, "category_delete", "--name=cli_smoke_renamed")
+
+    pool_export = ctx.important / "exports" / "cli_pool.csv"
+    _run_ok(ctx, "pool_list")
+    _run_ok(ctx, "pool_create", "--name=cli_pool", "--symbols=600000.SH,000001.SZ")
+    _run_ok(ctx, "pool_show", "--name=cli_pool")
+    _run_ok(ctx, "pool_add", "--name=cli_pool", "--symbols=600519.SH")
+    _run_ok(ctx, "pool_remove", "--name=cli_pool", "--symbols=000001.SZ")
+    _run_ok(ctx, "pool_set_description", "--name=cli_pool", "--description=CLI smoke pool")
+    _run_ok(ctx, "pool_rename", "--name=cli_pool", "--new_name=cli_pool_renamed")
+    _run_ok(
+        ctx,
+        "pool_export",
+        "--name=cli_pool_renamed",
+        f"--output={pool_export}",
+    )
+    assert pool_export.is_file()
+    _run_ok(ctx, "pool_save", "--name=cli_pool_renamed", "--symbols=600000.SH")
+    _run_ok(ctx, "pool_delete", "--name=cli_pool_renamed")
 
     _run_ok(
         ctx,

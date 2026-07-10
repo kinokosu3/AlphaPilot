@@ -232,7 +232,10 @@ class TimingBacktestEngine:
     ) -> dict[str, Any]:
         if equity_curve.empty:
             return {"strategy": request.strategy_name, "total_return": 0.0, "n_trades": 0}
-        by_time = equity_curve.groupby("datetime", as_index=True)["equity"].sum().sort_index()
+        # ``equity`` is the account-level value repeated on each instrument row
+        # for convenient chart joins.  Summing it multiplies NAV by the number
+        # of instruments and fabricates enormous returns for multi-stock runs.
+        by_time = equity_curve.groupby("datetime", as_index=True)["equity"].first().sort_index()
         start_equity = float(request.cash)
         final_equity = float(by_time.iloc[-1])
         running_max = by_time.cummax()

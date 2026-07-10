@@ -101,6 +101,24 @@ class FactorH5CacheTests(unittest.TestCase):
         self.assertEqual(_GEN_CALLS["n"], n_after_first, "second call must not regenerate")
         self.assertTrue(self.fh._is_complete(self.cache_root / spec.fingerprint(), spec.fingerprint()))
 
+    def test_source_feature_change_invalidates_and_rebuilds_cache(self) -> None:
+        feature = self.qdir / "features" / "sh600000" / "close.day.bin"
+        feature.parent.mkdir(parents=True)
+        feature.write_bytes(b"first-version")
+        first_spec = self._spec()
+        first_fingerprint = first_spec.fingerprint()
+        first_dir = self.fh.build_or_get_cache(first_spec, use_local=True)
+        self.assertEqual(_GEN_CALLS["n"], 1)
+
+        feature.write_bytes(b"second-version-is-different")
+        second_spec = self._spec()
+        second_fingerprint = second_spec.fingerprint()
+        second_dir = self.fh.build_or_get_cache(second_spec, use_local=True)
+
+        self.assertNotEqual(second_fingerprint, first_fingerprint)
+        self.assertNotEqual(second_dir, first_dir)
+        self.assertEqual(_GEN_CALLS["n"], 2)
+
     def test_load_context_from_cache_dir(self) -> None:
         spec = self._spec()
         cdir = self.fh.build_or_get_cache(spec, use_local=True)

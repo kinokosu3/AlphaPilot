@@ -581,15 +581,18 @@ class APIBackend:
 
     def _try_create_chat_completion_or_embedding(
         self,
-        max_retry: int = 10,
+        max_retry: int = 3,
         *,
         chat_completion: bool = False,
         embedding: bool = False,
         **kwargs: Any,
     ) -> Any:
         assert not (chat_completion and embedding), "chat_completion and embedding cannot be True at the same time"
-        max_retry = LLM_SETTINGS.max_retry if LLM_SETTINGS.max_retry is not None else max_retry
-        for i in range(max_retry):
+        max_attempts = LLM_SETTINGS.max_retry if LLM_SETTINGS.max_retry is not None else max_retry
+        if max_attempts < 1:
+            raise ValueError("LLM max_retry must be at least 1")
+        last_error: Exception | None = None
+        for i in range(max_attempts):
             try:
                 # import pdb; pdb.set_trace()
                 if embedding:
@@ -597,8 +600,8 @@ class APIBackend:
                 if chat_completion:
                     return self._create_chat_completion_auto_continue(**kwargs)
             except openai.BadRequestError as e:  # noqa: PERF203
+                last_error = e
                 logger.warning(e)
-                logger.warning(f"Retrying {i+1}th time...")
                 if "'messages' must contain the word 'json' in some form" in e.message:
                     kwargs["add_json_in_prompt"] = True
                 elif embedding and "maximum context length" in e.message:
@@ -606,11 +609,13 @@ class APIBackend:
                         content[: len(content) // 2] for content in kwargs.get("input_content_list", [])
                     ]
             except Exception as e:  # noqa: BLE001
+                last_error = e
                 logger.warning(e)
-                logger.warning(f"Retrying {i+1}th time...")
+            if i + 1 < max_attempts:
+                logger.warning(f"Retrying request ({i + 2}/{max_attempts})...")
                 time.sleep(self.retry_wait_seconds)
-        error_message = f"Failed to create chat completion after {max_retry} retries."
-        raise RuntimeError(error_message)
+        error_message = f"Failed to create chat completion after {max_attempts} attempts."
+        raise RuntimeError(error_message) from last_error
 
     def _create_embedding_inner_function(
         self, input_content_list: list[str], **kwargs: Any

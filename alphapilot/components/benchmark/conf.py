@@ -2,15 +2,13 @@ from dataclasses import field
 from pathlib import Path
 from typing import Optional
 
-from alphapilot.core.conf import ExtendedBaseSettings
+from alphapilot.core.conf import ExtendedBaseSettings, ExtendedSettingsConfigDict
 
 DIRNAME = Path("./")
 
 
 class BenchmarkSettings(ExtendedBaseSettings):
-    class Config:
-        env_prefix = "BENCHMARK_"
-        """Use `BENCHMARK_` as prefix for environment variables"""
+    model_config = ExtendedSettingsConfigDict(env_prefix="BENCHMARK_")
 
     bench_data_path: Path = DIRNAME / "example.json"
     """data for benchmark"""

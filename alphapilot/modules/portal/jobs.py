@@ -19,6 +19,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+try:  # POSIX workers need an inter-process lock around job.json read/modify/write.
+    import fcntl
+except ImportError:  # pragma: no cover - Windows keeps atomic unique-temp writes.
+    fcntl = None  # type: ignore[assignment]
+
+from alphapilot.core.path_safety import ensure_child_path
+
 JobKind = str
 JobStatus = str
 
@@ -43,6 +50,9 @@ VALID_KINDS = {
 # Data-system actions runnable as a ``data`` job; ``kwargs["action"]`` selects one.
 DATA_ACTIONS = ("pipeline", "download", "apply_adjust", "convert")
 TERMINAL_STATUSES = {"succeeded", "failed", "cancelled", "lost"}
+MAX_JOB_KWARGS_BYTES = 1_000_000
+MAX_JOB_KWARGS_DEPTH = 12
+_SENSITIVE_KEY_PARTS = ("api_key", "apikey", "token", "secret", "password", "credential")
 
 
 def default_job_root() -> Path:
@@ -51,6 +61,17 @@ def default_job_root() -> Path:
     if configured:
         return Path(configured).expanduser()
     return Path.cwd() / "git_ignore_folder" / "portal_jobs"
+
+
+def _safe_job_dir(root: Path, job_id: str) -> Path:
+    """Resolve one opaque job id beneath *root*; reject traversal/absolute ids."""
+    name = Path(str(job_id)).expanduser()
+    if name.is_absolute() or len(name.parts) != 1 or name.name in {"", ".", ".."}:
+        raise ValueError("Invalid job id")
+    target = ensure_child_path(root.resolve(), root.resolve() / name.name)
+    if target == root.resolve():
+        raise ValueError("Invalid job id")
+    return target
 
 
 def utc_now() -> str:
@@ -71,9 +92,13 @@ def _log_path(job_dir: Path) -> Path:
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
-    tmp.replace(path)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        tmp.replace(path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            tmp.unlink()
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -82,10 +107,75 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 def _patch_job(job_dir: Path, changes: dict[str, Any]) -> dict[str, Any]:
     path = _job_path(job_dir)
-    payload = _read_json(path)
-    payload.update(changes)
-    _atomic_write_json(path, payload)
-    return payload
+    lock_path = job_dir / ".job.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        if fcntl is not None:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            payload = _read_json(path)
+            current_status = payload.get("status")
+            next_status = changes.get("status")
+            # A cancellation/lost decision is final; a late worker must not turn it
+            # back into running/succeeded/failed during a completion race.
+            if current_status in TERMINAL_STATUSES and next_status and next_status != current_status:
+                return payload
+            payload.update(changes)
+            _atomic_write_json(path, payload)
+            return payload
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def _validate_job_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Reject oversized, deeply nested, non-JSON, or magic-key job payloads."""
+    if not isinstance(kwargs, dict):
+        raise TypeError("Job kwargs must be a JSON object")
+
+    def visit(value: Any, depth: int) -> None:
+        if depth > MAX_JOB_KWARGS_DEPTH:
+            raise ValueError(f"Job kwargs exceed maximum nesting depth {MAX_JOB_KWARGS_DEPTH}")
+        if value is None or isinstance(value, (str, int, bool)):
+            return
+        if isinstance(value, float):
+            if not (float("-inf") < value < float("inf")):
+                raise ValueError("Job kwargs cannot contain non-finite numbers")
+            return
+        if isinstance(value, list):
+            for item in value:
+                visit(item, depth + 1)
+            return
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if not isinstance(key, str):
+                    raise TypeError("Job kwargs keys must be strings")
+                if key.startswith("__") or any(ord(char) < 32 for char in key):
+                    raise ValueError(f"Unsafe job kwargs key: {key!r}")
+                visit(item, depth + 1)
+            return
+        raise TypeError(f"Job kwargs contain a non-JSON value: {type(value).__name__}")
+
+    visit(kwargs, 0)
+    encoded = json.dumps(kwargs, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    if len(encoded) > MAX_JOB_KWARGS_BYTES:
+        raise ValueError(f"Job kwargs exceed {MAX_JOB_KWARGS_BYTES} bytes")
+    return kwargs
+
+
+def _redact_sensitive(value: Any) -> Any:
+    """Mask secret-looking job fields before metadata or log persistence."""
+    if isinstance(value, dict):
+        return {
+            str(key): (
+                "********"
+                if any(part in str(key).lower() for part in _SENSITIVE_KEY_PARTS)
+                else _redact_sensitive(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_sensitive(item) for item in value]
+    return value
 
 
 def _progress(
@@ -384,17 +474,20 @@ def _job_worker(job_dir_raw: str, kind: JobKind, kwargs: dict[str, Any]) -> None
     with log_file.open("a", encoding="utf-8", buffering=1) as stream:
         with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream):
             print(f"[portal-job] job_id={job_id} kind={kind} pid={os.getpid()}")
-            print(f"[portal-job] kwargs={json.dumps(_jsonable(kwargs), ensure_ascii=False)}")
-            _patch_job(
+            print(f"[portal-job] kwargs={json.dumps(_redact_sensitive(_jsonable(kwargs)), ensure_ascii=False)}")
+            started = _patch_job(
                 job_dir,
                 {
                     "pid": os.getpid(),
                     "status": "running",
                     "started_at": utc_now(),
-                    "params": _jsonable(kwargs),
+                    "params": _redact_sensitive(_jsonable(kwargs)),
                     "progress": _progress(2, "starting", "worker started"),
                 },
             )
+            if started.get("status") in TERMINAL_STATUSES:
+                print(f"[portal-job] skipped because job is already {started.get('status')}")
+                return
             try:
                 if kind == "data":
                     action = kwargs.get("action", "pipeline")
@@ -444,6 +537,7 @@ def start_job(
     """Create a persistent job and start its worker process."""
     if kind not in VALID_KINDS:
         raise ValueError(f"Unsupported portal job kind: {kind!r}")
+    _validate_job_kwargs(kwargs)
 
     root = Path(job_root) if job_root is not None else default_job_root()
     root.mkdir(parents=True, exist_ok=True)
@@ -456,7 +550,7 @@ def start_job(
         "kind": kind,
         "status": "running",
         "pid": None,
-        "params": _jsonable(kwargs),
+        "params": _redact_sensitive(_jsonable(kwargs)),
         "job_dir": str(job_dir),
         "log_path": str(_log_path(job_dir)),
         "result_path": str(_result_path(job_dir)),
@@ -493,7 +587,7 @@ def start_job(
     return _patch_job(job_dir, {"pid": getattr(process, "pid", None)})
 
 
-def _refresh_job(job: dict[str, Any]) -> dict[str, Any]:
+def _refresh_job(job: dict[str, Any], *, job_root: Path | str | None = None) -> dict[str, Any]:
     if job.get("status") != "running":
         return job
     pid = job.get("pid")
@@ -506,7 +600,8 @@ def _refresh_job(job: dict[str, Any]) -> dict[str, Any]:
     if _pid_exists(pid_int):
         return job
 
-    job_dir = Path(job["job_dir"])
+    root = Path(job_root) if job_root is not None else default_job_root()
+    job_dir = _safe_job_dir(root, str(job.get("job_id") or ""))
     latest = _read_json(_job_path(job_dir))
     if latest.get("status") in TERMINAL_STATUSES:
         return latest
@@ -531,7 +626,7 @@ def list_jobs(*, job_root: Path | str | None = None, refresh: bool = True) -> li
         try:
             job = _read_json(path)
             if refresh:
-                job = _refresh_job(job)
+                job = _refresh_job(job, job_root=root)
             jobs.append(job)
         except Exception:  # noqa: BLE001
             continue
@@ -540,13 +635,19 @@ def list_jobs(*, job_root: Path | str | None = None, refresh: bool = True) -> li
 
 def get_job(job_id: str, *, job_root: Path | str | None = None) -> dict[str, Any]:
     root = Path(job_root) if job_root is not None else default_job_root()
-    job = _read_json(root / job_id / "job.json")
-    return _refresh_job(job)
+    job_dir = _safe_job_dir(root, job_id)
+    job = _read_json(job_dir / "job.json")
+    # Persisted path fields are informational only; never trust edited JSON for IO.
+    job["job_dir"] = str(job_dir)
+    job["log_path"] = str(_log_path(job_dir))
+    job["result_path"] = str(_result_path(job_dir))
+    return _refresh_job(job, job_root=root)
 
 
 def read_log_tail(job_id: str, *, job_root: Path | str | None = None, max_chars: int = 12000) -> str:
     job = get_job(job_id, job_root=job_root)
-    path = Path(job["log_path"])
+    root = Path(job_root) if job_root is not None else default_job_root()
+    path = _log_path(_safe_job_dir(root, job_id))
     if not path.exists():
         return ""
     text = path.read_text(encoding="utf-8", errors="replace")
@@ -566,8 +667,9 @@ def read_progress(job_id: str, *, job_root: Path | str | None = None, max_chars:
 
 
 def read_result(job_id: str, *, job_root: Path | str | None = None) -> dict[str, Any] | None:
-    job = get_job(job_id, job_root=job_root)
-    path = Path(job["result_path"])
+    get_job(job_id, job_root=job_root)
+    root = Path(job_root) if job_root is not None else default_job_root()
+    path = _result_path(_safe_job_dir(root, job_id))
     if not path.exists():
         return None
     return _read_json(path)
@@ -584,7 +686,8 @@ def cancel_job(job_id: str, *, job_root: Path | str | None = None) -> dict[str, 
         os.kill(pid_int, signal.SIGTERM)
         time.sleep(0.2)
 
-    job_dir = Path(job["job_dir"])
+    root = Path(job_root) if job_root is not None else default_job_root()
+    job_dir = _safe_job_dir(root, job_id)
     return _patch_job(
         job_dir,
         {
@@ -609,11 +712,11 @@ def delete_job(
     is sent SIGTERM first. Returns ``{"job_id", "status", "deleted"}``.
     """
     root = Path(job_root) if job_root is not None else default_job_root()
-    job_dir = root / job_id
+    job_dir = _safe_job_dir(root, job_id)
     if not job_dir.is_dir():
         raise FileNotFoundError(f"Job not found: {job_id}")
 
-    job = _refresh_job(_read_json(_job_path(job_dir)))
+    job = _refresh_job(_read_json(_job_path(job_dir)), job_root=root)
     status = job.get("status")
     if status == "running":
         if not force:

@@ -10,7 +10,10 @@ Tries to create uniform environment for the agent to run;
 import json
 import os
 import pickle
+import shlex
+import shutil
 import subprocess
+import sys
 import uuid
 from abc import abstractmethod
 from pathlib import Path
@@ -165,8 +168,19 @@ class QlibLocalEnv(LocalEnv):
         table.add_row("Environment Variables", "\n".join(f"{k}:{v}" for k, v in env.items()))
         print(table)
         
-        # 分割命令
-        command = entry.split()
+        # Resolve commands against the running interpreter, not the parent
+        # shell's PATH.  AlphaPilot is often invoked with an explicit conda
+        # Python while PATH still points at another environment.
+        command = shlex.split(entry)
+        if command and command[0] == "python":
+            command[0] = sys.executable
+        elif command and command[0] == "qrun":
+            sibling = Path(sys.executable).resolve().parent / "qrun"
+            resolved = str(sibling) if sibling.is_file() else shutil.which("qrun")
+            if resolved:
+                command[0] = resolved
+            else:
+                command = [sys.executable, "-m", "qlib.cli.run", *command[1:]]
         
         # 设置工作目录
         cwd = None
@@ -195,6 +209,10 @@ class QlibLocalEnv(LocalEnv):
         
         if result.returncode != 0:
             logger.error(f"命令执行失败: {result.stderr}")
+            raise RuntimeError(
+                f"Local qlib command failed with exit code {result.returncode}: "
+                f"{' '.join(command)}\n{result.stderr or result.stdout}"
+            )
             
         return output
 

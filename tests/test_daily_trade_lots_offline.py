@@ -82,7 +82,11 @@ def test_run_one_day_preserves_qlib_book_without_lot_flooring(monkeypatch) -> No
     monkeypatch.setitem(sys.modules, "qlib", types.ModuleType("qlib"))
     monkeypatch.setitem(sys.modules, "qlib.backtest", fake_backtest_mod)
     monkeypatch.setattr(rebalance, "_seed_with_prices", lambda seed, start: (dict(seed), []))
-    monkeypatch.setattr(rebalance, "_fetch_close", lambda stocks, d: {s: 10.0 for s in stocks})
+    monkeypatch.setattr(
+        rebalance,
+        "_fetch_real_market_snapshot",
+        lambda stocks, d: ({s: 10.0 for s in stocks}, {s: 1.0 for s in stocks}),
+    )
 
     params = QlibYamlParams.defaults_for("combined")  # trade_unit=100 (lot mode on)
     out = rebalance.run_one_day(
@@ -97,6 +101,55 @@ def test_run_one_day_preserves_qlib_book_without_lot_flooring(monkeypatch) -> No
     assert "SZ000895" in st.positions and st.positions["SZ000895"] == 2.0
     # Holdings reflect the same full book (so displayed value matches the rolled NAV).
     assert set(out["holdings"]["instrument"]) == set(qlib_amounts)
+
+
+def test_user_and_broker_plan_converts_adjusted_book_to_real_board_lots(monkeypatch) -> None:
+    date = "2026-07-08"
+    factor = 3.67776
+    adjusted_amount = 2000 / factor
+
+    class _FakePos:
+        def get_cash(self):
+            return 1000.0
+
+        def get_stock_amount_dict(self):
+            return {"SH600113": adjusted_amount}
+
+    report = pd.DataFrame({"account": [61000.0]}, index=pd.to_datetime([date]))
+    fake_backtest_mod = types.ModuleType("qlib.backtest")
+    fake_backtest_mod.backtest = lambda **kw: ({"1day": (report, {pd.Timestamp(date): _FakePos()})}, {})
+    monkeypatch.setitem(sys.modules, "qlib", types.ModuleType("qlib"))
+    monkeypatch.setitem(sys.modules, "qlib.backtest", fake_backtest_mod)
+    monkeypatch.setattr(rebalance, "_seed_with_prices", lambda seed, start: (dict(seed), []))
+    monkeypatch.setattr(
+        rebalance,
+        "_fetch_real_market_snapshot",
+        lambda stocks, d: ({"SH600113": 29.99}, {"SH600113": factor}),
+    )
+
+    out = rebalance.run_one_day(
+        date,
+        scores=object(),
+        account_seed={"cash": 61000.0},
+        start_date="2026-07-07",
+        yaml_params=QlibYamlParams.defaults_for("combined"),
+    )
+
+    # Internal state remains lossless for Qlib resume.
+    assert out["new_state"].positions["SH600113"] == adjusted_amount
+    # Public plan is real exchange units and is safe to hand to a broker.
+    assert out["holdings"].iloc[0]["amount"] == 2000
+    assert out["holdings"].iloc[0]["price"] == 29.99
+    assert out["trades"].iloc[0]["amount"] == 2000
+
+
+def test_real_position_conversion_removes_float_noise_from_broker_lots() -> None:
+    positions = rebalance._to_real_positions(
+        {"SH600435": 5799.999999999999 / 3.2},
+        {"SH600435": 3.2},
+    )
+    assert positions == {"SH600435": 5800.0}
+    assert positions["SH600435"] % 100 == 0
 
 
 def test_trade_unit_is_inert_for_qrun_templates() -> None:

@@ -114,13 +114,19 @@ def ensure_benchmark_index(
     # Repair a half-written instrument (listed in all.txt but no feature bin), so
     # DumpDataUpdate treats it as new and re-dumps the full history.
     instruments_file = qlib_dir / "instruments" / "all.txt"
-    feature_close = qlib_dir / "features" / stem / "close.day.bin"
-    if instruments_file.exists() and not feature_close.exists():
+    feature_dir = qlib_dir / "features" / stem
+    feature_close = feature_dir / "close.day.bin"
+    feature_factor = feature_dir / "factor.day.bin"
+    # A benchmark without ``$factor`` forces Qlib's entire Exchange into
+    # adjusted-price mode, where ``trade_unit`` is ignored and A-share fills
+    # become fractional.  Treat both missing close and missing factor as a
+    # half-written instrument and force a full dump below.
+    if instruments_file.exists() and (not feature_close.exists() or not feature_factor.exists()):
         lines = instruments_file.read_text(encoding="utf-8").splitlines()
         kept = [ln for ln in lines if ln.split("\t", 1)[0].strip().upper() != instrument]
         if len(kept) != len(lines):
             instruments_file.write_text("\n".join(kept) + "\n", encoding="utf-8")
-            logger.info(f"清理无特征数据的基准条目: {instrument}")
+            logger.info(f"清理特征不完整的基准条目: {instrument}")
 
     try:
         import baostock as bs
@@ -155,14 +161,17 @@ def ensure_benchmark_index(
     numeric = ["open", "high", "low", "close", "preclose", "volume", "amount"]
     for col in numeric:
         df[col] = pd.to_numeric(df[col], errors="coerce")
-    df = df[["date", "code", *numeric]].dropna(subset=["close"])
+    # Indices do not need corporate-action adjustment, but Qlib still needs a
+    # finite factor column to keep the exchange in real-share mode.
+    df["factor"] = 1.0
+    df = df[["date", "code", *numeric, "factor"]].dropna(subset=["close"])
 
     with tempfile.TemporaryDirectory(prefix="benchmark_") as tmp:
         df.to_csv(Path(tmp) / f"{stem}.csv", index=False, encoding="utf-8")
         DumpDataUpdate(
             data_path=tmp,
             qlib_dir=str(qlib_dir),
-            include_fields="open,high,low,close,preclose,volume,amount",
+            include_fields="open,high,low,close,preclose,volume,amount,factor",
             date_field_name="date",
             symbol_field_name="code",
             max_workers=1,

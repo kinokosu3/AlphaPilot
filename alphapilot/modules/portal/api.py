@@ -94,6 +94,95 @@ def _engine(app: FastAPI) -> Any:
     return app.state.engine
 
 
+def _mining_session_root(app: FastAPI, session_name: str) -> Path:
+    """Resolve a mining session as one direct child of the configured log root."""
+    from alphapilot.core.path_safety import ensure_child_path
+
+    root = Path(
+        getattr(_engine(app).config, "log_dir", Path.cwd() / "log")
+    ).expanduser().resolve()
+    name = Path(session_name).expanduser()
+    # Percent-encoded ``..`` is decoded by Starlette before route dispatch.
+    if name.is_absolute() or len(name.parts) != 1 or name.name in {"", ".", ".."}:
+        raise ValueError("Invalid mining session name")
+    target = ensure_child_path(root, root / name)
+    if target == root:
+        raise ValueError("Invalid mining session name")
+    return target
+
+
+def _portal_asset_path(raw_path: str, *, must_exist: bool = False) -> Path:
+    """Resolve Portal import/export files strictly below ``important_data``."""
+    from alphapilot.core.path_safety import ensure_child_path
+    from alphapilot.kernel.paths import important_data_dir
+
+    root = important_data_dir().resolve()
+    supplied = Path(raw_path).expanduser()
+    if supplied.is_absolute():
+        target = supplied.resolve()
+    else:
+        cwd_target = (Path.cwd() / supplied).resolve()
+        try:
+            target = ensure_child_path(root, cwd_target)
+        except ValueError:
+            # Portal defaults use repository-style ``important_data/...`` paths.
+            # When tests/deployments relocate that root via the environment, strip
+            # the conventional prefix instead of creating important_data twice.
+            parts = (
+                supplied.parts[1:]
+                if supplied.parts and supplied.parts[0] == "important_data"
+                else supplied.parts
+            )
+            target = root.joinpath(*parts).resolve()
+    target = ensure_child_path(root, target)
+    if target == root:
+        raise ValueError("Asset path must name a file below important_data")
+    if must_exist and not target.is_file():
+        raise FileNotFoundError(f"Asset file not found: {target}")
+    return target
+
+
+def _configured_log_root(app: FastAPI, requested: str | None = None) -> Path:
+    """Accept log maintenance only for the engine's configured log root."""
+    configured = Path(getattr(_engine(app).config, "log_dir", Path.cwd() / "log")).expanduser().resolve()
+    target = Path(requested).expanduser().resolve() if requested else configured
+    if target != configured:
+        raise ValueError(f"Log directory is outside the configured root: {target}")
+    return target
+
+
+def _market_data_root(app: FastAPI, requested: str) -> Path:
+    """Resolve one of the data roots advertised by the market-data API."""
+    from alphapilot.modules.data_viz.loader import list_data_sources
+
+    target = Path(requested).expanduser().resolve()
+    allowed = {Path(source.path).expanduser().resolve() for source in list_data_sources()}
+    configured = getattr(getattr(_engine(app).config, "data", None), "raw_data_dir", None)
+    if configured:
+        allowed.add(Path(configured).expanduser().resolve())
+    if target not in allowed:
+        raise ValueError(f"Market data directory is not a configured data source: {target}")
+    return target
+
+
+def _backtest_root(app: FastAPI, requested: str | None = None, *, include_runs: bool = False) -> Path:
+    """Resolve an approved legacy backtest or durable-runs root."""
+    from alphapilot.systems.run_workspace import runs_root
+
+    configured = Path(_engine(app).config.backtest.workspace_root).expanduser().resolve()
+    allowed = {configured}
+    if include_runs:
+        allowed.add(runs_root().expanduser().resolve())
+    target = (
+        Path(requested).expanduser().resolve()
+        if requested
+        else (runs_root().resolve() if include_runs else configured)
+    )
+    if target not in allowed:
+        raise ValueError(f"Backtest workspace root is not configured: {target}")
+    return target
+
+
 class JobCreate(BaseModel):
     kind: str
     kwargs: dict[str, Any] = Field(default_factory=dict)
@@ -238,6 +327,57 @@ class ModuleRun(BaseModel):
     module: str
     command: str
     kwargs: dict[str, Any] = Field(default_factory=dict)
+
+
+# The generic Advanced-page dispatcher must never bypass the dedicated job,
+# filesystem, or live-trading API guards. CLI commands remain unchanged.
+PORTAL_MODULE_RUN_ALLOWLIST: dict[str, set[str]] = {
+    "factor": {
+        "factor_validate", "factor_add", "factor_rename", "factor_list",
+        "factor_duplicates", "factor_categorize", "factor_category_add",
+        "factor_category_remove", "category_list", "category_create",
+        "category_rename", "category_delete",
+    },
+    "stock_pool": {
+        "pool_create", "pool_save", "pool_list", "pool_show", "pool_add",
+        "pool_remove", "pool_rename", "pool_set_description", "pool_delete",
+        "pool_export",
+    },
+    "platform": {"list_stocks", "modules"},
+    "live": {
+        "live_status", "live_modes", "live_brokers", "live_quote_providers",
+        "live_plugins", "live_risk_status", "live_ledger_events", "live_state",
+        "live_preflight",
+    },
+    "strategy_backtest": {"strategy_backtest_list"},
+    "timing": {"timing_strategies"},
+    "daily_trade": {
+        "daily_state", "trade_session_list", "trade_session_show",
+        "trade_session_history",
+    },
+}
+
+
+def _safe_module_run_kwargs(payload: ModuleRun) -> dict[str, Any]:
+    allowed = PORTAL_MODULE_RUN_ALLOWLIST.get(payload.module, set())
+    if payload.command not in allowed:
+        raise ValueError(
+            f"Command {payload.module}.{payload.command} is not allowed through /api/modules/run; "
+            "use its dedicated Portal endpoint or background job"
+        )
+    kwargs = dict(payload.kwargs)
+    if payload.module == "stock_pool":
+        if kwargs.get("stock_csv"):
+            kwargs["stock_csv"] = str(_portal_asset_path(str(kwargs["stock_csv"]), must_exist=True))
+        if payload.command == "pool_export":
+            kwargs["output"] = str(_portal_asset_path(str(kwargs.get("output") or "")))
+    if payload.module == "live":
+        if kwargs.get("network"):
+            raise ValueError("Network preflight is not allowed through /api/modules/run")
+        for key in ("state_dir", "ledger_dir"):
+            if kwargs.get(key):
+                raise ValueError(f"Custom live {key} is not allowed through /api/modules/run")
+    return kwargs
 
 
 def _write_factor_csv(rows: list[dict[str, Any]], prefix: str = "alphapilot_factors") -> Path:
@@ -483,8 +623,7 @@ def create_app(
         from alphapilot.log.cleanup import clean_log_dirs
 
         try:
-            eng = _engine(app)
-            log_root = payload.log_dir or str(getattr(eng.config, "log_dir", Path.cwd() / "log"))
+            log_root = _configured_log_root(app, payload.log_dir)
             return _jsonable(clean_log_dirs(log_root, execute=payload.execute).as_dict())
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
@@ -609,9 +748,9 @@ def create_app(
     @app.post("/api/factors/import")
     def import_factors(payload: FactorImport) -> Any:
         try:
-            source: Any = payload.source
+            source_path = _portal_asset_path(payload.source, must_exist=True)
+            source: Any = str(source_path)
             if payload.kind == "json":
-                source_path = Path(payload.source).expanduser()
                 source = json.loads(source_path.read_text(encoding="utf-8"))
             return _jsonable(_engine(app).get_system("factor").import_factors(source, kind=payload.kind))
         except Exception as exc:  # noqa: BLE001
@@ -620,8 +759,9 @@ def create_app(
     @app.post("/api/factors/export")
     def export_factors(payload: FactorExport) -> dict[str, Any]:
         try:
-            _engine(app).get_system("factor").database.save(payload.output_path)
-            return {"output_path": payload.output_path, "saved": True}
+            output_path = _portal_asset_path(payload.output_path)
+            _engine(app).get_system("factor").database.save(str(output_path))
+            return {"output_path": str(output_path), "saved": True}
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
@@ -713,8 +853,15 @@ def create_app(
             if op == "set":
                 ok = factor_system.set_factor_categories(payload.name or "", payload.categories)
                 return {"factor_name": payload.name, "updated": ok}
-            count = factor_system.export_category_csv(payload.category or payload.name or "", payload.output_path or "")
-            return {"category": payload.category or payload.name, "output_path": payload.output_path, "count": count}
+            output_path = _portal_asset_path(payload.output_path or "")
+            count = factor_system.export_category_csv(
+                payload.category or payload.name or "", str(output_path)
+            )
+            return {
+                "category": payload.category or payload.name,
+                "output_path": str(output_path),
+                "count": count,
+            }
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
@@ -769,7 +916,8 @@ def create_app(
     @app.post("/api/strategies/import")
     def import_strategy(payload: StrategyImport) -> Any:
         try:
-            return _jsonable(_engine(app).get_system("strategy").import_strategy(payload.source, kind=payload.kind))
+            source = str(_portal_asset_path(payload.source, must_exist=True))
+            return _jsonable(_engine(app).get_system("strategy").import_strategy(source, kind=payload.kind))
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
@@ -780,7 +928,7 @@ def create_app(
             data = strategy_system.param_database.load(payload.strategy_name)
             if data is None:
                 raise FileNotFoundError(f"Strategy not found: {payload.strategy_name}")
-            out = Path(payload.output_path).expanduser()
+            out = _portal_asset_path(payload.output_path)
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text(json.dumps(_jsonable(data), ensure_ascii=False, indent=2), encoding="utf-8")
             return {"strategy_name": payload.strategy_name, "output_path": str(out), "saved": True}
@@ -920,7 +1068,10 @@ def create_app(
     def market_symbols(data_dir: str) -> list[str]:
         from alphapilot.modules.data_viz.loader import list_symbols
 
-        return list_symbols(Path(data_dir))
+        try:
+            return list_symbols(_market_data_root(app, data_dir))
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
 
     @app.get("/api/market/kline")
     def market_kline(data_dir: str, symbol: str, start: str | None = None, end: str | None = None) -> dict[str, Any]:
@@ -929,7 +1080,7 @@ def create_app(
         try:
             df = load_bars(
                 symbol,
-                Path(data_dir),
+                _market_data_root(app, data_dir),
                 start=date.fromisoformat(start) if start else None,
                 end=date.fromisoformat(end) if end else None,
             )
@@ -952,63 +1103,66 @@ def create_app(
         # workspace root (legacy layout) when there are no saved runs.
         from alphapilot.systems.run_workspace import list_run_backtests
 
-        entries = list_run_backtests()
-        if entries:
-            return _jsonable(entries)
-
         from alphapilot.systems.backtest.artifacts import (
-            DEFAULT_LOG_ROOT,
             build_workspace_log_titles,
             format_workspace_label,
             list_workspaces,
         )
 
-        root = Path(workspace_root or _engine(app).config.backtest.workspace_root)
-        titles = build_workspace_log_titles(Path(log_root) if log_root else DEFAULT_LOG_ROOT, root)
-        workspaces = list_workspaces(root)
-        return _jsonable(
-            [
-                {
-                    "workspace_id": ws.name,
-                    "path": ws,
-                    "label": format_workspace_label(ws, titles, workspaces),
-                    "mtime": datetime.fromtimestamp(ws.stat().st_mtime),
-                }
-                for ws in workspaces
-            ]
-        )
+        try:
+            root = _backtest_root(app, workspace_root)
+            configured_log_root = _configured_log_root(app, log_root)
+            entries = list_run_backtests()
+            if entries:
+                return _jsonable(entries)
+            titles = build_workspace_log_titles(configured_log_root, root)
+            workspaces = list_workspaces(root)
+            return _jsonable(
+                [
+                    {
+                        "workspace_id": ws.name,
+                        "path": ws,
+                        "label": format_workspace_label(ws, titles, workspaces),
+                        "mtime": datetime.fromtimestamp(ws.stat().st_mtime),
+                    }
+                    for ws in workspaces
+                ]
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
 
     # Static paths must be declared before "/api/backtests/{workspace_id}" so they
     # aren't swallowed by the parametric route (workspace_id="leaderboards").
     @app.get("/api/backtests/leaderboards")
     def backtest_leaderboards(workspace_root: str | None = None) -> list[dict[str, Any]]:
         from alphapilot.systems.backtest.artifacts import find_leaderboards
-        from alphapilot.systems.run_workspace import runs_root
 
-        root = Path(workspace_root) if workspace_root else runs_root()
-        return _jsonable(
-            [
-                {
-                    "file": str(p.relative_to(root)),
-                    "label": f"{p.parent.name}/{p.name}",
-                    "mtime": datetime.fromtimestamp(p.stat().st_mtime),
-                }
-                for p in find_leaderboards(root)
-            ]
-        )
+        try:
+            root = _backtest_root(app, workspace_root, include_runs=True)
+            return _jsonable(
+                [
+                    {
+                        "file": str(p.relative_to(root)),
+                        "label": f"{p.parent.name}/{p.name}",
+                        "mtime": datetime.fromtimestamp(p.stat().st_mtime),
+                    }
+                    for p in find_leaderboards(root)
+                ]
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
 
     @app.get("/api/backtests/leaderboard")
     def backtest_leaderboard(file: str, workspace_root: str | None = None) -> dict[str, Any]:
         import pandas as pd
 
         from alphapilot.systems.backtest.artifacts import read_leaderboard
-        from alphapilot.systems.run_workspace import runs_root
 
-        root = (Path(workspace_root) if workspace_root else runs_root()).resolve()
-        target = (root / file).resolve()
-        if root not in target.parents or not target.name.endswith("_leaderboard.csv"):
-            raise _api_error(ValueError(f"invalid leaderboard file: {file}"))
         try:
+            root = _backtest_root(app, workspace_root, include_runs=True)
+            target = (root / file).resolve()
+            if root not in target.parents or not target.name.endswith("_leaderboard.csv"):
+                raise ValueError(f"invalid leaderboard file: {file}")
             df = read_leaderboard(target)
             numeric = [c for c in df.columns if c != "factor_name" and pd.api.types.is_numeric_dtype(df[c])]
             return _jsonable({"columns": list(df.columns), "numeric_columns": numeric, "rows": df})
@@ -1021,10 +1175,16 @@ def create_app(
         from alphapilot.systems.backtest.artifacts import build_summary, load_backtest
         from alphapilot.systems.run_workspace import resolve_run_workspace
 
-        ws = resolve_run_workspace(workspace_id)
-        if ws is None:
-            ws = Path(workspace_root or _engine(app).config.backtest.workspace_root) / workspace_id
         try:
+            ws = resolve_run_workspace(workspace_id)
+            if ws is None:
+                root = _backtest_root(app, workspace_root)
+                name = Path(workspace_id).expanduser()
+                if name.is_absolute() or len(name.parts) != 1 or name.name in {"", ".", ".."}:
+                    raise ValueError("Invalid backtest workspace id")
+                from alphapilot.core.path_safety import ensure_child_path
+
+                ws = ensure_child_path(root, root / name)
             data = load_backtest(ws)
             # The report's DatetimeIndex is named "datetime", so renaming the
             # "index" column is a no-op — force the date column name explicitly so
@@ -1085,9 +1245,7 @@ def create_app(
     @app.get("/api/mining/sessions/{session_name}")
     def mining_session_detail(session_name: str) -> dict[str, Any]:
         try:
-            eng = _engine(app)
-            root = Path(getattr(eng.config, "log_dir", Path.cwd() / "log"))
-            path = root / session_name
+            path = _mining_session_root(app, session_name)
             if not path.exists():
                 raise FileNotFoundError(session_name)
             files = [
@@ -1107,9 +1265,7 @@ def create_app(
     @app.get("/api/mining/sessions/{session_name}/files/{file_path:path}")
     def mining_session_file(session_name: str, file_path: str, max_chars: int = 20000) -> dict[str, Any]:
         try:
-            eng = _engine(app)
-            root = Path(getattr(eng.config, "log_dir", Path.cwd() / "log"))
-            session_root = (root / session_name).resolve()
+            session_root = _mining_session_root(app, session_name)
             target = (session_root / file_path).resolve()
             if session_root not in target.parents and target != session_root:
                 raise ValueError("Invalid file path")
@@ -1369,7 +1525,8 @@ def create_app(
             commands = module.commands()
             if payload.command not in commands:
                 raise ValueError(f"Unknown command: {payload.module}.{payload.command}")
-            return _jsonable(commands[payload.command](**payload.kwargs))
+            kwargs = _safe_module_run_kwargs(payload)
+            return _jsonable(commands[payload.command](**kwargs))
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 

@@ -211,6 +211,7 @@ class AlphaEnv:
     raw_data: Path
     qlib_dir: Path
     factor_dir: Path
+    factor_h5_cache: Path
     log_dir: Path
     workspace_root: Path
     runs_dir: Path
@@ -231,6 +232,7 @@ def isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AlphaEnv:
     raw_data = tmp_path / "raw_data_back_adjust"
     qlib_dir = tmp_path / "qlib"
     factor_dir = tmp_path / "adjust_factors"
+    factor_h5_cache = tmp_path / "factor_h5_cache"
     log_dir = tmp_path / "log"
     workspace_root = tmp_path / "workspaces"
     runs_dir = tmp_path / "runs"
@@ -247,6 +249,7 @@ def isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AlphaEnv:
         raw_data,
         qlib_dir,
         factor_dir,
+        factor_h5_cache,
         log_dir,
         workspace_root,
         runs_dir,
@@ -264,6 +267,7 @@ def isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AlphaEnv:
         "ALPHAPILOT_RAW_DATA_DIR": str(raw_data),
         "ALPHAPILOT_QLIB_DATA_DIR": str(qlib_dir),
         "ALPHAPILOT_ADJUST_FACTOR_DIR": str(factor_dir),
+        "ALPHAPILOT_FACTOR_H5_CACHE_ROOT": str(factor_h5_cache),
         "ALPHAPILOT_LOG_DIR": str(log_dir),
         "ALPHAPILOT_WORKSPACE_ROOT": str(workspace_root),
         "ALPHAPILOT_RUNS_DIR": str(runs_dir),
@@ -294,6 +298,7 @@ def isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AlphaEnv:
         raw_data=raw_data,
         qlib_dir=qlib_dir,
         factor_dir=factor_dir,
+        factor_h5_cache=factor_h5_cache,
         log_dir=log_dir,
         workspace_root=workspace_root,
         runs_dir=runs_dir,

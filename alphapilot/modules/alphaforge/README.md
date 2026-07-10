@@ -31,7 +31,7 @@ alphaforge_search/          GP/RL runners (refactor of train_{GP,RL}) + module
 ## Usage
 
 ```bash
-# AFF (GAN). max_len must be 20 (the DCGAN generator is fixed to length-20).
+# AFF (GAN). Length 20 uses the original DCGAN; shorter searches use its CNN variant.
 alphapilot mine_aff --instruments=test_stock_pool_80 --zoo_size=20 --device=cpu --backtest=True
 
 # GP / RL

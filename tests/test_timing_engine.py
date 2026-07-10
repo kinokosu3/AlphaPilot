@@ -87,3 +87,30 @@ def test_engine_shrinks_buy_when_cash_is_insufficient(tmp_path: Path) -> None:
     assert result.trades.iloc[0]["side"] == "buy"
     assert result.trades.iloc[0]["amount"] == 100
     assert result.trades.iloc[0]["value"] == 950
+
+
+def test_multi_instrument_summary_does_not_multiply_account_equity(tmp_path: Path) -> None:
+    bars = pd.concat(
+        [
+            _bars(),
+            _bars().assign(instrument="SZ000002"),
+        ],
+        ignore_index=True,
+    )
+    signals = bars[["datetime", "instrument"]].assign(
+        signal=0, target_percent=0.0, score=0.0, reason="flat"
+    )
+    req = TimingBacktestRequest(
+        strategy_name="multi_flat",
+        cash=1000,
+        open_cost=0,
+        close_cost=0,
+        min_cost=0,
+        trade_unit=100,
+        output_dir=tmp_path,
+    )
+
+    result = TimingBacktestEngine().run(bars=bars, signals=signals, request=req)
+
+    assert result.summary["final_equity"] == 1000
+    assert result.summary["total_return"] == 0

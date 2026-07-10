@@ -158,7 +158,8 @@ def test_normalize_daily_frame_maps_schema() -> None:
     ]
     assert out.iloc[0]["code"] == "sz000001"
     assert out.iloc[0]["date"] == "2026-06-10"
-    assert out.iloc[0]["volume"] == 12345.0
+    assert out.iloc[0]["volume"] == 1_234_500.0
+    assert out.iloc[0]["amount"] == 9_876_500.0
 
 
 def test_normalize_factor_frame_maps_schema() -> None:

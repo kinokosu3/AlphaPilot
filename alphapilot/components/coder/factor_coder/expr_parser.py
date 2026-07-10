@@ -1,21 +1,34 @@
-from pyparsing import Word, alphas, alphanums, infixNotation, opAssoc, oneOf, Optional, delimitedList, Forward, Group
-from pyparsing import ParseException
-from pyparsing import Regex, Combine, Literal
+from pyparsing import (
+    Combine,
+    DelimitedList,
+    Forward,
+    Group,
+    Literal,
+    OpAssoc,
+    Optional,
+    ParseException,
+    ParserElement,
+    Regex,
+    Word,
+    alphanums,
+    alphas,
+    infix_notation,
+    one_of,
+)
 import sys
 import re
 import numpy as np
 
 # 引入pyparsing自带的cache功能
 # 加快function_call = var + '(' + Optional(delimitedList(expr)) + ')'这种嵌套式的pyparsing解析器
-from pyparsing import ParserElement
-ParserElement.enablePackrat()
+ParserElement.enable_packrat()
 
 sys.setrecursionlimit(5000)  # 设置更高的递归深度限制
 
 # 定义基本元素
 var = (
     Combine(Optional(Literal("$")) + Word(alphas, alphanums + "_"))
-).setName("variable")
+).set_name("variable")
 # var = Word(alphas, alphanums + "_")
 
 # 定义数字的正则表达式
@@ -24,11 +37,11 @@ number_pattern = r"[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?"
 number = Regex(number_pattern)
 
 # 定义操作符
-mul_div = oneOf("* /", useRegex=True)
-add_minus = oneOf("+ -")
-comparison_op = oneOf("> < >= <= == !=")
-logical_and = oneOf("&& &")
-logical_or = oneOf("|| |")
+mul_div = one_of("* /", use_regex=True)
+add_minus = one_of("+ -")
+comparison_op = one_of("> < >= <= == !=")
+logical_and = one_of("&& &")
+logical_or = one_of("|| |")
 conditional_op = ("?", ":")
 
 
@@ -228,9 +241,9 @@ expr = Forward()
 
 # 定义函数调用
 ## 定义可选的一元操作符，这里使用 oneOf 选择器来匹配 "+" 或 "-"
-unary_op = Optional(oneOf("+ -")).setParseAction(lambda t: t[0] if t else '')
-function_call = var + '(' + Optional(delimitedList(expr)) + ')'  # 使用 expr
-function_call.setParseAction(parse_function_call)
+unary_op = Optional(one_of("+ -")).set_parse_action(lambda t: t[0] if t else '')
+function_call = var + '(' + Optional(DelimitedList(expr)) + ')'  # 使用 expr
+function_call.set_parse_action(parse_function_call)
 nested_expr = Group('(' + expr + ')')
 # sign_var = unary_op + var
 
@@ -260,14 +273,14 @@ def check_for_invalid_operators(expression):
 
 
 # 现在更新 expr 的定义
-expr <<= infixNotation(operand, 
+expr <<= infix_notation(operand,
     [
-        (mul_div, 2, opAssoc.LEFT, parse_arith_op),
-        (add_minus, 2, opAssoc.LEFT, parse_arith_op),
-        (comparison_op, 2, opAssoc.LEFT),
-        (logical_and, 2, opAssoc.LEFT, parse_logical_expression),
-        (logical_or, 2, opAssoc.LEFT, parse_logical_expression),
-        (conditional_op, 3, opAssoc.RIGHT, parse_conditional_expression)
+        (mul_div, 2, OpAssoc.LEFT, parse_arith_op),
+        (add_minus, 2, OpAssoc.LEFT, parse_arith_op),
+        (comparison_op, 2, OpAssoc.LEFT),
+        (logical_and, 2, OpAssoc.LEFT, parse_logical_expression),
+        (logical_or, 2, OpAssoc.LEFT, parse_logical_expression),
+        (conditional_op, 3, OpAssoc.RIGHT, parse_conditional_expression)
     ])
 
     
@@ -276,7 +289,7 @@ def check_parentheses_balance(expr):
         raise ParseException(f"表达式括号未闭合")
 
 # 定义整个表达式的解析规则
-expr.setParseAction(parse_entire_expression) # check_parentheses_balance, 
+expr.set_parse_action(parse_entire_expression) # check_parentheses_balance,
 # expr.setDebug()
 
 def parse_expression(factor_expression):
@@ -284,7 +297,7 @@ def parse_expression(factor_expression):
     check_for_invalid_operators(factor_expression)
     print("factor_expression: ", factor_expression)
     
-    parsed_data_function = expr.parseString(factor_expression)[0]
+    parsed_data_function = expr.parse_string(factor_expression)[0]
     return parsed_data_function
 
 

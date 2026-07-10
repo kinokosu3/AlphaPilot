@@ -114,6 +114,51 @@ def _fetch_close(stocks: Any, date: str) -> dict:
     return {str(code): float(px) for code, px in tail.items()}
 
 
+def _fetch_real_market_snapshot(stocks: Any, date: str) -> tuple[dict[str, float], dict[str, float]]:
+    """Return ``(real_close, factor)`` for user/broker-facing quantities.
+
+    Qlib stores adjusted prices and its position book uses adjusted-share
+    amounts.  With a finite ``$factor`` it enforces board lots through
+    ``adjusted_amount * factor``.  Exposing the raw book would therefore send
+    fractional, incorrectly scaled quantities to the live target bridge.
+    """
+    stocks = [s for s in stocks if s != "cash"]
+    if not stocks:
+        return {}, {}
+    import pandas as pd
+    from qlib.data import D
+
+    d = pd.Timestamp(date)
+    frame = D.features(
+        list(stocks),
+        ["$close", "$factor"],
+        d - pd.Timedelta(days=15),
+        d,
+        freq="day",
+        disk_cache=True,
+    ).dropna(subset=["$close"])
+    if frame.empty:
+        return {}, {}
+    tail = frame.groupby("instrument", group_keys=False).tail(1)
+    real_close: dict[str, float] = {}
+    factors: dict[str, float] = {}
+    for (instrument, _datetime), row in tail.iterrows():
+        factor = float(row.get("$factor", 1.0))
+        if not math.isfinite(factor) or factor <= 0:
+            factor = 1.0
+        factors[str(instrument)] = factor
+        real_close[str(instrument)] = float(row["$close"]) / factor
+    return real_close, factors
+
+
+def _to_real_positions(adjusted_positions: dict, factors: dict[str, float]) -> dict[str, float]:
+    """Convert Qlib adjusted-share book amounts to exchange/broker shares."""
+    return {
+        str(code): float(round(float(amount) * float(factors.get(str(code), 1.0))))
+        for code, amount in adjusted_positions.items()
+    }
+
+
 def _seed_with_prices(account_seed: dict, start_date: str) -> tuple[dict, list[str]]:
     """Attach explicit seed prices so qlib's ``fill_stock_value`` is skipped.
 
@@ -234,9 +279,16 @@ def run_one_day(
     # in a few sessions. So lots are qlib's job, not a destructive post-process on the rolled state.
     new_state = _state_from_positions(date, positions_normal)
 
-    prices_today = _fetch_close(set(seed_amounts) | set(new_state.positions), date)
-    trades = _compute_trades(seed_amounts, new_state.positions, prices_today)
-    holdings = _holdings_frame(new_state.positions, prices_today)
+    # Keep ``new_state`` in Qlib's adjusted-share units so the next simulation
+    # can be seeded losslessly.  Convert only the outward-facing trade plan and
+    # holdings to real shares/prices; those feed the CLI and live broker bridge.
+    prices_today, factors_today = _fetch_real_market_snapshot(
+        set(seed_amounts) | set(new_state.positions), date
+    )
+    real_seed = _to_real_positions(seed_amounts, factors_today)
+    real_final = _to_real_positions(new_state.positions, factors_today)
+    trades = _compute_trades(real_seed, real_final, prices_today)
+    holdings = _holdings_frame(real_final, prices_today)
     return {
         "trades": trades,
         "holdings": holdings,

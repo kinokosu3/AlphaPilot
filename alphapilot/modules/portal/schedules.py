@@ -29,6 +29,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
+from alphapilot.core.path_safety import ensure_child_path
 from alphapilot.modules.portal import jobs as portal_jobs
 
 # Task kinds a schedule may run. ``data`` additionally expects ``kwargs["action"]``.
@@ -68,7 +69,13 @@ def _root(schedule_root: Path | str | None) -> Path:
 
 
 def _schedule_path(root: Path, schedule_id: str) -> Path:
-    return root / f"{schedule_id}.json"
+    name = Path(str(schedule_id)).expanduser()
+    if name.is_absolute() or len(name.parts) != 1 or name.name in {"", ".", ".."}:
+        raise ValueError("Invalid schedule id")
+    target = ensure_child_path(root.resolve(), root.resolve() / f"{name.name}.json")
+    if target == root.resolve():
+        raise ValueError("Invalid schedule id")
+    return target
 
 
 def _pidfile_path(root: Path) -> Path:

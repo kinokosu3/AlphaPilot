@@ -266,8 +266,11 @@ def _normalize_daily_frame(df: pd.DataFrame, code: str) -> pd.DataFrame:
     out["low"] = pd.to_numeric(df.get("low"), errors="coerce")
     out["close"] = pd.to_numeric(df.get("close"), errors="coerce")
     out["preclose"] = pd.to_numeric(df.get("pre_close"), errors="coerce")
-    out["volume"] = pd.to_numeric(df.get("vol"), errors="coerce")
-    out["amount"] = pd.to_numeric(df.get("amount"), errors="coerce")
+    # Tushare ``vol`` is expressed in lots of 100 shares and ``amount`` in
+    # thousand CNY.  AlphaPilot's canonical CSV schema (and baostock adapter)
+    # uses shares and CNY, so normalize at the source boundary.
+    out["volume"] = pd.to_numeric(df.get("vol"), errors="coerce") * 100.0
+    out["amount"] = pd.to_numeric(df.get("amount"), errors="coerce") * 1000.0
     out["turn"] = pd.NA
     out["tradestatus"] = 1
     out["pctChg"] = pd.to_numeric(df.get("pct_chg"), errors="coerce")

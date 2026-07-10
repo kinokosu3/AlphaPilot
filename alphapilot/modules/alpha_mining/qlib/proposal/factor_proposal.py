@@ -371,10 +371,13 @@ class AlphaPilotHypothesis2FactorExpression(FactorHypothesis2Experiment):
 
         # Detect duplicated sub-expressions; retry with feedback on parse / evaluate / duplication errors
         flag = False
+        proposal_attempts = 0
+        max_proposal_attempts = 3
         while True:
             if flag:
                 break
 
+            proposal_attempts += 1
             resp = get_llm().chat_completion(user_prompt, system_prompt, json_mode=json_flag)
             response_dict = json.loads(resp)
             proposed_names = []
@@ -399,6 +402,11 @@ class AlphaPilotHypothesis2FactorExpression(FactorHypothesis2Experiment):
                         expression_validation_errors=expression_validation_prompt,
                         expression_duplication=expression_duplication_prompt,
                     )
+                    if proposal_attempts >= max_proposal_attempts:
+                        raise ValueError(
+                            "LLM factor proposal remained invalid after "
+                            f"{max_proposal_attempts} attempts: {error_message}"
+                        )
                     break
 
                 # If expression has problems, regenerate with feedback
@@ -434,6 +442,11 @@ class AlphaPilotHypothesis2FactorExpression(FactorHypothesis2Experiment):
                         expression_validation_errors=expression_validation_prompt,
                         expression_duplication=expression_duplication_prompt,
                     )
+                    if proposal_attempts >= max_proposal_attempts:
+                        raise ValueError(
+                            "LLM factor proposal remained duplicative after "
+                            f"{max_proposal_attempts} attempts"
+                        )
                     break
 
                 proposed_names.append(factor_name)
@@ -541,8 +554,6 @@ class BacktestHypothesis2FactorExpression(FactorHypothesis2Experiment):
 
             exp.tasks = unique_tasks
             return exp
-            
+
         else:
             raise ValueError(f"File {self.factor_csv_path} does not exist. ")
-        
-    

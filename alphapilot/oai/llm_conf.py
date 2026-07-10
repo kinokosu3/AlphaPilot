@@ -26,7 +26,10 @@ class LLMSettings(ExtendedBaseSettings):
     chat_use_azure_token_provider: bool = False
     embedding_use_azure_token_provider: bool = False
     managed_identity_client_id: str | None = None
-    max_retry: int = 10
+    # Total attempts for one external request (initial call + at most two
+    # retries).  Keeping this bounded prevents malformed provider responses
+    # from turning background mining jobs into unbounded/costly retry loops.
+    max_retry: int = 3
     retry_wait_seconds: int = 1
     dump_chat_cache: bool = False
     use_chat_cache: bool = False

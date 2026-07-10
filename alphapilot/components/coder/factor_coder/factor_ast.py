@@ -1,6 +1,20 @@
-from pyparsing import Word, alphas, alphanums, infixNotation, opAssoc, oneOf, Optional, delimitedList, Forward, Group
-from pyparsing import ParserElement, ParseException, ParseResults
-from pyparsing import Regex, Combine, Literal
+from pyparsing import (
+    Combine,
+    DelimitedList,
+    Forward,
+    Literal,
+    OpAssoc,
+    Optional,
+    ParseException,
+    ParseResults,
+    ParserElement,
+    Regex,
+    Word,
+    alphanums,
+    alphas,
+    infix_notation,
+    one_of,
+)
 from dataclasses import dataclass
 from typing import List, Union, Optional as Opt
 from collections import defaultdict
@@ -8,7 +22,7 @@ import sys
 import pandas as pd
 
 # Enable packrat parsing for better performance
-ParserElement.enablePackrat()
+ParserElement.enable_packrat()
 
 # Set higher recursion limit for complex expressions
 sys.setrecursionlimit(4000)
@@ -112,11 +126,11 @@ var = Combine(Optional(Literal("$")) + Word(alphas, alphanums + "_"))
 number = Regex(r"[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?")
 
 # Operators definition
-mul_div = oneOf("* /")
-add_sub = oneOf("+ -")
-comparison = oneOf("> < >= <= == !=")
-logical_and = oneOf("&& &")
-logical_or = oneOf("|| |")
+mul_div = one_of("* /")
+add_sub = one_of("+ -")
+comparison = one_of("> < >= <= == !=")
+logical_and = one_of("&& &")
+logical_or = one_of("|| |")
 conditional = ("?", ":")
 
 def create_var_node(tokens):
@@ -177,33 +191,33 @@ def create_conditional_node(tokens):
 expr = Forward()
 
 # Basic elements
-var.setParseAction(create_var_node)
-number.setParseAction(create_number_node)
+var.set_parse_action(create_var_node)
+number.set_parse_action(create_number_node)
 
 # Function call
-function_call = var + "(" + Optional(delimitedList(expr)) + ")"
-function_call.setParseAction(create_function_node)
+function_call = var + "(" + Optional(DelimitedList(expr)) + ")"
+function_call.set_parse_action(create_function_node)
 
 # Operands
-operand = function_call | var | number | ("(" + expr + ")").setParseAction(lambda tokens: tokens[1])
+operand = function_call | var | number | ("(" + expr + ")").set_parse_action(lambda tokens: tokens[1])
 
 # Complete expression
-expr <<= infixNotation(
+expr <<= infix_notation(
     operand,
     [
-        (mul_div, 2, opAssoc.LEFT, create_binary_op_node),
-        (add_sub, 2, opAssoc.LEFT, create_binary_op_node),
-        (comparison, 2, opAssoc.LEFT, create_binary_op_node),
-        (logical_and, 2, opAssoc.LEFT, create_binary_op_node),
-        (logical_or, 2, opAssoc.LEFT, create_binary_op_node),
-        (conditional, 3, opAssoc.RIGHT, create_conditional_node),
+        (mul_div, 2, OpAssoc.LEFT, create_binary_op_node),
+        (add_sub, 2, OpAssoc.LEFT, create_binary_op_node),
+        (comparison, 2, OpAssoc.LEFT, create_binary_op_node),
+        (logical_and, 2, OpAssoc.LEFT, create_binary_op_node),
+        (logical_or, 2, OpAssoc.LEFT, create_binary_op_node),
+        (conditional, 3, OpAssoc.RIGHT, create_conditional_node),
     ]
 )
 
 def parse_expression(text: str) -> Node:
     """Parse an expression and return its AST."""
     try:
-        result = expr.parseString(text, parseAll=True)
+        result = expr.parse_string(text, parse_all=True)
         return result[0]  # Extract the first element from ParseResults
     except ParseException as e:
         raise ValueError(f"Failed to parse expression: {str(e)}")

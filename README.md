@@ -36,7 +36,7 @@ AlphaPilot 是一个面向股票的量化研究的因子挖掘与策略验证平
 | 日频信号 | `alphapilot daily_signals` | 按交易日推进持仓、生成单日调仓信号 |
 | 交易会话 | `alphapilot trade_session_create` | 将策略快照为可恢复的独立日频交易账户 |
 | 量化择时 | `alphapilot timing_backtest` | 技术指标信号预览、长仓/空仓回测与择时结果产物 |
-| 实盘交易 | `alphapilot live_*` | 模拟盘/实盘运行时、风控闸门、流水账本、守护进程控制与券商适配；仍在开发 |
+| 实盘交易 | `alphapilot live_*` | 模拟盘/实盘运行时、风控闸门、流水账本、守护进程控制，以及 XTP Pro / EMT 的可插拔券商与行情接入；仍在开发 |
 | 统一门户 | `alphapilot portal` | 数据 / 因子 / 回测 / 任务 / 通知集中到同一界面 |
 | 数据准备 | `alphapilot prepare_data` | baostock / tushare → Qlib 数据链路 |
 | 通知与远程 | `alphapilot notify_commands` | 任务完成推送（Telegram / 飞书 / 邮件）+ 聊天命令远程发起与查询任务 |
@@ -247,7 +247,7 @@ alphapilot timing_backtest --strategy_name dual_ma --symbols 000001 --strategy_p
 - [项目目录与架构说明](docs/alphapilot-structure.md)
 - [Docker 部署与服务化运行](docs/DOCKER.md)
 - [Docker 实际运行记录与排错](docs/DOCKER-RUN.md)
-- [普通 XTP 实盘/仿真接入](docs/live-xtp.md)
+- [XTP Pro / EMT 实盘接入](docs/live-xtp.md)
 - [实盘券商/行情 pip 插件开发与安装](docs/live-plugins.md)
 - [important_data 目录、模板与资产说明](important_data/README.md)
 - [AlphaForge 相关说明](alphapilot/modules/alphaforge/README.md)
@@ -284,7 +284,8 @@ AlphaPilot/
 
 | 日期 | 类型 | 功能/模块 | 目标 | 关键改动 | 影响入口 | 验证 | 状态/后续 |
 |------|------|-----------|------|----------|----------|------|-----------|
-| 2026-07-07 | 新增 | 模拟盘/实盘交易系统 | 打通从研究信号到模拟盘/实盘执行的统一交易层，并通过显式风控与确认流程约束真实资金操作 | 新增 `live` system/module，支持 paper、dry-run、live 模式；新增券商注册表与 XTP / EMT / vn.py 适配；新增运行时预检查、连接、状态查询、手动下单、目标组合提交、守护进程生命周期控制、策略启动/暂停/恢复/停止、风控状态、追加式账本事件、恢复辅助能力，以及 Portal 实盘 API/UI 集成 | `alphapilot live_*` CLI；Portal「实盘」页；`/api/live/*`；`docs/live-xtp.md`；`Dockerfile.live` | 新增并扩展 live engine/runtime/risk/registry/strategy-runner/daemon/recovery/events 测试，以及 Portal live API/前端覆盖 | 仍在开发；后续继续验证券商侧行为、生产恢复、账户安全限制与实盘运行稳定性 |
+| 2026-07-10 | 重构 | 实盘券商/行情插件 | 将券商 SDK 与 AlphaPilot 核心解耦，支持可发现、可安装和可卸载的实盘接入 | 移除 vn.py 依赖；将 XTP Pro 和 EMT 重构为 `alphapilot.live.plugins` entry point 插件，交易/行情通道可分别配置；新增插件发现、可用性检查及 `live_plugins` 入口 | `alphapilot live_plugins` / `live_brokers` / `live_quote_providers`；Portal「实盘」页；`docs/live-xtp.md`；`docs/live-plugins.md` | 新增插件安装与注册表测试，并覆盖 CLI、Portal 和 gateway 回归 | 仍在开发；需在目标券商环境持续验证连接、恢复和实盘安全控制 |
+| 2026-07-07 | 新增 | 模拟盘/实盘交易系统 | 打通从研究信号到模拟盘/实盘执行的统一交易层，并通过显式风控与确认流程约束真实资金操作 | 新增 `live` system/module，支持 paper、dry-run、live 模式；新增券商注册表与实盘适配；新增运行时预检查、连接、状态查询、手动下单、目标组合提交、守护进程生命周期控制、策略启动/暂停/恢复/停止、风控状态、追加式账本事件、恢复辅助能力，以及 Portal 实盘 API/UI 集成 | `alphapilot live_*` CLI；Portal「实盘」页；`/api/live/*`；`docs/live-xtp.md`；`Dockerfile.live` | 新增并扩展 live engine/runtime/risk/registry/strategy-runner/daemon/recovery/events 测试，以及 Portal live API/前端覆盖 | 仍在开发；后续继续验证券商侧行为、生产恢复、账户安全限制与实盘运行稳定性 |
 | 2026-07-01 | 新增 | 量化择时系统 | 在现有选股/回测流程之外提供可复用的技术指标择时能力，并为后续模拟盘/实盘接入预留执行边界 | 新增 `timing` system/module 与 `alphapilot timing_strategies` / `timing_signal` / `timing_backtest` CLI；实现 BOLL、SMA、双均线、RSI、KDJ、Aroon、StochRSI、ARBR 等内置策略；新增 pandas 技术指标与信号工具、长仓/空仓回测引擎、下一根 bar 开盘成交、手续费/滑点/整手约束、signals/trades/equity_curve/positions/summary 产物；Portal 新增「择时」页、API、后台任务与结果预览；股票池创建/追加支持从已下载股票中勾选；修复前端 `ignoreDeprecations` 以恢复 TypeScript 5.x typecheck | `alphapilot timing_*` CLI；Portal「择时」页；`/api/timing/*`；后台 job `timing_backtest`；Portal「市场数据」股票池管理 | 新增 `tests/test_timing_indicators.py`、`tests/test_timing_engine.py`、`tests/test_timing_system.py`；扩展 CLI、Portal API/job、前端页面与参数规格测试 | 已完成基础版；后续继续扩展分钟级择时、组合级资金分配与实盘适配 |
 | 2026-06-30 | 新增 | 分钟级数据工作流 | 将 AlphaPilot 从日频扩展到分钟级别，支持盘中研究流程 | 已支持分钟级别的数据下载、展示、因子挖掘和回测功能 | 市场数据下载；Portal 数据展示；因子挖掘；因子回测 | 待完整回归 | 已完成 |
 | 2026-06-29 | 新增 | 股票池管理 | 让用户可批量将股票组织成命名股票池，并在回测与因子挖掘中复用 | 新增 `stock_pool` CLI 模块及完整增删改查（`pool_create` / `pool_list` / `pool_add` / `pool_remove` / `pool_rename` / `pool_delete` 等）；股票池以 JSON 为真实来源并同步到 Qlib instruments；Portal「市场数据」页新增股票池管理区块，挖掘 / 回测 / 库管理 / 调度器表单的「市场 / 股票池」字段改为股票池下拉选择 | `alphapilot pool_*` CLI；Portal「市场数据」页；挖掘 / 回测 / 库管理 / 调度器表单；`/api/data/instrument-sets`；`/api/modules/run` | `pytest tests/test_stock_pool.py tests/test_kernel_registry.py`；`npm run build`；`npm run test` | 已完成 |
