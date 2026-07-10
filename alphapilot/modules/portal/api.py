@@ -1452,6 +1452,13 @@ def create_app(
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
+    @app.get("/api/live/plugins")
+    def live_plugins() -> dict[str, Any]:
+        try:
+            return _jsonable(_live_module().live_plugins())
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
     @app.get("/api/live/runtime/state")
     def live_runtime_state(
         mode: str | None = Query(default=None),

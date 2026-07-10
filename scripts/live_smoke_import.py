@@ -1,7 +1,7 @@
 """Live smoke: native gateways construct + compiled SDK bindings load. No server connection.
 
 vn.py is no longer part of the live stack: XTP Pro and EMT run through
-AlphaPilot-native gateways over the compiled ``vnpy_xtp.api`` / ``vnpy_emt.api``
+AlphaPilot-native gateways over the compiled ``alphapilot_xtpx.api`` / ``alphapilot_emt.api``
 pybind bindings. This smoke proves, per broker: the binding imports, the
 AlphaPilot gateway class resolves through the registry, and constructing it
 instantiates the C++ API wrapper objects (load + link check). Exits non-zero on
@@ -29,12 +29,12 @@ def main() -> int:
     results: dict[str, str] = {}
     failed = False
 
-    from alphapilot.systems.live.brokers.registry import create_gateway
+    from alphapilot.systems.live.brokers.registry import create_gateway_pair
     from alphapilot.systems.live.gateway import BrokerGateway
 
     sdk_flags = {
-        "xtp": "alphapilot.systems.live.brokers.xtp_pro",
-        "emt": "alphapilot.systems.live.brokers.emt",
+        "xtp": "alphapilot_broker_xtp.gateway",
+        "emt": "alphapilot_broker_emt.gateway",
     }
 
     for broker in sorted(require):
@@ -54,8 +54,9 @@ def main() -> int:
 
         # 2) native gateway resolves + constructs (creates the C++ API objects)?
         try:
-            gateway = create_gateway(broker)
+            gateway, quote_gateway = create_gateway_pair(broker, broker)
             assert isinstance(gateway, BrokerGateway)
+            assert quote_gateway is gateway
             results[f"{broker}: gateway construct ({type(gateway).__name__})"] = "OK"
         except Exception:
             results[f"{broker}: gateway construct"] = "FAIL\n" + traceback.format_exc()

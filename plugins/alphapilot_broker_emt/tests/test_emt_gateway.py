@@ -1,7 +1,7 @@
-"""Native EMT gateway: vendor-specific converters + shared-skeleton handlers.
+"""Native EMT plugin: vendor-specific converters + shared-skeleton handlers.
 
 The shared order/trade/tick/contract machinery is covered by
-``test_live_xtp_pro.py`` (same ``AShareVendorGateway`` code path); this file
+the XTP plugin tests (same ``AShareVendorGateway`` code path); this file
 pins down what is EMT-specific: the ``order_emt_id`` field, ``market == 100``
 position skip, ``sellable_qty``-as-yd semantics, and buying_power-as-balance.
 """
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from alphapilot.systems.live.brokers import emt as em
+import alphapilot_broker_emt.gateway as em
 from alphapilot.systems.live.types import Exchange, OrderStatus
 
 

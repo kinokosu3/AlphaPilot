@@ -248,6 +248,7 @@ alphapilot timing_backtest --strategy_name dual_ma --symbols 000001 --strategy_p
 - [Docker 部署与服务化运行](docs/DOCKER.md)
 - [Docker 实际运行记录与排错](docs/DOCKER-RUN.md)
 - [普通 XTP 实盘/仿真接入](docs/live-xtp.md)
+- [实盘券商/行情 pip 插件开发与安装](docs/live-plugins.md)
 - [important_data 目录、模板与资产说明](important_data/README.md)
 - [AlphaForge 相关说明](alphapilot/modules/alphaforge/README.md)
 

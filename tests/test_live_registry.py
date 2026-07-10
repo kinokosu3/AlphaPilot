@@ -10,17 +10,23 @@ import pytest
 from alphapilot.systems.live.brokers import registry as reg
 
 
-def test_builtin_brokers_registered() -> None:
+def test_installed_plugin_brokers_registered() -> None:
     names = [spec.name for spec in reg.list_brokers()]
     assert names == ["emt", "xtp"]
-    assert reg.get_broker("XTP").gateway_path == (
-        "alphapilot.systems.live.brokers.xtp_pro:XtpProGateway"
-    )
+    assert reg.get_broker("XTP").gateway_path == "alphapilot_broker_xtp.factory:create_gateway"
+    assert reg.get_broker("xtp").distribution == "alphapilot-broker-xtp"
     assert reg.get_broker("emt").gateway_name == "EMT"
 
 
+def test_core_without_plugins_has_no_real_brokers(monkeypatch: pytest.MonkeyPatch) -> None:
+    reg.reset_plugin_registry_for_tests()
+    monkeypatch.setattr(reg, "_entry_points", lambda: [])
+    assert reg.list_brokers() == []
+    assert [spec.name for spec in reg.list_quote_providers()] == ["paper"]
+
+
 def test_unknown_broker_raises() -> None:
-    with pytest.raises(ValueError, match="unknown broker"):
+    with pytest.raises(ValueError, match="unknown trade broker"):
         reg.get_broker("nope")
 
 
@@ -38,10 +44,11 @@ def test_build_connect_setting_from_env() -> None:
     setting = reg.build_connect_setting("xtp", env)
     assert setting["账号"] == "user1"
     assert setting["客户号"] == 7                       # cast to int
-    assert setting["行情端口"] == 6002
     assert setting["授权码"] == "key123"
-    assert setting["行情协议"] == "TCP"                  # default kept
     assert setting["日志级别"] == "INFO"
+    quote = reg.build_quote_connect_setting("xtp", env)
+    assert quote["行情端口"] == 6002
+    assert quote["行情协议"] == "TCP"
 
 
 def test_build_connect_setting_json_override() -> None:
@@ -62,7 +69,7 @@ def test_emt_quote_credentials_are_optional_separate_fields() -> None:
         "ALPHAPILOT_LIVE_EMT_TRADE_HOST": "2.2.2.2",
         "ALPHAPILOT_LIVE_EMT_TRADE_PORT": "1002",
     }
-    setting = reg.build_connect_setting("emt", env)
+    setting = reg.build_quote_connect_setting("emt", env)
     assert setting["账号"] == "trade-user"
     assert setting["密码"] == "trade-pass"
     assert setting["行情账号"] == "quote-user"
@@ -73,7 +80,6 @@ def test_missing_setting_fields() -> None:
     missing = reg.missing_setting_fields("emt", {})
     assert "ALPHAPILOT_LIVE_EMT_ACCOUNT" in missing
     assert "ALPHAPILOT_LIVE_EMT_PASSWORD" in missing
-    assert "ALPHAPILOT_LIVE_EMT_QUOTE_PORT" in missing
     assert "ALPHAPILOT_LIVE_EMT_TRADE_PORT" in missing
     # ints with non-empty defaults are not "missing"
     assert "ALPHAPILOT_LIVE_EMT_CLIENT_ID" not in missing
@@ -81,6 +87,9 @@ def test_missing_setting_fields() -> None:
     assert "ALPHAPILOT_LIVE_EMT_QUOTE_ACCOUNT" not in missing
     assert "ALPHAPILOT_LIVE_EMT_QUOTE_PASSWORD" not in missing
     assert reg.missing_setting_fields("emt", {"ALPHAPILOT_LIVE_EMT_SETTING_JSON": "{}"}) == []
+    quote_missing = reg.missing_quote_setting_fields("emt", {})
+    assert "ALPHAPILOT_LIVE_EMT_QUOTE_PORT" in quote_missing
+    assert "ALPHAPILOT_LIVE_EMT_TRADE_PORT" not in quote_missing
 
 
 def test_xtp_missing_fields_require_software_key_and_ports() -> None:
@@ -94,9 +103,9 @@ def test_xtp_missing_fields_require_software_key_and_ports() -> None:
         },
     )
     assert "ALPHAPILOT_LIVE_XTP_SOFTWARE_KEY" in missing
-    assert "ALPHAPILOT_LIVE_XTP_QUOTE_PORT" in missing
     assert "ALPHAPILOT_LIVE_XTP_TRADE_PORT" in missing
     assert "ALPHAPILOT_LIVE_XTP_CLIENT_ID" not in missing
+    assert "ALPHAPILOT_LIVE_XTP_QUOTE_PORT" in reg.missing_quote_setting_fields("xtp", {})
 
 
 def test_xtp_public_test_endpoint_defaults_do_not_override_env() -> None:
@@ -118,20 +127,27 @@ def test_resolve_gateway_class_import_error_message(monkeypatch: pytest.MonkeyPa
     # A broker whose gateway package is absent -> actionable ImportError.
     spec = reg.BrokerSpec(name="ghost", gateway_path="ghost_pkg:GhostGateway", gateway_name="GHOST")
     monkeypatch.setitem(reg._BROKERS, "ghost", spec)
-    with pytest.raises(ImportError, match="Dockerfile.live"):
+    with pytest.raises(ImportError, match="cannot load"):
         reg.resolve_gateway_class("ghost")
     assert not reg.gateway_importable("ghost")
 
 
-def test_resolve_gateway_class_native_brokers() -> None:
-    # XTP and EMT resolve to AlphaPilot-native gateways; no vn.py involved.
-    from alphapilot.systems.live.brokers.emt import EmtGateway
-    from alphapilot.systems.live.brokers.xtp_pro import XtpProGateway
+def test_resolve_plugin_factories_and_sdk_availability(monkeypatch: pytest.MonkeyPatch) -> None:
+    import alphapilot_broker_emt.gateway as emt_gateway
+    import alphapilot_broker_xtp.gateway as xtp_gateway
 
-    assert reg.resolve_gateway_class("xtp") is XtpProGateway
-    assert reg.resolve_gateway_class("emt") is EmtGateway
+    assert callable(reg.resolve_gateway_class("xtp"))
+    assert callable(reg.resolve_gateway_class("emt"))
+
+    monkeypatch.setattr(xtp_gateway, "SDK_AVAILABLE", True)
+    monkeypatch.setattr(emt_gateway, "SDK_AVAILABLE", True)
     assert reg.gateway_importable("xtp")
     assert reg.gateway_importable("emt")
+
+    monkeypatch.setattr(xtp_gateway, "SDK_AVAILABLE", False)
+    monkeypatch.setattr(emt_gateway, "SDK_AVAILABLE", False)
+    assert not reg.gateway_importable("xtp")
+    assert not reg.gateway_importable("emt")
 
 
 def test_create_gateway_native_returns_broker_gateway() -> None:
@@ -142,6 +158,23 @@ def test_create_gateway_native_returns_broker_gateway() -> None:
     assert isinstance(gw, XtpProGateway)
     assert isinstance(gw, BrokerGateway)
     assert gw.name == "xtp"
+    assert gw.roles == frozenset({"trade"})
+    assert gw.md_api is None
+
+
+def test_plugin_pair_shares_same_provider_and_splits_mixed_channels() -> None:
+    emt_trade, emt_quote = reg.create_gateway_pair("emt", "emt")
+    assert emt_trade is emt_quote
+    assert emt_trade.roles == frozenset({"trade", "quote"})
+    assert emt_trade.td_api is not None
+    assert emt_trade.md_api is not None
+
+    mixed_trade, mixed_quote = reg.create_gateway_pair("emt", "xtp")
+    assert mixed_trade is not mixed_quote
+    assert mixed_trade.roles == frozenset({"trade"})
+    assert mixed_trade.td_api is not None and mixed_trade.md_api is None
+    assert mixed_quote.roles == frozenset({"quote"})
+    assert mixed_quote.md_api is not None and mixed_quote.td_api is None
 
 
 def test_create_gateway_wraps_vnpy_class(monkeypatch: pytest.MonkeyPatch) -> None:

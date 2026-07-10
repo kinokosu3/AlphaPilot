@@ -116,7 +116,9 @@ export type LivePreflightChannel = {
 
 export type LiveBrokerCapabilities = {
   asset_classes?: string[];
+  exchanges?: string[];
   supports_tick?: boolean;
+  supports_depth?: boolean;
   supports_contract_query?: boolean;
   supports_account_query?: boolean;
   supports_position_query?: boolean;
@@ -132,12 +134,37 @@ export type LiveBrokerSpec = {
   description: string;
   gateway: string;
   gateway_importable: boolean;
+  availability_detail?: string;
+  plugin_id?: string;
+  distribution?: string;
+  version?: string;
+  roles?: string[];
   env_fields: string[];
   missing_env: string[];
   capabilities: LiveBrokerCapabilities;
 };
 
 export type LiveQuoteProviderSpec = LiveBrokerSpec;
+
+export type LivePluginDiagnostics = {
+  api_version: number;
+  entry_point_group: string;
+  plugins: Array<{
+    plugin_id: string;
+    distribution?: string;
+    version?: string;
+    status: string;
+    error?: string;
+    providers: Array<{ name: string; roles: string[] }>;
+  }>;
+  issues: Array<{
+    plugin_id: string;
+    kind: string;
+    error: string;
+    distribution?: string;
+    version?: string;
+  }>;
+};
 
 export type LiveConnectResult = { ready: boolean; state: LiveRuntimeSnapshot };
 

@@ -88,8 +88,22 @@ class LiveRuntime:
         is_trading_day_fn=None,
     ) -> "LiveRuntime":
         """Build a runtime from config without connecting yet."""
-        gateway = broker or _make_trade_gateway(config)
-        quote_gateway = quote_provider or _make_quote_gateway(config, gateway)
+        if broker is not None:
+            gateway = broker
+            quote_gateway = quote_provider or _make_quote_gateway(config, gateway)
+        elif quote_provider is not None:
+            gateway = _make_trade_gateway(config)
+            quote_gateway = quote_provider
+        elif config.mode == RunMode.LIVE:
+            from alphapilot.systems.live.brokers.registry import create_gateway_pair
+
+            gateway, quote_gateway = create_gateway_pair(
+                config.trade_broker or config.broker,
+                config.quote_provider or config.trade_broker or config.broker,
+            )
+        else:
+            gateway = _make_trade_gateway(config)
+            quote_gateway = gateway
         engine = LiveEngine(
             config,
             gateway,
@@ -413,6 +427,17 @@ class LiveRuntime:
         """Return a JSON-serializable runtime state projection."""
         oms = self.engine.oms
         account = oms.account
+        plugins = None
+        if self.config.mode == RunMode.LIVE:
+            try:
+                from alphapilot.systems.live.brokers.registry import provider_pair_metadata
+
+                plugins = provider_pair_metadata(
+                    self.config.trade_broker or self.config.broker,
+                    self.config.quote_provider or self.config.trade_broker or self.config.broker,
+                )
+            except Exception as exc:  # noqa: BLE001 - keep state readable after uninstall
+                plugins = {"error": f"{type(exc).__name__}: {exc}"}
         return {
             "config": {
                 "mode": self.config.mode,
@@ -421,6 +446,7 @@ class LiveRuntime:
                 "quote_provider": self.config.quote_provider,
                 "ledger_dir": str(self.config.ledger_dir),
                 "state_dir": str(self.config.state_dir),
+                "plugins": plugins,
             },
             "engine": self.engine.snapshot(),
             "recovery": self.recovery,

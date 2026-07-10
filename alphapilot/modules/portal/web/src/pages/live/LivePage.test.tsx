@@ -90,8 +90,11 @@ function mockLiveFetch() {
         {
           name: "emt",
           description: "东方财富证券 EMT",
-          gateway: "alphapilot.systems.live.brokers.emt:EmtGateway",
+          gateway: "alphapilot_broker_emt.factory:create_gateway",
           gateway_importable: true,
+          plugin_id: "emt",
+          distribution: "alphapilot-broker-emt",
+          version: "0.1.0",
           env_fields: ["ALPHAPILOT_LIVE_EMT_ACCOUNT"],
           missing_env: [],
           capabilities: {
@@ -108,7 +111,7 @@ function mockLiveFetch() {
         {
           name: "xtp",
           description: "中泰证券 XTP PRO",
-          gateway: "alphapilot.systems.live.brokers.xtp_pro:XtpProGateway",
+          gateway: "alphapilot_broker_xtp.factory:create_gateway",
           gateway_importable: false,
           env_fields: ["ALPHAPILOT_LIVE_XTP_ACCOUNT"],
           missing_env: ["ALPHAPILOT_LIVE_XTP_ACCOUNT"],
@@ -130,7 +133,7 @@ function mockLiveFetch() {
         {
           name: "emt",
           description: "东方财富证券 EMT",
-          gateway: "alphapilot.systems.live.brokers.emt:EmtGateway",
+          gateway: "alphapilot_broker_emt.factory:create_gateway",
           gateway_importable: true,
           env_fields: ["ALPHAPILOT_LIVE_EMT_ACCOUNT"],
           missing_env: [],
@@ -146,6 +149,14 @@ function mockLiveFetch() {
           },
         },
       ]);
+    }
+    if (path === "/api/live/plugins") {
+      return Response.json({
+        api_version: 1,
+        entry_point_group: "alphapilot.live.plugins",
+        plugins: [{ plugin_id: "emt", distribution: "alphapilot-broker-emt", version: "0.1.0", status: "loaded", providers: [{ name: "emt", roles: ["trade", "quote"] }] }],
+        issues: [],
+      });
     }
     if (path.startsWith("/api/live/runtime/state")) {
       return Response.json({ exists: true, state_path: "/tmp/state/runtime_state.json", state: daemonState });
@@ -254,6 +265,8 @@ describe("LivePage", () => {
     expect(await screen.findByText("ref-1")).toBeInTheDocument();
     expect(await screen.findByText("daemon 手动委托")).toBeInTheDocument();
     expect(await screen.findByText("trade-1")).toBeInTheDocument();
+    expect(screen.getByLabelText("交易券商")).toBeDisabled();
+    expect(await screen.findByText(/alphapilot-broker-emt/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByLabelText("网络预检"));
     fireEvent.click(screen.getByRole("button", { name: "预检" }));

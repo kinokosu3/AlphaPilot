@@ -1,5 +1,5 @@
 project(
-  'vnpy_xtp',
+  'alphapilot_xtpx',
   'cpp',
   version: '1.2.1.1',
   license: 'MIT',
@@ -40,13 +40,13 @@ if host_machine.system() == 'windows'
   add_project_arguments('/MT', language : 'cpp')
   
   # 设置库目录
-  lib_dir = meson.current_source_dir() / 'vnpy_xtp/api/libs'
-  api_dir = meson.current_source_dir() / 'vnpy_xtp/api'
+  lib_dir = meson.current_source_dir() / 'alphapilot_xtpx/api/libs'
+  api_dir = meson.current_source_dir() / 'alphapilot_xtpx/api'
   
   # 设置include目录
   include_dirs = include_directories(
-    'vnpy_xtp/api/include',
-    'vnpy_xtp/api/vnxtp',
+    'alphapilot_xtpx/api/include',
+    'alphapilot_xtpx/api/vnxtp',
     pybind11_include_dir,
   )
   
@@ -74,12 +74,12 @@ else  # Linux
   ]
   
   # 设置库目录
-  lib_dir = meson.current_source_dir() / 'vnpy_xtp/api'
+  lib_dir = meson.current_source_dir() / 'alphapilot_xtpx/api'
   
   # 设置include目录
   include_dirs = include_directories(
-    'vnpy_xtp/api/include',
-    'vnpy_xtp/api/vnxtp',
+    'alphapilot_xtpx/api/include',
+    'alphapilot_xtpx/api/vnxtp',
     pybind11_include_dir,
   )
   
@@ -95,32 +95,32 @@ endif
 # 创建MD模块扩展
 md_module = py.extension_module(
   'vnxtpmd',
-  sources: ['vnpy_xtp/api/vnxtp/vnxtpmd/vnxtpmd.cpp'],
+  sources: ['alphapilot_xtpx/api/vnxtp/vnxtpmd/vnxtpmd.cpp'],
   include_directories: include_dirs,
   dependencies: [py_dep, thostmduserapi_lib],
   cpp_args: extra_cpp_args,
   link_args: extra_link_args,
   install: true,
-  subdir: 'vnpy_xtp/api'
+  subdir: 'alphapilot_xtpx/api'
 )
 
 # 创建TD模块扩展
 td_module = py.extension_module(
   'vnxtptd',
-  sources: ['vnpy_xtp/api/vnxtp/vnxtptd/vnxtptd.cpp'],
+  sources: ['alphapilot_xtpx/api/vnxtp/vnxtptd/vnxtptd.cpp'],
   include_directories: include_dirs,
   dependencies: [py_dep, thosttraderapi_lib],
   cpp_args: extra_cpp_args,
   link_args: extra_link_args,
   install: true,
-  subdir: 'vnpy_xtp/api'
+  subdir: 'alphapilot_xtpx/api'
 )
 
 # 安装Python源代码
 python_files = [
-  ['vnpy_xtp/__init__.py', 'vnpy_xtp'],
-  ['vnpy_xtp/api/__init__.py', 'vnpy_xtp/api'],
-  ['vnpy_xtp/api/xtp_constant.py', 'vnpy_xtp/api'],
+  ['alphapilot_xtpx/__init__.py', 'alphapilot_xtpx'],
+  ['alphapilot_xtpx/api/__init__.py', 'alphapilot_xtpx/api'],
+  ['alphapilot_xtpx/api/xtp_constant.py', 'alphapilot_xtpx/api'],
 ]
 
 foreach file : python_files
@@ -134,22 +134,22 @@ endforeach
 # 安装API动态库文件
 if host_machine.system() == 'windows'
   api_libs = [
-    'vnpy_xtp/api/xtpxquoteapi.dll',
-    'vnpy_xtp/api/xtpxtraderapi.dll',
+    'alphapilot_xtpx/api/xtpxquoteapi.dll',
+    'alphapilot_xtpx/api/xtpxtraderapi.dll',
   ]
   
   install_data(
     api_libs,
-    install_dir: py.get_install_dir() / 'vnpy_xtp/api'
+    install_dir: py.get_install_dir() / 'alphapilot_xtpx/api'
   )
 else  # Linux
   api_libs = [
-    'vnpy_xtp/api/libxtpxquoteapi.so',
-    'vnpy_xtp/api/libxtpxtraderapi.so',
+    'alphapilot_xtpx/api/libxtpxquoteapi.so',
+    'alphapilot_xtpx/api/libxtpxtraderapi.so',
   ]
   
   install_data(
     api_libs,
-    install_dir: py.get_install_dir() / 'vnpy_xtp/api'
+    install_dir: py.get_install_dir() / 'alphapilot_xtpx/api'
   )
 endif

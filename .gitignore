@@ -29,8 +29,8 @@ __pycache__/
 
 # C extensions
 *.so
-!vnpy_xtp/vnpy_xtp/api/*.so
-!vnpy_emt/vnpy_emt/api/*.so
+!alphapilot_xtpx/alphapilot_xtpx/api/*.so
+!alphapilot_emt/alphapilot_emt/api/*.so
 
 # Distribution / packaging
 .Python

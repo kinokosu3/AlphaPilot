@@ -237,6 +237,31 @@ def start_daemon(
         ledger_dir=ledger_dir,
         state_dir=state_dir,
     )
+    plugin_selection = None
+    if cfg.mode == RunMode.LIVE:
+        from alphapilot.systems.live.brokers.registry import (
+            missing_quote_setting_fields,
+            missing_setting_fields,
+            provider_pair_metadata,
+        )
+
+        plugin_selection = provider_pair_metadata(cfg.trade_broker, cfg.quote_provider)
+        unavailable = [
+            row
+            for row in plugin_selection.values()
+            if isinstance(row, dict) and not row.get("available")
+        ]
+        if unavailable:
+            details = "; ".join(
+                f"{row.get('role')}:{row.get('name')} {row.get('availability_detail')}" for row in unavailable
+            )
+            raise RuntimeError(f"live provider unavailable: {details}")
+        missing = [
+            *missing_setting_fields(cfg.trade_broker),
+            *missing_quote_setting_fields(cfg.quote_provider),
+        ]
+        if missing:
+            raise ValueError("missing live provider env fields: " + ", ".join(sorted(set(missing))))
 
     if timing_strategy and not symbols:
         raise ValueError("symbols are required when timing_strategy is enabled")
@@ -305,6 +330,7 @@ def start_daemon(
         "broker": cfg.broker,
         "trade_broker": cfg.trade_broker,
         "quote_provider": cfg.quote_provider,
+        "plugins": plugin_selection,
         "symbols": symbols or [],
         "interval": float(interval),
         "timeout": float(timeout),
@@ -723,6 +749,11 @@ def run_daemon(
         ledger_dir=ledger_dir,
         state_dir=state_dir,
     )
+    plugin_selection = None
+    if cfg.mode == RunMode.LIVE:
+        from alphapilot.systems.live.brokers.registry import provider_pair_metadata
+
+        plugin_selection = provider_pair_metadata(cfg.trade_broker, cfg.quote_provider)
     stop = False
 
     def _handle_stop(signum, frame) -> None:  # noqa: ANN001, ARG001
@@ -748,6 +779,7 @@ def run_daemon(
         "broker": cfg.broker,
         "trade_broker": cfg.trade_broker,
         "quote_provider": cfg.quote_provider,
+        "plugins": plugin_selection,
         "symbols": symbols or [],
         "commands_processed": 0,
         "recovery": None,

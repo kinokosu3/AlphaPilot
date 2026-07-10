@@ -88,6 +88,7 @@ EXPECTED_CLI_COMMANDS: frozenset[str] = frozenset(
         "live_order",
         "live_preflight",
         "live_quote_providers",
+        "live_plugins",
         "live_risk_status",
         "live_run",
         "live_state",
@@ -353,3 +354,18 @@ def captured_notify(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
         "alphapilot.systems.notify.service._build_channels", _fake_build_channels
     )
     return sink
+@pytest.fixture(autouse=True)
+def installed_live_test_plugins():
+    """Model the EMT/XTP wheels as installed for the existing live tests."""
+    from alphapilot.systems.live.brokers import registry
+    from alphapilot_broker_emt.plugin import get_plugin_spec as emt_plugin
+    from alphapilot_broker_xtp.plugin import get_plugin_spec as xtp_plugin
+
+    registry.reset_plugin_registry_for_tests()
+    installed = {spec.name for spec in registry.list_brokers()}
+    if "emt" not in installed:
+        registry.register_plugin_spec(emt_plugin(), distribution="alphapilot-broker-emt", version="test")
+    if "xtp" not in installed:
+        registry.register_plugin_spec(xtp_plugin(), distribution="alphapilot-broker-xtp", version="test")
+    yield
+    registry.reset_plugin_registry_for_tests()

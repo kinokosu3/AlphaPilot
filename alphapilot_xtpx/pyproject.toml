@@ -1,7 +1,7 @@
 [project]
-name = "vnpy_xtp"
+name = "alphapilot_xtpx"
 version = "1.2.1.1"
-description = "XTP PRO gateway for vn.py quant trading framework."
+description = "Compiled XTPX SDK bindings for AlphaPilot."
 readme = "README.md"
 license = {text = "MIT"}
 authors = [{name = "Xiaoyou Chen", email = "xiaoyou.chen@mail.vnpy.com"}]
@@ -21,14 +21,13 @@ classifiers = [
 ]
 requires-python = ">=3.10"
 dependencies = []
-keywords = ["quant", "quantitative", "investment", "trading", "algotrading", "ctp"]
+keywords = ["alphapilot", "quant", "trading", "xtp", "xtpx"]
 
 [project.urls]
-"Homepage" = "https://www.vnpy.com"
-"Documentation" = "https://www.vnpy.com/docs"
-"Changes" = "https://github.com/vnpy/vnpy_xtp/blob/master/CHANGELOG.md"
-"Source" = "https://github.com/vnpy/vnpy_xtp/"
-"Forum" = "https://www.vnpy.com/forum"
+"Homepage" = "https://github.com/ai-yang/money_is_all_you_need"
+"Documentation" = "https://github.com/ai-yang/money_is_all_you_need/blob/main/docs/live-plugins.md"
+"Source" = "https://github.com/ai-yang/money_is_all_you_need"
+"Issues" = "https://github.com/ai-yang/money_is_all_you_need/issues"
 
 [build-system]
 requires = [
@@ -50,7 +49,7 @@ include = [
     "**/*.cpp",
     "**/*.lib",
     "**/*.a",
-    "**/*.framework/**",  # 添加Mac框架文件夹支持
+    "**/*.framework/**",
 ]
 
 preserve-path = true 

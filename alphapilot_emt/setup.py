@@ -27,7 +27,7 @@ def get_ext_modules() -> list:
         runtime_library_dirs: list[str] = []
         md_libraries = ["emt_quote_api", "emt_trader_api_c", "emt_api"]
         td_libraries = ["emt_quote_api", "emt_trader_api_c", "emt_api"]
-    else:  # Linux — link against the vendored .so in vnpy_emt/api (rpath $ORIGIN)
+    else:  # Linux — link against the vendored .so in alphapilot_emt/api (rpath $ORIGIN)
         extra_compile_flags = [
             "-std=c++17",
             "-O2",
@@ -42,11 +42,11 @@ def get_ext_modules() -> list:
         td_libraries = ["emt_api"]
 
     vnemtmd = Extension(
-        name="vnpy_emt.api.vnemtmd",
-        sources=["vnpy_emt/api/vnemt/vnemtmd/vnemtmd.cpp"],
+        name="alphapilot_emt.api.vnemtmd",
+        sources=["alphapilot_emt/api/vnemt/vnemtmd/vnemtmd.cpp"],
         define_macros=[("NOMINMAX", None)],
-        include_dirs=["vnpy_emt/api/include", "vnpy_emt/api/vnemt"] + _pybind11_include(),
-        library_dirs=["vnpy_emt/api/libs", "vnpy_emt/api"],
+        include_dirs=["alphapilot_emt/api/include", "alphapilot_emt/api/vnemt"] + _pybind11_include(),
+        library_dirs=["alphapilot_emt/api/libs", "alphapilot_emt/api"],
         libraries=md_libraries,
         extra_compile_args=extra_compile_flags,
         extra_link_args=extra_link_args,
@@ -55,11 +55,11 @@ def get_ext_modules() -> list:
     )
 
     vnemttd = Extension(
-        name="vnpy_emt.api.vnemttd",
-        sources=["vnpy_emt/api/vnemt/vnemttd/vnemttd.cpp"],
+        name="alphapilot_emt.api.vnemttd",
+        sources=["alphapilot_emt/api/vnemt/vnemttd/vnemttd.cpp"],
         define_macros=[("NOMINMAX", None)],
-        include_dirs=["vnpy_emt/api/include", "vnpy_emt/api/vnemt"] + _pybind11_include(),
-        library_dirs=["vnpy_emt/api/libs", "vnpy_emt/api"],
+        include_dirs=["alphapilot_emt/api/include", "alphapilot_emt/api/vnemt"] + _pybind11_include(),
+        library_dirs=["alphapilot_emt/api/libs", "alphapilot_emt/api"],
         libraries=td_libraries,
         extra_compile_args=extra_compile_flags,
         extra_link_args=extra_link_args,
@@ -70,4 +70,17 @@ def get_ext_modules() -> list:
     return [vnemttd, vnemtmd]
 
 
-setup(ext_modules=get_ext_modules())
+def get_runtime_package_data() -> list[str]:
+    """Return only the vendor libraries needed by the target wheel."""
+    system = platform.system()
+    if system == "Windows":
+        return ["*.dll"]
+    if system == "Linux":
+        return ["libemt_api.so", "libemt_quote_api.so"]
+    return []
+
+
+setup(
+    ext_modules=get_ext_modules(),
+    package_data={"alphapilot_emt.api": get_runtime_package_data()},
+)

@@ -1,13 +1,13 @@
 # XTP Pro / EMT 实盘接入（原生网关，无 vn.py）
 
-AlphaPilot 的实盘栈已完全去除 vn.py 依赖。券商接入方式：
+AlphaPilot 的实盘栈已完全去除 vn.py 依赖，并通过 Python entry point 热插拔：
 
-- **XTP Pro (XTPX 1.2.1)**：`alphapilot/systems/live/brokers/xtp_pro.py` 原生网关，
-  底层只用编译好的 `vnpy_xtp.api` pybind 绑定（该子包不依赖 vn.py）。
-- **EMT（东方财富）**：`alphapilot/systems/live/brokers/emt.py` 原生网关，底层
-  `vnpy_emt.api`。
-- 两家共享 `brokers/vendor_common.py`（映射表 + 转换器 + 回调状态机）与
-  `brokers/base.py` 的 `SdkBrokerGateway`（分发线程、轮询、SDK 日志目录）。
+- **XTP Pro (XTPX 1.2.1)**：`alphapilot-broker-xtp` 插件中的原生网关，
+  底层只用编译好的 `alphapilot_xtpx.api` pybind 绑定（该子包不依赖 vn.py）。
+- **EMT（东方财富）**：`alphapilot-broker-emt` 插件中的原生网关，底层
+  `alphapilot_emt.api`。
+- 两家共享 `alphapilot-broker-xcommon`（映射表 + 转换器 + 回调状态机）与
+  AlphaPilot 核心的 `SdkBrokerGateway`（分发线程、轮询、SDK 日志目录）。
   **接入新券商 = 子类化 SdkBrokerGateway + 写映射表/转换回调**，OMS、风控、
   执行器、引擎全部复用。
 
@@ -40,8 +40,11 @@ docker compose --profile live build live
 
 ```bash
 conda activate alphapilot-smoke   # python 3.11 + conda-forge cxx-compiler + meson/pybind11
-pip install --no-build-isolation ./vnpy_xtp   # XTP Pro 绑定
-pip install --no-build-isolation ./vnpy_emt   # EMT 绑定
+pip install --no-build-isolation ./alphapilot_xtpx   # XTP Pro 绑定
+pip install --no-build-isolation ./alphapilot_emt   # EMT 绑定
+pip install ./plugins/alphapilot_broker_xcommon
+pip install ./plugins/alphapilot_broker_xtp
+pip install ./plugins/alphapilot_broker_emt
 python scripts/live_smoke_import.py           # 构建后冒烟
 ```
 
@@ -65,7 +68,8 @@ ALPHAPILOT_LIVE_XTP_LOG_LEVEL=INFO
 ```
 
 EMT 使用同样的键名模式（`ALPHAPILOT_LIVE_EMT_*`，无 `SOFTWARE_KEY`）。
-`ALPHAPILOT_LIVE_<BROKER>_SETTING_JSON` 可整体覆盖。SDK 自身日志目录由
+`ALPHAPILOT_LIVE_<BROKER>_SETTING_JSON` 可整体覆盖；交易和行情也可分别使用
+`_TRADE_SETTING_JSON`、`_QUOTE_SETTING_JSON`，通道配置优先。SDK 自身日志目录由
 `ALPHAPILOT_SDK_LOG_DIR` 控制（默认 `~/.alphapilot/sdk_logs/<broker>`）。
 XTP/EMT 同一账号同一 `CLIENT_ID` 只能保持一个交易会话；如果交易登录失败但行情可用，
 先尝试换一个未占用的 `ALPHAPILOT_LIVE_XTP_CLIENT_ID`（普通用户通常 1-24）。
@@ -269,7 +273,7 @@ BatchStrategyAdapter`（现有 8 个规则策略零改动包装，信号翻转�
 | 现象 | 含义 | 处理 |
 |---|---|---|
 | `sdk=x86_64, host=aarch64` | 宿主架构不能加载 SDK | 使用 `linux/amd64` 环境 |
-| `sdk_bindings=MISSING` | pybind 绑定未编译安装 | 重新 `pip install --no-build-isolation ./vnpy_xtp` |
+| `sdk_bindings=MISSING` | pybind 绑定或插件未安装 | 重新安装 `alphapilot_xtpx` 和 `alphapilot-broker-xtp` |
 | `endpoint ... timed out` | IP/端口不可达（测试环境周末/夜间可能下线） | 交易日重试；以券商邮件里的专属 IP/端口为准 |
 | 缺少 `ALPHAPILOT_LIVE_XTP_*` | 必填环境变量未配置 | 补 `.env` 或 `docker compose run -e` |
 | 登录返回 `10200000/10210000` | 到达服务器但认证服务离线 | 测试环境服务时段问题，交易日 9:15 后重试 |
@@ -279,19 +283,20 @@ BatchStrategyAdapter`（现有 8 个规则策略零改动包装，信号翻转�
 
 ## 当前实现文件
 
-- `alphapilot/systems/live/brokers/xtp_pro.py`：XTP Pro 原生网关
-- `alphapilot/systems/live/brokers/emt.py`：EMT 原生网关
-- `alphapilot/systems/live/brokers/vendor_common.py`：XTP 系共享映射表/转换器/回调状态机
+- `plugins/alphapilot_broker_xtp`：XTP Pro 原生网关插件
+- `plugins/alphapilot_broker_emt`：EMT 原生网关插件
+- `docs/live-plugins.md`：插件协议、安装和开发说明
+- `plugins/alphapilot_broker_xcommon`：XTP 系共享映射表/转换器/回调状态机
 - `alphapilot/systems/live/brokers/base.py`：SdkBrokerGateway（分发/轮询/SDK 日志）
 - `alphapilot/systems/live/dispatch.py`：EventDispatcher（回调串行化 + 定时任务）
 - `alphapilot/systems/live/bars.py` + `strategy_runner.py`、
   `alphapilot/systems/timing/live_adapter.py`：策略接入层
-- `alphapilot/systems/live/brokers/registry.py`：broker 注册 + `create_gateway()` 工厂
+- `alphapilot/systems/live/brokers/registry.py`：entry point 发现、目录和 gateway 工厂
 - `alphapilot/systems/live/brokers/vnpy_adapter.py`：保留的 vn.py 兼容桥
   （仅当以后要接 vn.py 系网关时才需要装 vnpy）
 - `scripts/live_preflight_xtp.py` / `live_smoke_connect_xtp.py` /
   `live_smoke_daemon_xtp.py` /
   `live_smoke_import.py` / `live_x86_check.py`
 - `Dockerfile.live`：编译两套 SDK 绑定（无 vn.py）
-- `vnpy_xtp/`、`vnpy_emt/`：仅提供编译绑定（`*.api`）；其中 `gateway/` 目录为
-  上游参考源码，不再安装、不再被引用
+- `alphapilot_xtpx/`、`alphapilot_emt/`：仅提供编译绑定（`*.api`）、券商 SDK
+  头文件和动态库，不包含 gateway 注册或运行入口

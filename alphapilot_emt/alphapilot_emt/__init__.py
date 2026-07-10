@@ -20,15 +20,9 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-import importlib_metadata
-
-# This package now ships ONLY the compiled EMT SDK bindings (vnpy_emt.api).
-# The vn.py gateway layer was ported into AlphaPilot
-# (alphapilot.systems.live.brokers.emt) and is no longer imported here, so
-# installing this package does not require vn.py. The legacy source remains in
-# vnpy_emt/gateway/ for reference only.
+from importlib.metadata import PackageNotFoundError, version
 
 try:
-    __version__ = importlib_metadata.version("vnpy_emt")
-except ImportError:
+    __version__ = version("alphapilot_emt")
+except PackageNotFoundError:
     __version__ = "dev"

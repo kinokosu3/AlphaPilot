@@ -83,7 +83,16 @@ local_scheme = "no-local-version"
 version_scheme = "guess-next-dev"
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = [
+  "tests",
+  "plugins/alphapilot_broker_emt/tests",
+  "plugins/alphapilot_broker_xtp/tests",
+]
+pythonpath = [
+  "plugins/alphapilot_broker_xcommon",
+  "plugins/alphapilot_broker_emt",
+  "plugins/alphapilot_broker_xtp",
+]
 # Default run = fast, offline tier only. Opt into the heavier/external tiers with
 # an explicit ``-m`` (which overrides this), e.g. ``pytest -m real_llm``.
 addopts = "-m 'not real_cli and not real_data and not slow and not real_llm and not real_notify'"

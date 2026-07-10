@@ -1,4 +1,4 @@
-"""Native XTP Pro gateway: pure converters + dispatch-thread handlers.
+"""Native XTP Pro plugin: pure converters + dispatch-thread handlers.
 
 No SDK session is opened: converter tests feed vendor-shaped dicts, handler
 tests drive the gateway's dispatcher synchronously via ``run_pending()``. The
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from alphapilot.systems.live.brokers import xtp_pro as xp
+import alphapilot_broker_xtp.gateway as xp
 from alphapilot.systems.live.types import (
     Direction,
     Exchange,

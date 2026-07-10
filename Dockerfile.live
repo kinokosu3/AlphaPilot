@@ -3,17 +3,16 @@
 # AlphaPilot live-trading image: compiled broker SDK bindings, NO vn.py.
 #
 # Separate from the research image (Dockerfile): this one carries the C++
-# broker bindings (vnpy_xtp.api @ XTP Pro/XTPX 1.2.1, vnpy_emt.api @ new EMT
+# broker bindings (alphapilot_xtpx.api @ XTP Pro/XTPX 1.2.1, alphapilot_emt.api @ new EMT
 # SDK) compiled for linux/amd64 — the only platform both vendor SDKs support.
-# The gateway logic itself is AlphaPilot-native
-# (alphapilot/systems/live/brokers/{xtp_pro,emt}.py); the vendored packages
-# ship only the pybind bindings + vendor .so files.
+# Gateway logic is installed as pip plugins (alphapilot-broker-xtp/emt); the
+# alphapilot_xtpx/alphapilot_emt ship only pybind bindings + vendor .so files.
 #
 #   docker build -f Dockerfile.live --platform linux/amd64 -t alphapilot-live .
 #   docker build ... --target live-xtp    # stop after the XTP bindings (debug)
 #
 # Staged so a broken EMT build never invalidates the XTP layer:
-#   live-base (toolchain)  ->  live-xtp (+vnpy_xtp)  ->  live (+vnpy_emt + alphapilot)
+#   live-base (toolchain)  ->  live-xtp (+alphapilot_xtpx)  ->  live (+alphapilot_emt + alphapilot)
 ############################################################
 FROM python:3.11-slim-bookworm AS live-base
 
@@ -48,10 +47,10 @@ ENV PIP_INDEX_URL=${PIP_INDEX_URL}
 WORKDIR /app
 
 # Toolchain for the gateway builds. Installed into the main env because
-# vnpy_xtp's meson.build resolves pybind11 via `python3 -c "import pybind11"`,
+# alphapilot_xtpx's meson.build resolves pybind11 via `python3 -c "import pybind11"`,
 # so the packages must be importable outside pip's isolated build env
 # (we install the gateways with --no-build-isolation).
-RUN pip install meson meson-python ninja pybind11 patchelf importlib-metadata
+RUN pip install meson meson-python ninja pybind11 patchelf
 
 # Runtime deps of the live stack: numpy for the live subsystem, pandas for the
 # timing strategy adapter. (vn.py and its PySide6/ta-lib payload are gone —
@@ -60,7 +59,7 @@ RUN pip install numpy pandas
 
 # The gateway bindings convert GBK/GB18030 vendor strings (ticker names, error
 # messages) via std::locale("zh_CN.GB18030") — generate it or the conversion
-# throws at runtime. Separate layer so it never invalidates the vnpy cache.
+# throws at runtime. Separate layer so it never invalidates the SDK build cache.
 RUN apt-get update -o Acquire::Retries=5 \
     && apt-get install -y --no-install-recommends locales \
     && rm -rf /var/lib/apt/lists/* \
@@ -73,9 +72,9 @@ FROM live-base AS live-xtp
 
 # XTP Pro bindings — compiles vnxtpmd/vnxtptd against the bundled XTPX 1.2.1
 # SDK (headers + linux libs vendored inside the package).
-COPY vnpy_xtp/ ./vnpy_xtp/
-RUN pip install --no-build-isolation ./vnpy_xtp \
-    && python -c "from vnpy_xtp.api import MdApi, TdApi; print('vnpy_xtp.api OK')"
+COPY alphapilot_xtpx/ ./alphapilot_xtpx/
+RUN pip install --no-build-isolation ./alphapilot_xtpx \
+    && python -c "from alphapilot_xtpx.api import MdApi, TdApi; print('alphapilot_xtpx.api OK')"
 
 
 ############################################################
@@ -83,9 +82,9 @@ FROM live-xtp AS live
 
 # EMT bindings — compiles vnemtmd/vnemttd against the new EMT SDK
 # (headers + linux .so vendored inside the package; setup.py has a Linux branch).
-COPY vnpy_emt/ ./vnpy_emt/
-RUN pip install --no-build-isolation ./vnpy_emt \
-    && python -c "from vnpy_emt.api import MdApi, TdApi; print('vnpy_emt.api OK')"
+COPY alphapilot_emt/ ./alphapilot_emt/
+RUN pip install --no-build-isolation ./alphapilot_emt \
+    && python -c "from alphapilot_emt.api import MdApi, TdApi; print('alphapilot_emt.api OK')"
 
 # AlphaPilot itself, dependency-light: the live subsystem only needs the
 # stdlib + numpy + pandas (installed in live-base). Full research deps stay in
@@ -93,6 +92,14 @@ RUN pip install --no-build-isolation ./vnpy_emt \
 COPY pyproject.toml README.md requirements.txt ./
 COPY alphapilot/ ./alphapilot/
 RUN pip install --no-deps -e .
+
+# Live provider plugins are separate distributions. Removing either adapter
+# package removes its entry point from the next Portal/daemon process.
+COPY plugins/ ./plugins/
+RUN pip install --no-deps ./plugins/alphapilot_broker_xcommon \
+    && pip install --no-deps ./plugins/alphapilot_broker_xtp \
+    && pip install --no-deps ./plugins/alphapilot_broker_emt \
+    && python -c "from alphapilot.systems.live.brokers.registry import list_brokers; assert {x.name for x in list_brokers()} == {'xtp', 'emt'}"
 
 # Build-time smoke: both SDK bindings import, the native gateways construct
 # (C++ API objects instantiate), and the strategy-runner layer loads — fail

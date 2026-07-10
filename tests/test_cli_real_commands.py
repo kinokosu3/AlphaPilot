@@ -56,6 +56,7 @@ EXPECTED_COMMANDS = {
     "mine_gp",
     "mine_rl",
     "live_brokers",
+    "live_plugins",
     "live_connect",
     "live_daemon_start",
     "live_daemon_status",
@@ -424,6 +425,7 @@ def test_real_cli_command_smoke(cli_ctx: CliContext) -> None:
     _run_ok(ctx, "live_status")
     _run_ok(ctx, "live_modes")
     _run_ok(ctx, "live_brokers")
+    _run_ok(ctx, "live_plugins")
     _run_ok(ctx, "live_preflight", "--broker=paper")
     _run_ok(ctx, "live_state", "--mode=paper", f"--state_dir={live_state}")
     _run_ok(ctx, "live_risk_status", "--mode=paper", f"--state_dir={live_state}", f"--ledger_dir={live_ledger}")

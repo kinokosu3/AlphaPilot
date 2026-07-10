@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alphapilot-broker-xtp"
+version = "0.1.0"
+description = "XTP Pro live trade and quote plugin for AlphaPilot"
+requires-python = ">=3.10"
+dependencies = [
+  "alphapilot>=0.1.dev0,<0.2",
+  "alphapilot-broker-xcommon>=0.1,<0.2",
+  "alphapilot_xtpx>=1.2.1.1,<1.3",
+]
+
+[project.entry-points."alphapilot.live.plugins"]
+xtp = "alphapilot_broker_xtp.plugin:get_plugin_spec"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["alphapilot_broker_xtp*"]

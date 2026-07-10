@@ -1,65 +1,35 @@
-# VeighNa框架的东方财富证券EMT交易接口
+# alphapilot_emt
 
-<p align="center">
-  <img src ="https://vnpy.oss-cn-shanghai.aliyuncs.com/vnpy-logo.png"/>
-</p>
+AlphaPilot 使用的 EMT 底层 Python 绑定包。
 
-<p align="center">
-    <img src ="https://img.shields.io/badge/version-2.10.0-blueviolet.svg"/>
-    <img src ="https://img.shields.io/badge/platform-windows-yellow.svg"/>
-    <img src ="https://img.shields.io/badge/python-3.7|3.8|3.9|3.10-blue.svg" />
-    <img src ="https://img.shields.io/github/license/vnpy/vnpy.svg?color=orange"/>
-</p>
-
-## 说明
-
-基于东方财富证券EMT柜台的2.7.1行情接口和2.10.0交易接口封装开发。
+本包只包含券商 SDK 的动态库、头文件和 pybind11 封装，不注册 AlphaPilot
+交易通道，也不依赖 vn.py。可发现的交易/行情通道由上层
+`alphapilot-broker-emt` 插件提供。
 
 ## 安装
 
-安装环境推荐基于3.4.0版本以上的【[**VeighNa Studio**](https://www.vnpy.com)】。
+从源码构建并安装：
 
-直接使用pip命令：
-
-```
-pip install vnpy_emt
-```
-
-
-或者下载源代码后，解压后在cmd中运行：
-
-```
-pip install .
+```bash
+python -m pip install ./alphapilot_emt
+python -m pip install ./plugins/alphapilot_broker_emt
 ```
 
-使用源代码安装时需要进行C++编译，因此在执行上述命令之前请确保已经安装了【Visual Studio（Windows）】编译器。
+发布 wheel 后可以直接安装：
 
-## 使用
-
-以脚本方式启动（script/run.py）：
-
+```bash
+python -m pip install alphapilot_emt alphapilot-broker-emt
 ```
-from vnpy.event import EventEngine
-from vnpy.trader.engine import MainEngine
-from vnpy.trader.ui import MainWindow, create_qapp
 
-from vnpy_emt import EmtGateway
+源码安装需要 C++17 编译器和 pybind11。Linux wheel 会携带 EMT SDK 的共享
+库，Windows wheel 会携带对应 DLL；发布前应确认券商 SDK 的分发许可。
 
+## 验证
 
-def main():
-    """主入口函数"""
-    qapp = create_qapp()
-
-    event_engine = EventEngine()
-    main_engine = MainEngine(event_engine)
-    main_engine.add_gateway(EmtGateway)
-    
-    main_window = MainWindow(main_engine, event_engine)
-    main_window.showMaximized()
-
-    qapp.exec()
-
-
-if __name__ == "__main__":
-    main()
+```bash
+python -c "from alphapilot_emt.api import MdApi, TdApi; print(MdApi, TdApi)"
+alphapilot live_plugins
 ```
+
+应用代码不应直接用本包下单。交易与行情统一通过 AlphaPilot live gateway
+协议和 `alphapilot-broker-emt` 插件访问。

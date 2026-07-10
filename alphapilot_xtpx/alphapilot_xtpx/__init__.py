@@ -20,18 +20,11 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-import importlib_metadata
-
-# This package now ships ONLY the compiled XTP Pro SDK bindings (vnpy_xtp.api).
-# The vn.py gateway layer was ported into AlphaPilot
-# (alphapilot.systems.live.brokers.xtp_pro) and is no longer imported here, so
-# installing this package does not require vn.py. The legacy source remains in
-# vnpy_xtp/gateway/ for reference only.
+from importlib.metadata import PackageNotFoundError, version
 
 __all__: list = []
 
-
 try:
-    __version__ = importlib_metadata.version("vnpy_xtp")
-except ImportError:
+    __version__ = version("alphapilot_xtpx")
+except PackageNotFoundError:
     __version__ = "dev"

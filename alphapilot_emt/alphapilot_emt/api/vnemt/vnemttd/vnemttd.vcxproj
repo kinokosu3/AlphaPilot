@@ -72,8 +72,8 @@
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <OutDir>$(SolutionDir)..\</OutDir>
-    <IncludePath>C:\veighna_studio\include;C:\GitHub\vnpy_emt\vnpy_emt\api\include;C:\GitHub\vnpy_emt\vnpy_emt\api\include\emt;C:\GitHub\vnpy_emt\vnpy_emt\api\vnemt;$(IncludePath)</IncludePath>
-    <LibraryPath>C:\veighna_studio\libs;C:\GitHub\vnpy_emt\vnpy_emt\api\libs;$(LibraryPath)</LibraryPath>
+    <IncludePath>C:\veighna_studio\include;C:\GitHub\alphapilot_emt\alphapilot_emt\api\include;C:\GitHub\alphapilot_emt\alphapilot_emt\api\include\emt;C:\GitHub\alphapilot_emt\alphapilot_emt\api\vnemt;$(IncludePath)</IncludePath>
+    <LibraryPath>C:\veighna_studio\libs;C:\GitHub\alphapilot_emt\alphapilot_emt\api\libs;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
@@ -142,7 +142,7 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
-      <AdditionalLibraryDirectories>C:\veighna_studio\libs;C:\GitHub\vnpy_emt\vnpy_emt\api\libs;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>C:\veighna_studio\libs;C:\GitHub\alphapilot_emt\alphapilot_emt\api\libs;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>emt_quote_api.lib;emt_trader_api_c.lib;emt_api.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>

@@ -7,6 +7,7 @@ import type {
   LiveConfigSnapshot,
   LiveLedgerEvent,
   LivePreflight,
+  LivePluginDiagnostics,
   LiveQuoteProviderSpec,
   LiveRiskStatus,
   LiveRuntimeState,
@@ -38,6 +39,8 @@ type Props = {
   onConnectRuntime: () => void | Promise<unknown>;
   runtimeState: AsyncResource<LiveRuntimeState>;
   riskStatus: AsyncResource<LiveRiskStatus>;
+  pluginDiagnostics: AsyncResource<LivePluginDiagnostics>;
+  providerSelectionLocked: boolean;
 };
 
 export function LiveRuntimePanel({
@@ -65,6 +68,8 @@ export function LiveRuntimePanel({
   onConnectRuntime,
   runtimeState,
   riskStatus,
+  pluginDiagnostics,
+  providerSelectionLocked,
 }: Props) {
   const { t } = useI18n();
   const runtimeSnapshot = runtimeState.data?.state;
@@ -109,7 +114,7 @@ export function LiveRuntimePanel({
         <div className="toolbar live-status-bar">
           <label className="field">
             <span>{t("liveMode")}</span>
-            <select value={runtimeMode} onChange={(e) => setRuntimeMode(e.target.value)}>
+            <select value={runtimeMode} onChange={(e) => setRuntimeMode(e.target.value)} disabled={providerSelectionLocked}>
               <option value="live">live</option>
               <option value="paper">paper</option>
               <option value="dry_run">dry_run</option>
@@ -117,11 +122,12 @@ export function LiveRuntimePanel({
           </label>
           <label className="field">
             <span>{t("liveTradeBroker")}</span>
-            <select value={runtimeMode === "live" ? runtimeBroker : "paper"} onChange={(e) => setRuntimeBroker(e.target.value)} disabled={runtimeMode !== "live"}>
+            <select value={runtimeMode === "live" ? runtimeBroker : "paper"} onChange={(e) => setRuntimeBroker(e.target.value)} disabled={runtimeMode !== "live" || providerSelectionLocked}>
               {runtimeMode !== "live" ? <option value="paper">paper</option> : null}
+              {runtimeMode === "live" && runtimeBroker && !selectedBrokerSpec ? <option value={runtimeBroker}>{runtimeBroker} - {t("livePluginMissing")}</option> : null}
               {runtimeMode === "live" && !liveBrokerOptions.length ? <option value="">{brokerCatalog.loading ? t("loading") : t("empty")}</option> : null}
               {runtimeMode === "live" ? liveBrokerOptions.map((broker) => (
-                <option value={broker.name} key={broker.name}>{broker.name} - {broker.description || broker.gateway}</option>
+                <option value={broker.name} key={broker.name} disabled={!broker.gateway_importable}>{broker.name} - {broker.description || broker.gateway}</option>
               )) : null}
             </select>
           </label>
@@ -130,12 +136,13 @@ export function LiveRuntimePanel({
             <select
               value={runtimeMode === "live" ? runtimeQuoteProvider || selectedRuntimeQuoteProvider : "paper"}
               onChange={(e) => setRuntimeQuoteProvider(e.target.value)}
-              disabled={runtimeMode !== "live"}
+              disabled={runtimeMode !== "live" || providerSelectionLocked}
             >
               {runtimeMode !== "live" ? <option value="paper">paper</option> : null}
+              {runtimeMode === "live" && runtimeQuoteProvider && !selectedQuoteProviderSpec ? <option value={runtimeQuoteProvider}>{runtimeQuoteProvider} - {t("livePluginMissing")}</option> : null}
               {runtimeMode === "live" && !quoteProviderOptions.length ? <option value="">{quoteProviderCatalog.loading ? t("loading") : t("empty")}</option> : null}
               {runtimeMode === "live" ? quoteProviderOptions.map((provider) => (
-                <option value={provider.name} key={provider.name}>{provider.name} - {provider.description || provider.gateway}</option>
+                <option value={provider.name} key={provider.name} disabled={!provider.gateway_importable}>{provider.name} - {provider.description || provider.gateway}</option>
               )) : null}
             </select>
           </label>
@@ -144,18 +151,27 @@ export function LiveRuntimePanel({
             <span>{t("liveNetworkCheck")}</span>
           </label>
           <div className="row-actions">
-            <AsyncButton onClick={onCheckRuntime} disabled={runtimeMode === "live" && !selectedRuntimeBroker}>{t("livePreflight")}</AsyncButton>
-            <AsyncButton className="button ghost" onClick={onConnectRuntime} disabled={runtimeMode === "live" && !selectedRuntimeBroker}>{t("liveRuntimeConnect")}</AsyncButton>
+            <AsyncButton onClick={onCheckRuntime} disabled={runtimeMode === "live" && (!selectedBrokerSpec || !selectedQuoteProviderSpec)}>{t("livePreflight")}</AsyncButton>
+            <AsyncButton className="button ghost" onClick={onConnectRuntime} disabled={runtimeMode === "live" && (!selectedBrokerSpec?.gateway_importable || !selectedQuoteProviderSpec?.gateway_importable)}>{t("liveRuntimeConnect")}</AsyncButton>
           </div>
         </div>
         {brokerCatalog.error ? <Alert tone="error">{brokerCatalog.error}</Alert> : null}
         {quoteProviderCatalog.error ? <Alert tone="error">{quoteProviderCatalog.error}</Alert> : null}
+        {providerSelectionLocked ? <Alert tone="info">{t("liveProviderLocked")}</Alert> : null}
+        {runtimeMode === "live" && runtimeBroker && !selectedBrokerSpec ? <Alert tone="error">{t("liveConfiguredPluginMissing")}: {runtimeBroker}</Alert> : null}
+        {runtimeMode === "live" && runtimeQuoteProvider && !selectedQuoteProviderSpec ? <Alert tone="error">{t("liveConfiguredPluginMissing")}: {runtimeQuoteProvider}</Alert> : null}
+        {pluginDiagnostics.error ? <Alert tone="error">{pluginDiagnostics.error}</Alert> : null}
+        {pluginDiagnostics.data?.issues.map((issue) => (
+          <Alert tone="error" key={`${issue.plugin_id}-${issue.kind}`}>{issue.plugin_id}: {issue.error}</Alert>
+        ))}
         {selectedBrokerSpec ? (
           <div className="metric-grid compact">
             <div className="metric"><span className="metric-label">{t("liveBrokerStatus")}</span><StatusPill status={selectedBrokerSpec.gateway_importable ? "importable" : "missing"} /></div>
             <div className="metric"><span className="metric-label">{t("liveMissingEnv")}</span><strong>{selectedBrokerSpec.missing_env.length}</strong></div>
             <div className="metric"><span className="metric-label">{t("liveCapabilities")}</span><strong>{Object.values(selectedBrokerSpec.capabilities).filter((item) => item === true).length}</strong></div>
+            <div className="metric"><span className="metric-label">{t("livePluginPackage")}</span><strong>{selectedBrokerSpec.distribution || selectedBrokerSpec.plugin_id || "-"} {selectedBrokerSpec.version || ""}</strong></div>
             <div className="metric wide"><span className="metric-label">{t("liveDescription")}</span><strong>{selectedBrokerSpec.description || selectedBrokerSpec.gateway}</strong></div>
+            {!selectedBrokerSpec.gateway_importable && selectedBrokerSpec.availability_detail ? <div className="metric wide"><span className="metric-label">{t("result")}</span><strong>{selectedBrokerSpec.availability_detail}</strong></div> : null}
           </div>
         ) : null}
         {selectedQuoteProviderSpec && selectedQuoteProviderSpec.name !== selectedBrokerSpec?.name ? (

@@ -18,7 +18,7 @@ log/
 .gitignore
 
 # Vendored broker SDK originals: their headers/libs are copied into the
-# vnpy_xtp / vnpy_emt packages, so the raw SDK folders never enter the image.
+# alphapilot_xtpx / alphapilot_emt packages, so the raw SDK folders never enter the image.
 XTP_API_20250806_2.2.50.8/
 XTPXQuoteAPI_*/
 XTPXTraderAPI_*/

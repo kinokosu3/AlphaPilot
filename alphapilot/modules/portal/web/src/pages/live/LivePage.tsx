@@ -16,6 +16,7 @@ import type {
   LiveLedgerEvents,
   LiveOrder,
   LivePreflight,
+  LivePluginDiagnostics,
   LiveQuoteProviderSpec,
   LiveRiskStatus,
   LiveRuntimeState,
@@ -29,6 +30,7 @@ export function LivePage() {
   const status = useAsync(() => api.get<LiveStatus>("/api/live/status"), []);
   const brokerCatalog = useAsync(() => api.get<LiveBrokerSpec[]>("/api/live/brokers"), []);
   const quoteProviderCatalog = useAsync(() => api.get<LiveQuoteProviderSpec[]>("/api/live/quote-providers"), []);
+  const pluginDiagnostics = useAsync(() => api.get<LivePluginDiagnostics>("/api/live/plugins"), []);
   const { run } = useAction();
   const [runtimeMode, setRuntimeMode] = useState("live");
   const [runtimeBroker, setRuntimeBroker] = useState("");
@@ -115,9 +117,14 @@ export function LivePage() {
   const state = status.data?.state;
 
   useEffect(() => {
-    if (runtimeBroker.trim() || !liveBrokerOptions.length) return;
+    if (runtimeBroker.trim()) return;
     const configured = (cfg?.trade_broker || cfg?.broker) && (cfg?.trade_broker || cfg?.broker) !== "paper" ? (cfg?.trade_broker || cfg?.broker || "") : "";
     const configuredBroker = configured ? liveBrokerOptions.find((item) => item.name === configured) : undefined;
+    if (configured && !configuredBroker) {
+      setRuntimeBroker(configured);
+      return;
+    }
+    if (!liveBrokerOptions.length) return;
     const importableBroker = liveBrokerOptions.find((item) => item.gateway_importable);
     setRuntimeBroker((configuredBroker || importableBroker || liveBrokerOptions[0]).name);
   }, [cfg?.broker, cfg?.trade_broker, liveBrokerOptions, runtimeBroker]);
@@ -127,9 +134,14 @@ export function LivePage() {
       setRuntimeQuoteProvider("");
       return;
     }
-    if (runtimeQuoteProvider.trim() || !quoteProviderOptions.length) return;
+    if (runtimeQuoteProvider.trim()) return;
     const configured = cfg?.quote_provider && cfg.quote_provider !== "paper" ? cfg.quote_provider : "";
     const configuredProvider = configured ? quoteProviderOptions.find((item) => item.name === configured) : undefined;
+    if (configured && !configuredProvider) {
+      setRuntimeQuoteProvider(configured);
+      return;
+    }
+    if (!quoteProviderOptions.length) return;
     const matchingTrade = selectedRuntimeBroker ? quoteProviderOptions.find((item) => item.name === selectedRuntimeBroker) : undefined;
     const importableProvider = quoteProviderOptions.find((item) => item.gateway_importable);
     setRuntimeQuoteProvider((configuredProvider || matchingTrade || importableProvider || quoteProviderOptions[0]).name);
@@ -169,6 +181,7 @@ export function LivePage() {
   };
 
   const startDaemon = async () => {
+    if (runtimeMode === "live" && (!selectedBrokerSpec?.gateway_importable || !selectedQuoteProviderSpec?.gateway_importable)) return;
     if (runtimeMode === "live" && !(await confirm({ message: t("liveDaemonStartConfirm"), danger: true }))) return;
     await run(async () => {
       const timingParams = daemonTimingStrategy.trim() ? daemonTimingParams.parse() : undefined;
@@ -406,6 +419,8 @@ export function LivePage() {
         onConnectRuntime={connectRuntime}
         runtimeState={runtimeState}
         riskStatus={riskStatus}
+        pluginDiagnostics={pluginDiagnostics}
+        providerSelectionLocked={Boolean(daemonStatus.data?.alive)}
       />
 
       <LiveDaemonPanel
@@ -444,6 +459,7 @@ export function LivePage() {
         onStrategyResume={strategyResume}
         onStrategyStop={strategyStop}
         onStartDaemon={startDaemon}
+        canStartDaemon={runtimeMode !== "live" || Boolean(selectedBrokerSpec?.gateway_importable && selectedQuoteProviderSpec?.gateway_importable)}
         onStopDaemon={stopDaemon}
         onHaltDaemon={haltDaemon}
         onResumeDaemon={resumeDaemon}

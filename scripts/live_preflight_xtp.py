@@ -22,7 +22,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from alphapilot.systems.live.brokers.registry import (  # noqa: E402
     ENV_PREFIX,
     build_connect_setting,
+    build_quote_connect_setting,
     get_broker,
+    missing_quote_setting_fields,
     missing_setting_fields,
     resolve_gateway_class,
 )
@@ -31,8 +33,8 @@ from scripts.live_xtp_common import env_with_public_test_endpoints  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 XTP_SDK_LIBS = (
-    REPO_ROOT / "vnpy_xtp/vnpy_xtp/api/libxtpxquoteapi.so",
-    REPO_ROOT / "vnpy_xtp/vnpy_xtp/api/libxtpxtraderapi.so",
+    REPO_ROOT / "alphapilot_xtpx/alphapilot_xtpx/api/libxtpxquoteapi.so",
+    REPO_ROOT / "alphapilot_xtpx/alphapilot_xtpx/api/libxtpxtraderapi.so",
 )
 ELF_MACHINE_NAMES = {
     62: "x86_64",
@@ -101,7 +103,7 @@ def main() -> int:
 
     failed = False
 
-    missing = missing_setting_fields("xtp", env)
+    missing = sorted(set(missing_setting_fields("xtp", env) + missing_quote_setting_fields("xtp", env)))
     check_line(not missing, "required XTP env fields", ", ".join(missing) if missing else "present")
     failed |= bool(missing)
     if missing and not args.use_public_test_endpoints:
@@ -123,10 +125,10 @@ def main() -> int:
         print("      hint: normal XTP Linux SDK is x86_64; run the live image on linux/amd64")
 
     try:
-        gateway_class = resolve_gateway_class("xtp")
-        from alphapilot.systems.live.brokers.xtp_pro import SDK_AVAILABLE
+        gateway_factory = resolve_gateway_class("xtp")
+        from alphapilot_broker_xtp.gateway import SDK_AVAILABLE
 
-        detail = f"{gateway_class.__name__}, sdk_bindings={'ok' if SDK_AVAILABLE else 'MISSING'}"
+        detail = f"{gateway_factory.__name__}, sdk_bindings={'ok' if SDK_AVAILABLE else 'MISSING'}"
         check_line(SDK_AVAILABLE, "native xtp gateway + compiled bindings", detail)
         failed |= not SDK_AVAILABLE
     except Exception as exc:  # noqa: BLE001 - preflight should report any import/link issue
@@ -136,10 +138,11 @@ def main() -> int:
     endpoint_missing = missing_endpoint_fields(env)
     if not args.skip_network and not endpoint_missing:
         try:
-            setting = build_connect_setting("xtp", env)
+            trade_setting = build_connect_setting("xtp", env)
+            quote_setting = build_quote_connect_setting("xtp", env)
             endpoints = (
-                ("quote", setting["行情地址"], int(setting["行情端口"])),
-                ("trade", setting["交易地址"], int(setting["交易端口"])),
+                ("quote", quote_setting["行情地址"], int(quote_setting["行情端口"])),
+                ("trade", trade_setting["交易地址"], int(trade_setting["交易端口"])),
             )
         except Exception as exc:  # noqa: BLE001 - report malformed JSON/native setting
             check_line(False, "endpoint setting", f"{type(exc).__name__}: {exc}")

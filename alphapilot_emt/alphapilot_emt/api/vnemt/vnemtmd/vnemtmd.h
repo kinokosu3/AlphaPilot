@@ -4,7 +4,7 @@
 // old 2.7.1-era binding cannot compile against these headers.
 //
 // Python-visible surface is kept as close to the old vnemtmd as possible
-// (class MdApi, module vnemtmd, dict-based callbacks) so vnpy_emt's gateway
+// (class MdApi, module vnemtmd, dict-based callbacks) so alphapilot_emt's gateway
 // only needs its call sites (createQuoteApi / login) updated.
 
 #ifdef WIN32

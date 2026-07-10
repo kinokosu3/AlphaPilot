@@ -96,6 +96,18 @@ def test_live_module_preflight_and_run_loop(engine, tmp_path) -> None:
     assert run["state"]["account"]["available"] == 50_000.0
 
 
+def test_live_daemon_start_rejects_uninstalled_provider(engine, tmp_path) -> None:
+    live = engine.get_module("live")
+    with pytest.raises(ValueError, match="unknown trade broker"):
+        live.live_daemon_start(
+            mode="live",
+            broker="not-installed",
+            quote_provider="paper",
+            state_dir=str(tmp_path / "state"),
+            ledger_dir=str(tmp_path / "ledger"),
+        )
+
+
 def test_live_module_daemon_start_status_stop(engine, tmp_path) -> None:
     live = engine.get_module("live")
     state_dir = tmp_path / "daemon_state"

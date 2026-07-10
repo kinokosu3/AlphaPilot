@@ -48,6 +48,7 @@ type Props = {
   onStrategyResume: () => void | Promise<unknown>;
   onStrategyStop: () => void | Promise<unknown>;
   onStartDaemon: () => void | Promise<unknown>;
+  canStartDaemon: boolean;
   onStopDaemon: () => void | Promise<unknown>;
   onHaltDaemon: () => void | Promise<unknown>;
   onResumeDaemon: () => void | Promise<unknown>;
@@ -94,6 +95,7 @@ export function LiveDaemonPanel({
   onStrategyResume,
   onStrategyStop,
   onStartDaemon,
+  canStartDaemon,
   onStopDaemon,
   onHaltDaemon,
   onResumeDaemon,
@@ -171,7 +173,7 @@ export function LiveDaemonPanel({
           </div>
           <div className="toolbar live-status-bar">
             <div className="row-actions">
-              <AsyncButton onClick={onStartDaemon} disabled={Boolean(daemon?.alive)}>{t("liveDaemonStart")}</AsyncButton>
+              <AsyncButton onClick={onStartDaemon} disabled={Boolean(daemon?.alive) || !canStartDaemon}>{t("liveDaemonStart")}</AsyncButton>
               <AsyncButton className="button ghost" onClick={onRefreshDaemon} disabled={!daemon?.running}>{t("liveDaemonRefresh")}</AsyncButton>
               <AsyncButton className="button ghost" onClick={onReconnectDaemon} disabled={!daemon?.running}>{t("liveDaemonReconnect")}</AsyncButton>
               {daemonEngine?.halted ? (

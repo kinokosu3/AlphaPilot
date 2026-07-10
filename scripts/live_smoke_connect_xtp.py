@@ -36,7 +36,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from alphapilot.systems.live.brokers.registry import (
     build_connect_setting,
-    create_gateway,
+    build_quote_connect_setting,
+    create_gateway_pair,
+    missing_quote_setting_fields,
     missing_setting_fields,
 )
 from alphapilot.systems.live.oms import OMS
@@ -72,7 +74,7 @@ def main() -> int:
 
     env = env_with_public_test_endpoints(os.environ) if args.use_public_test_endpoints else os.environ
 
-    missing = missing_setting_fields("xtp", env)
+    missing = sorted(set(missing_setting_fields("xtp", env) + missing_quote_setting_fields("xtp", env)))
     if missing:
         print("Missing XTP credentials in env:")
         for name in missing:
@@ -80,15 +82,17 @@ def main() -> int:
         print("Tip: pass --use-public-test-endpoints to fill the common public simulation hosts/ports.")
         return 2
 
-    setting = build_connect_setting("xtp", env)
-    print(f"Connecting XTP (trade {setting['交易地址']}:{setting['交易端口']}, "
-          f"quote {setting['行情地址']}:{setting['行情端口']}) ...")
+    trade_setting = build_connect_setting("xtp", env)
+    quote_setting = build_quote_connect_setting("xtp", env)
+    print(f"Connecting XTP (trade {trade_setting['交易地址']}:{trade_setting['交易端口']}, "
+          f"quote {quote_setting['行情地址']}:{quote_setting['行情端口']}) ...")
     code, exchange = normalize_symbol(args.symbol)
 
-    adapter = create_gateway("xtp")   # AlphaPilot-native XTP Pro gateway (no vn.py)
+    adapter, quote_adapter = create_gateway_pair("xtp", "xtp")
+    assert quote_adapter is adapter
     oms = OMS()
     adapter.register_callback(oms)
-    adapter.connect(setting)
+    adapter.connect({"trade": trade_setting, "quote": quote_setting})
 
     ok = True
     ok &= wait_for(lambda: oms.account is not None, args.timeout, "account snapshot received")

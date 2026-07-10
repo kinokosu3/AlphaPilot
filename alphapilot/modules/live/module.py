@@ -60,34 +60,29 @@ class LiveModule(BaseModule):
         """List registered brokers: gateway, env fields for credentials, availability."""
         from alphapilot.systems.live.brokers.registry import (
             ENV_PREFIX,
-            gateway_importable,
             list_brokers,
             missing_setting_fields,
+            provider_availability,
         )
 
         rows = []
         for spec in list_brokers():
             prefix = f"{ENV_PREFIX}{spec.name.upper()}_"
+            available, detail = provider_availability(spec.name, role="trade")
             rows.append(
                 {
                     "name": spec.name,
                     "description": spec.description,
                     "gateway": spec.gateway_path,
-                    "gateway_importable": gateway_importable(spec.name),
+                    "gateway_importable": available,
+                    "availability_detail": detail,
                     "env_fields": [prefix + f.env_suffix for f in spec.setting_fields],
                     "missing_env": missing_setting_fields(spec.name),
-                    "capabilities": {
-                        "asset_classes": list(spec.capabilities.asset_classes),
-                        "supports_tick": spec.capabilities.supports_tick,
-                        "supports_contract_query": spec.capabilities.supports_contract_query,
-                        "supports_account_query": spec.capabilities.supports_account_query,
-                        "supports_position_query": spec.capabilities.supports_position_query,
-                        "supports_order_query": spec.capabilities.supports_order_query,
-                        "supports_trade_query": spec.capabilities.supports_trade_query,
-                        "supports_cancel": spec.capabilities.supports_cancel,
-                        "supports_margin": spec.capabilities.supports_margin,
-                        "supports_history": spec.capabilities.supports_history,
-                    },
+                    "plugin_id": spec.plugin_id,
+                    "distribution": spec.distribution,
+                    "version": spec.version,
+                    "roles": sorted(spec.roles),
+                    "capabilities": _capabilities_dict(spec.capabilities),
                 }
             )
         return rows
@@ -98,35 +93,36 @@ class LiveModule(BaseModule):
             ENV_PREFIX,
             list_quote_providers,
             missing_quote_setting_fields,
-            quote_provider_importable,
+            provider_availability,
         )
 
         rows = []
         for spec in list_quote_providers():
             prefix = f"{ENV_PREFIX}{spec.name.upper()}_"
+            available, detail = provider_availability(spec.name, role="quote")
             rows.append(
                 {
                     "name": spec.name,
                     "description": spec.description,
                     "gateway": spec.gateway_path,
-                    "gateway_importable": quote_provider_importable(spec.name),
+                    "gateway_importable": available,
+                    "availability_detail": detail,
                     "env_fields": [prefix + f.env_suffix for f in spec.setting_fields],
                     "missing_env": missing_quote_setting_fields(spec.name),
-                    "capabilities": {
-                        "asset_classes": list(spec.capabilities.asset_classes),
-                        "supports_tick": spec.capabilities.supports_tick,
-                        "supports_contract_query": spec.capabilities.supports_contract_query,
-                        "supports_account_query": spec.capabilities.supports_account_query,
-                        "supports_position_query": spec.capabilities.supports_position_query,
-                        "supports_order_query": spec.capabilities.supports_order_query,
-                        "supports_trade_query": spec.capabilities.supports_trade_query,
-                        "supports_cancel": spec.capabilities.supports_cancel,
-                        "supports_margin": spec.capabilities.supports_margin,
-                        "supports_history": spec.capabilities.supports_history,
-                    },
+                    "plugin_id": spec.plugin_id,
+                    "distribution": spec.distribution,
+                    "version": spec.version,
+                    "roles": sorted(spec.roles),
+                    "capabilities": _capabilities_dict(spec.capabilities),
                 }
             )
         return rows
+
+    def live_plugins(self) -> dict[str, Any]:
+        """Show installed live plugin versions and isolated discovery failures."""
+        from alphapilot.systems.live.brokers.registry import plugin_diagnostics
+
+        return plugin_diagnostics()
 
     def live_risk_status(
         self,
@@ -957,6 +953,7 @@ class LiveModule(BaseModule):
             "live_modes": self.live_modes,
             "live_brokers": self.live_brokers,
             "live_quote_providers": self.live_quote_providers,
+            "live_plugins": self.live_plugins,
             "live_risk_status": self.live_risk_status,
             "live_ledger_events": self.live_ledger_events,
             "live_state": self.live_state,
@@ -1014,6 +1011,23 @@ def _tcp_probe(host: str, port: int, timeout: float) -> tuple[bool, str]:
         return False, f"{type(exc).__name__}: {exc}"
 
 
+def _capabilities_dict(capabilities: Any) -> dict[str, Any]:
+    return {
+        "asset_classes": list(capabilities.asset_classes),
+        "exchanges": list(capabilities.exchanges),
+        "supports_tick": capabilities.supports_tick,
+        "supports_depth": capabilities.supports_depth,
+        "supports_contract_query": capabilities.supports_contract_query,
+        "supports_account_query": capabilities.supports_account_query,
+        "supports_position_query": capabilities.supports_position_query,
+        "supports_order_query": capabilities.supports_order_query,
+        "supports_trade_query": capabilities.supports_trade_query,
+        "supports_cancel": capabilities.supports_cancel,
+        "supports_margin": capabilities.supports_margin,
+        "supports_history": capabilities.supports_history,
+    }
+
+
 def _preflight_provider(name: str, *, kind: str, network: bool, timeout: float) -> dict[str, Any]:
     if name == "paper":
         return {
@@ -1031,24 +1045,23 @@ def _preflight_provider(name: str, *, kind: str, network: bool, timeout: float) 
     from alphapilot.systems.live.brokers.registry import (
         build_connect_setting,
         build_quote_connect_setting,
-        gateway_importable,
         get_broker,
+        get_quote_provider,
         missing_quote_setting_fields,
         missing_setting_fields,
-        quote_provider_importable,
+        provider_availability,
     )
 
-    spec = get_broker(name)
     if kind == "quote":
+        spec = get_quote_provider(name)
         missing = missing_quote_setting_fields(name)
-        importable = quote_provider_importable(name)
+        importable, availability_detail = provider_availability(name, role="quote")
         build_setting = build_quote_connect_setting
-        endpoint_specs = (("quote", "行情地址", "行情端口"),)
     else:
+        spec = get_broker(name)
         missing = missing_setting_fields(name)
-        importable = gateway_importable(name)
+        importable, availability_detail = provider_availability(name, role="trade")
         build_setting = build_connect_setting
-        endpoint_specs = (("trade", "交易地址", "交易端口"),)
 
     result: dict[str, Any] = {
         "name": name,
@@ -1056,6 +1069,10 @@ def _preflight_provider(name: str, *, kind: str, network: bool, timeout: float) 
         "description": spec.description,
         "gateway": spec.gateway_path,
         "gateway_importable": importable,
+        "availability_detail": availability_detail,
+        "plugin_id": spec.plugin_id,
+        "distribution": spec.distribution,
+        "version": spec.version,
         "missing_env": missing,
         "network_checked": False,
         "endpoints": [],
@@ -1063,12 +1080,12 @@ def _preflight_provider(name: str, *, kind: str, network: bool, timeout: float) 
     if network and not missing:
         setting = build_setting(name)
         endpoints = []
-        for label, host_key, port_key in endpoint_specs:
-            host = setting.get(host_key)
-            port = setting.get(port_key)
+        for endpoint in spec.endpoints:
+            host = setting.get(endpoint.host_key)
+            port = setting.get(endpoint.port_key)
             if host and port:
                 ok, detail = _tcp_probe(str(host), int(port), timeout)
-                endpoints.append({"name": label, "host": host, "port": int(port), "ok": ok, "detail": detail})
+                endpoints.append({"name": endpoint.name, "host": host, "port": int(port), "ok": ok, "detail": detail})
         result["network_checked"] = True
         result["endpoints"] = endpoints
     result["ok"] = importable and not missing and all(item.get("ok", True) for item in result["endpoints"])

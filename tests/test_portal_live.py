@@ -48,6 +48,11 @@ def test_live_broker_catalog_exposes_capabilities_without_secret_values(engine, 
     assert providers["paper"]["gateway_importable"] is True
     assert "portal-secret-account" not in quote_resp.text
 
+    plugins = client.get("/api/live/plugins").json()
+    assert plugins["api_version"] == 1
+    assert {row["plugin_id"] for row in plugins["plugins"]} >= {"emt", "xtp"}
+    assert "portal-secret-account" not in str(plugins)
+
 
 def test_live_paper_full_flow(engine) -> None:
     client = _client(engine)

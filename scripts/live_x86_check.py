@@ -44,7 +44,7 @@ def check_platform() -> str:
 
 
 def check_xtp_md() -> str:
-    from vnpy_xtp.api import MdApi
+    from alphapilot_xtpx.api import MdApi
 
     api = MdApi()
     api.createQuoteApi(1, tempfile.mkdtemp(prefix="xtpmd"), 3)  # client_id, path, log_level
@@ -56,7 +56,7 @@ def check_xtp_md() -> str:
 
 
 def check_xtp_td() -> str:
-    from vnpy_xtp.api import TdApi
+    from alphapilot_xtpx.api import TdApi
 
     api = TdApi()
     api.createTraderApi(1, tempfile.mkdtemp(prefix="xtptd"), 3)
@@ -72,7 +72,7 @@ def check_xtp_td() -> str:
 def check_emt_md() -> str:
     # Exercises the NEW minimal EMQ::API binding end to end (factory, RegisterSpi,
     # Login signature, synthesized getApiLastError).
-    from vnpy_emt.api import MdApi
+    from alphapilot_emt.api import MdApi
 
     api = MdApi()
     api.createQuoteApi(tempfile.mkdtemp(prefix="emtmd"), 3, 4)  # log_path, file_lvl, console_lvl
@@ -84,7 +84,7 @@ def check_emt_md() -> str:
 
 
 def check_emt_td() -> str:
-    from vnpy_emt.api import TdApi
+    from alphapilot_emt.api import TdApi
 
     api = TdApi()
     api.createTraderApi(1, tempfile.mkdtemp(prefix="emttd"), 4)
@@ -99,12 +99,13 @@ def check_emt_td() -> str:
 def check_gateways_wire() -> str:
     # Native AlphaPilot gateways: registry resolution + construction (which
     # instantiates the C++ API wrapper objects) + callback registration.
-    from alphapilot.systems.live.brokers.registry import create_gateway
+    from alphapilot.systems.live.brokers.registry import create_gateway_pair
     from alphapilot.systems.live.oms import OMS
 
     names = []
     for broker in ("xtp", "emt"):
-        gateway = create_gateway(broker)
+        gateway, quote_gateway = create_gateway_pair(broker, broker)
+        assert quote_gateway is gateway
         gateway.register_callback(OMS())
         names.append(f"{broker}:{type(gateway).__name__}")
     return f"native gateways: {names}"

@@ -51,9 +51,19 @@ class LiveSystem(BaseSystem):
         from alphapilot.systems.live.engine import LiveEngine
         from alphapilot.systems.live.risk import RiskGate
 
+        quote_gateway = None
+        selected_broker = broker
+        if selected_broker is None and self.config.mode == RunMode.LIVE:
+            from alphapilot.systems.live.brokers.registry import create_gateway_pair
+
+            selected_broker, quote_gateway = create_gateway_pair(
+                self.config.trade_broker or self.config.broker,
+                self.config.quote_provider or self.config.trade_broker or self.config.broker,
+            )
         return LiveEngine(
             self.config,
-            broker or self.make_broker(),
+            selected_broker or self.make_broker(),
+            quote_gateway=quote_gateway,
             now_fn=now_fn,
             is_trading_day_fn=is_trading_day_fn,
             risk=RiskGate(self.config.risk),
