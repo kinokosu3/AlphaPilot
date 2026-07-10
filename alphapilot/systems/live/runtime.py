@@ -26,6 +26,7 @@ from alphapilot.systems.live.types import (
     CancelRequest,
     Direction,
     Exchange,
+    Offset,
     Order,
     OrderRequest,
     OrderStatus,
@@ -40,14 +41,21 @@ def clone_config(
     *,
     mode: str | None = None,
     broker: str | None = None,
+    trade_broker: str | None = None,
+    quote_provider: str | None = None,
     ledger_dir: str | Path | None = None,
     state_dir: str | Path | None = None,
 ) -> LiveConfig:
     """Return a config copy with optional runtime overrides."""
+    trade_override = trade_broker or broker
+    selected_trade = trade_override or config.trade_broker or config.broker
+    selected_quote = quote_provider or (selected_trade if trade_override else config.quote_provider or selected_trade)
     return replace(
         config,
         mode=mode or config.mode,
-        broker=broker or config.broker,
+        broker=selected_trade,
+        trade_broker=selected_trade,
+        quote_provider=selected_quote,
         ledger_dir=Path(ledger_dir).expanduser() if ledger_dir else config.ledger_dir,
         state_dir=Path(state_dir).expanduser() if state_dir else config.state_dir,
     )
@@ -75,14 +83,17 @@ class LiveRuntime:
         config: LiveConfig,
         *,
         broker: Any = None,
+        quote_provider: Any = None,
         now_fn=None,
         is_trading_day_fn=None,
     ) -> "LiveRuntime":
         """Build a runtime from config without connecting yet."""
-        gateway = broker or _make_broker(config)
+        gateway = broker or _make_trade_gateway(config)
+        quote_gateway = quote_provider or _make_quote_gateway(config, gateway)
         engine = LiveEngine(
             config,
             gateway,
+            quote_gateway=quote_gateway,
             now_fn=now_fn,
             is_trading_day_fn=is_trading_day_fn,
             risk=RiskGate(config.risk, enforce_session=config.mode == RunMode.LIVE),
@@ -106,11 +117,12 @@ class LiveRuntime:
         include_trades: bool = False,
     ) -> dict[str, Any]:
         """Ask the broker for fresh snapshots and report what was requested."""
+        trade_gateway = self.engine.trade_gateway
         tasks: list[tuple[str, Any, bool]] = [
-            ("account", self.engine.gateway.query_account, True),
-            ("position", self.engine.gateway.query_position, True),
-            ("orders", getattr(self.engine.gateway, "query_orders", None), include_orders),
-            ("trades", getattr(self.engine.gateway, "query_trades", None), include_trades),
+            ("account", trade_gateway.query_account, True),
+            ("position", trade_gateway.query_position, True),
+            ("orders", getattr(trade_gateway, "query_orders", None), include_orders),
+            ("trades", getattr(trade_gateway, "query_trades", None), include_trades),
         ]
         report: dict[str, Any] = {"requested": [], "unsupported": [], "errors": []}
         for kind, fn, enabled in tasks:
@@ -139,12 +151,9 @@ class LiveRuntime:
         if seconds <= 0:
             return
         deadline = time.time() + float(seconds)
-        dispatcher = getattr(self.engine.gateway, "dispatcher", None)
-        drain = getattr(dispatcher, "drain", None)
         while time.time() < deadline:
             remaining = max(deadline - time.time(), 0.0)
-            if drain is not None:
-                drain(timeout=min(0.2, remaining))
+            self._drain_gateway_callbacks(timeout=min(0.2, remaining))
             time.sleep(min(0.05, remaining))
 
     def wait_for_order_ack(self, order_id: str, *, timeout: float = 5.0) -> dict[str, Any]:
@@ -186,10 +195,16 @@ class LiveRuntime:
             time.sleep(0.05)
 
     def _drain_gateway_callbacks(self, *, timeout: float = 0.05) -> None:
-        dispatcher = getattr(self.engine.gateway, "dispatcher", None)
-        drain = getattr(dispatcher, "drain", None)
-        if drain is not None:
-            drain(timeout=max(float(timeout), 0.0))
+        seen: set[int] = set()
+        for gateway in (self.engine.trade_gateway, self.engine.quote_gateway):
+            marker = id(gateway)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            dispatcher = getattr(gateway, "dispatcher", None)
+            drain = getattr(dispatcher, "drain", None)
+            if drain is not None:
+                drain(timeout=max(float(timeout), 0.0))
 
     def close(self) -> None:
         self.engine.close()
@@ -256,14 +271,36 @@ class LiveRuntime:
         volume: float,
         price: float = 0.0,
         order_type: str = "limit",
+        exchange: str | None = None,
+        offset: str = "none",
+        product: str = "equity",
         reference: str = "",
     ) -> dict[str, Any]:
         """Submit one normalized order through the guarded engine path."""
-        code, exchange = normalize_symbol(symbol)
+        if product.lower() in {"future", "futures"} and self.config.mode == RunMode.LIVE:
+            raise ValueError("futures live routing is not enabled")
+        code, parsed_exchange = normalize_symbol(symbol)
+        resolved_exchange = _parse_exchange(exchange) if exchange else parsed_exchange
         side_l = side.lower()
-        typ = OrderType.MARKET if order_type.lower() == "market" else OrderType.LIMIT
-        factory = OrderRequest.buy if side_l in ("buy", "long") else OrderRequest.sell
-        req = factory(code, exchange, float(volume), float(price), type=typ, reference=reference)
+        try:
+            typ = OrderType(order_type.lower())
+        except ValueError:
+            typ = OrderType.LIMIT
+        try:
+            req_offset = Offset(offset.lower())
+        except ValueError:
+            req_offset = Offset.NONE
+        direction = Direction.LONG if side_l in ("buy", "long") else Direction.SHORT
+        req = OrderRequest(
+            code=code,
+            exchange=resolved_exchange,
+            direction=direction,
+            volume=float(volume),
+            price=float(price),
+            type=typ,
+            offset=req_offset,
+            reference=reference,
+        )
         order_id = self.engine.submit(req)
         routing_event = None if order_id else _last_routing_event(self.engine.ledger, reference=req.reference)
         routing_payload = routing_event.get("payload") if isinstance(routing_event, dict) else {}
@@ -358,7 +395,7 @@ class LiveRuntime:
         attached around the same cadence.
         """
         if symbols:
-            self.engine.gateway.subscribe(symbols)
+            self.engine.subscribe_market_data(symbols)
         started = time.time()
         iterations = 0
         while True:
@@ -380,6 +417,8 @@ class LiveRuntime:
             "config": {
                 "mode": self.config.mode,
                 "broker": self.config.broker,
+                "trade_broker": self.config.trade_broker,
+                "quote_provider": self.config.quote_provider,
                 "ledger_dir": str(self.config.ledger_dir),
                 "state_dir": str(self.config.state_dir),
             },
@@ -390,6 +429,11 @@ class LiveRuntime:
                 "balance": account.balance,
                 "available": account.available,
                 "frozen": account.frozen,
+                "margin": account.margin,
+                "commission": account.commission,
+                "close_profit": account.close_profit,
+                "position_profit": account.position_profit,
+                "risk_ratio": account.risk_ratio,
                 "gateway": account.gateway,
             },
             "positions": [
@@ -399,8 +443,11 @@ class LiveRuntime:
                     "volume": p.volume,
                     "available": p.available,
                     "yd_volume": p.yd_volume,
+                    "today_volume": p.today_volume,
                     "frozen": p.frozen,
                     "price": p.price,
+                    "settlement_price": p.settlement_price,
+                    "margin": p.margin,
                     "pnl": p.pnl,
                     "gateway": p.gateway,
                 }
@@ -442,25 +489,66 @@ class LiveRuntime:
         return state
 
 
-def _make_broker(config: LiveConfig):
+def _make_trade_gateway(config: LiveConfig):
     if config.mode == RunMode.LIVE:
         from alphapilot.systems.live.brokers.registry import create_gateway
 
-        return create_gateway(config.broker)
+        return create_gateway(config.trade_broker or config.broker)
     from alphapilot.systems.live.brokers.paper import PaperBroker
 
     return PaperBroker()
 
 
+def _make_quote_gateway(config: LiveConfig, trade_gateway: Any):
+    if config.mode != RunMode.LIVE:
+        return trade_gateway
+    quote_provider = config.quote_provider or config.trade_broker or config.broker
+    trade_name = config.trade_broker or config.broker
+    if quote_provider == trade_name:
+        return trade_gateway
+    from alphapilot.systems.live.brokers.registry import create_quote_gateway
+
+    return create_quote_gateway(quote_provider)
+
+
+def _make_broker(config: LiveConfig):
+    """Backward-compatible alias for older callers."""
+    return _make_trade_gateway(config)
+
+
 def build_runtime_setting(config: LiveConfig, *, paper_cash: float | None = None) -> dict[str, Any]:
-    """Build broker connect settings from env for LIVE, simple cash for paper."""
+    """Build trade/quote connect settings from env for LIVE, simple cash for paper."""
+    return {
+        "trade": build_trade_setting(config, paper_cash=paper_cash),
+        "quote": build_quote_setting(config, paper_cash=paper_cash),
+    }
+
+
+def build_trade_setting(config: LiveConfig, *, paper_cash: float | None = None) -> dict[str, Any]:
+    """Build trade-gateway connect settings."""
     if config.mode == RunMode.LIVE:
         from alphapilot.systems.live.brokers.registry import build_connect_setting, missing_setting_fields
 
-        missing = missing_setting_fields(config.broker)
+        broker = config.trade_broker or config.broker
+        missing = missing_setting_fields(broker)
         if missing:
             raise ValueError("missing live broker env fields: " + ", ".join(missing))
-        return build_connect_setting(config.broker)
+        return build_connect_setting(broker)
+    return {"cash": float(paper_cash) if paper_cash is not None else 1_000_000.0}
+
+
+def build_quote_setting(config: LiveConfig, *, paper_cash: float | None = None) -> dict[str, Any]:
+    """Build quote-provider connect settings."""
+    if config.mode == RunMode.LIVE:
+        from alphapilot.systems.live.brokers.registry import build_quote_connect_setting, missing_quote_setting_fields
+
+        provider = config.quote_provider or config.trade_broker or config.broker
+        if provider == "paper":
+            return {"cash": float(paper_cash) if paper_cash is not None else 1_000_000.0}
+        missing = missing_quote_setting_fields(provider)
+        if missing:
+            raise ValueError("missing live quote provider env fields: " + ", ".join(missing))
+        return build_quote_connect_setting(provider)
     return {"cash": float(paper_cash) if paper_cash is not None else 1_000_000.0}
 
 
@@ -475,6 +563,8 @@ def order_to_dict(order: Order) -> dict[str, Any]:
         "exchange": order.exchange.value if isinstance(order.exchange, Exchange) else str(order.exchange),
         "side": side_from_direction(order.direction),
         "price": order.price,
+        "type": order.type.value,
+        "offset": order.offset.value,
         "volume": order.volume,
         "traded": order.traded,
         "status": _status_value(order.status),
@@ -515,6 +605,7 @@ def order_request_to_dict(req: OrderRequest) -> dict[str, Any]:
         "volume": req.volume,
         "price": req.price,
         "type": req.type.value,
+        "offset": req.offset.value,
         "reference": req.reference,
     }
 
@@ -527,6 +618,16 @@ def target_to_dict(target: TargetPortfolio) -> dict[str, Any]:
         "cash": target.cash,
         "source": target.source,
         "market": target.market,
+        "positions": [
+            {
+                "symbol": item.symbol,
+                "target_volume": item.target_volume,
+                "direction": item.direction.value if hasattr(item.direction, "value") else str(item.direction),
+                "price": item.price,
+                "offset_policy": item.offset_policy,
+            }
+            for item in getattr(target, "positions", [])
+        ],
     }
 
 
@@ -569,3 +670,11 @@ def _last_routing_event(ledger: Any, *, reference: str = "") -> dict[str, Any] |
         if event.get("kind") in {"rejected", "blocked", "dry_run_intent"}:
             return event
     return None
+
+
+def _parse_exchange(value: str) -> Exchange:
+    if isinstance(value, Exchange):
+        return value
+    text = str(value).strip().upper()
+    aliases = {"SH": Exchange.SSE, "SZ": Exchange.SZSE, "BJ": Exchange.BSE}
+    return aliases.get(text) or Exchange(text)

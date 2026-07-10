@@ -31,6 +31,12 @@ type Props = {
   setDaemonOrderPrice: Dispatch<SetStateAction<string>>;
   daemonOrderType: string;
   setDaemonOrderType: Dispatch<SetStateAction<string>>;
+  daemonOrderExchange: string;
+  setDaemonOrderExchange: Dispatch<SetStateAction<string>>;
+  daemonOrderProduct: string;
+  setDaemonOrderProduct: Dispatch<SetStateAction<string>>;
+  daemonOrderOffset: string;
+  setDaemonOrderOffset: Dispatch<SetStateAction<string>>;
   daemonOrderRef: string;
   setDaemonOrderRef: Dispatch<SetStateAction<string>>;
   daemonTargetJson: JsonInputState;
@@ -71,6 +77,12 @@ export function LiveDaemonPanel({
   setDaemonOrderPrice,
   daemonOrderType,
   setDaemonOrderType,
+  daemonOrderExchange,
+  setDaemonOrderExchange,
+  daemonOrderProduct,
+  setDaemonOrderProduct,
+  daemonOrderOffset,
+  setDaemonOrderOffset,
   daemonOrderRef,
   setDaemonOrderRef,
   daemonTargetJson,
@@ -100,6 +112,7 @@ export function LiveDaemonPanel({
   const daemonPositions = daemon?.state?.positions || [];
   const daemonTrades = daemon?.state?.trades || [];
   const commandRows = daemon?.command_status_tail || [];
+  const futuresSelected = daemonOrderProduct === "futures";
 
   return (
     <section className="panel">
@@ -186,13 +199,37 @@ export function LiveDaemonPanel({
               <select value={daemonOrderType} onChange={(e) => setDaemonOrderType(e.target.value)}>
                 <option value="limit">limit</option>
                 <option value="market">market</option>
+                <option value="fak">FAK</option>
+                <option value="fok">FOK</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>{t("liveProduct")}</span>
+              <select value={daemonOrderProduct} onChange={(e) => setDaemonOrderProduct(e.target.value)}>
+                <option value="equity">equity</option>
+                <option value="futures">futures</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>{t("liveExchange")}</span>
+              <input value={daemonOrderExchange} onChange={(e) => setDaemonOrderExchange(e.target.value)} placeholder="SSE / SHFE" />
+            </label>
+            <label className="field">
+              <span>{t("liveOffset")}</span>
+              <select value={daemonOrderOffset} onChange={(e) => setDaemonOrderOffset(e.target.value)}>
+                <option value="none">none</option>
+                <option value="open">open</option>
+                <option value="close">close</option>
+                <option value="close_today">close_today</option>
+                <option value="close_yesterday">close_yesterday</option>
               </select>
             </label>
             <label className="field"><span>{t("liveReference")}</span><input value={daemonOrderRef} onChange={(e) => setDaemonOrderRef(e.target.value)} /></label>
             <div className="row-actions">
-              <AsyncButton onClick={onSubmitDaemonOrder} disabled={!daemon?.running || daemonEngine?.halted || !daemonOrderCode.trim()}>{t("liveSubmitOrder")}</AsyncButton>
+              <AsyncButton onClick={onSubmitDaemonOrder} disabled={!daemon?.running || daemonEngine?.halted || !daemonOrderCode.trim() || futuresSelected}>{t("liveSubmitOrder")}</AsyncButton>
             </div>
           </div>
+          {futuresSelected ? <Alert tone="info">{t("liveFuturesDisabled")}</Alert> : null}
           <h3>{t("liveDaemonTargetTicket")}</h3>
           <div className="field">
             <span>{t("liveSubmitTarget")}</span>

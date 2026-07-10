@@ -9,9 +9,10 @@ native structures into these types at the boundary, mirroring vn.py's approach o
 normalizing every gateway into ``OrderData/TradeData/PositionData/...`` keyed by a
 uniform ``vt_symbol`` / ``vt_orderid``.
 
-The A-share domain is the initial focus (SSE / SZSE / BSE, long-only, T+1, board
-lots), but the enums and dataclasses carry the ``direction`` / ``offset`` fields
-needed to extend to margin / futures later.
+The A-share domain is the first production route (SSE / SZSE / BSE, long-only,
+T+1, board lots), while the normalized objects already carry enough futures
+metadata for later gateway implementations to plug in without changing the OMS
+contract.
 """
 
 from __future__ import annotations
@@ -41,18 +42,26 @@ class Offset(str, Enum):
 
 
 class OrderType(str, Enum):
-    """Supported order price types (extend with FAK/FOK later)."""
+    """Supported order price types."""
 
     LIMIT = "limit"
     MARKET = "market"
+    FAK = "fak"
+    FOK = "fok"
 
 
 class Exchange(str, Enum):
-    """Exchanges relevant to the A-share market (extensible)."""
+    """Normalized exchange codes."""
 
     SSE = "SSE"       # 上交所
     SZSE = "SZSE"     # 深交所
     BSE = "BSE"       # 北交所
+    CFFEX = "CFFEX"   # 中金所
+    SHFE = "SHFE"     # 上期所
+    DCE = "DCE"       # 大商所
+    CZCE = "CZCE"     # 郑商所
+    INE = "INE"       # 上海国际能源交易中心
+    GFEX = "GFEX"     # 广期所
     UNKNOWN = "UNKNOWN"
 
 
@@ -62,6 +71,7 @@ class Product(str, Enum):
     BOND = "bond"
     INDEX = "index"
     OPTION = "option"
+    FUTURES = "futures"
 
 
 class OrderStatus(str, Enum):
@@ -118,11 +128,12 @@ def infer_exchange(code: str) -> Exchange:
 
 
 def normalize_symbol(symbol: str) -> tuple[str, Exchange]:
-    """Parse a symbol in any common form into ``(code6, exchange)``.
+    """Parse a symbol in any common form into ``(code, exchange)``.
 
     Accepts ``600000``, ``SH600000`` / ``sh600000``, ``sh.600000``,
-    ``600000.SH``, ``SSE.600000`` etc. Falls back to inferring the exchange
-    from the numeric code when no prefix/suffix is present.
+    ``600000.SH``, ``SSE.600000`` etc. Futures-style symbols must carry an
+    explicit exchange (``rb2410.SHFE`` / ``SHFE.rb2410`` / ``IF2409.CFFEX``).
+    Alphanumeric symbols without an exchange are preserved and marked UNKNOWN.
     """
     raw = symbol.strip().upper().replace(" ", "")
     prefix_map = {"SH": Exchange.SSE, "SZ": Exchange.SZSE, "BJ": Exchange.BSE}
@@ -130,27 +141,48 @@ def normalize_symbol(symbol: str) -> tuple[str, Exchange]:
     for sep in (".", "-", "_"):
         if sep in raw:
             a, b = raw.split(sep, 1)
-            if a.isdigit():          # 600000.SH
-                code, tag = a, b
-            else:                    # SH.600000 / SSE.600000
-                code, tag = b, a
-            code = "".join(ch for ch in code if ch.isdigit())
-            ex = prefix_map.get(tag[:2]) or _exchange_from_tag(tag) or infer_exchange(code)
-            return code, ex
+            a_ex = _exchange_from_tag(a)
+            b_ex = _exchange_from_tag(b)
+            if a_ex is not None and b_ex is None:      # SH.600000 / SHFE.RB2410
+                code, ex = b, a_ex
+            elif b_ex is not None and a_ex is None:    # 600000.SH / RB2410.SHFE
+                code, ex = a, b_ex
+            elif a.isdigit():                          # legacy fallback: 600000.foo
+                code, ex = a, _exchange_from_tag(b) or infer_exchange(a)
+            else:                                      # legacy fallback: foo.600000
+                code = b
+                ex = _exchange_from_tag(a) or infer_exchange(_stock_code(code))
+            return _normalize_code(code, ex), ex
 
     for pfx, ex in prefix_map.items():
         if raw.startswith(pfx) and raw[len(pfx):].isdigit():
             return raw[len(pfx):], ex
 
-    code = "".join(ch for ch in raw if ch.isdigit())
-    return code, infer_exchange(code)
+    if raw.isdigit():
+        return raw, infer_exchange(raw)
+    return raw, Exchange.UNKNOWN
 
 
 def _exchange_from_tag(tag: str) -> Optional[Exchange]:
+    aliases = {"SH": Exchange.SSE, "SZ": Exchange.SZSE, "BJ": Exchange.BSE}
+    if tag in aliases:
+        return aliases[tag]
     try:
         return Exchange(tag)
     except ValueError:
         return None
+
+
+def _stock_code(code: str) -> str:
+    return "".join(ch for ch in code if ch.isdigit())
+
+
+def _normalize_code(code: str, exchange: Exchange) -> str:
+    cleaned = code.strip().upper()
+    if exchange in {Exchange.SSE, Exchange.SZSE, Exchange.BSE}:
+        digits = _stock_code(cleaned)
+        return digits or cleaned
+    return "".join(ch for ch in cleaned if ch.isalnum())
 
 
 def symbol_key(code: str, exchange: Exchange) -> str:
@@ -172,6 +204,7 @@ class Contract:
     size: float = 1.0
     price_tick: float = 0.01
     lot_size: int = 100          # A-share board lot
+    margin_rate: float = 0.0
     gateway: str = ""
 
     @property
@@ -315,8 +348,11 @@ class Position:
     direction: Direction = Direction.LONG
     volume: float = 0.0
     yd_volume: float = 0.0
+    today_volume: float = 0.0
     frozen: float = 0.0
     price: float = 0.0          # average cost
+    settlement_price: float = 0.0
+    margin: float = 0.0
     pnl: float = 0.0
     gateway: str = ""
 
@@ -336,6 +372,11 @@ class Account:
     balance: float = 0.0        # total assets snapshot (cash + optional securities)
     frozen: float = 0.0
     available: float = 0.0      # buying power
+    margin: float = 0.0
+    commission: float = 0.0
+    close_profit: float = 0.0
+    position_profit: float = 0.0
+    risk_ratio: float = 0.0
     gateway: str = ""
 
 

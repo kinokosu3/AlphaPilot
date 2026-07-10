@@ -13,6 +13,24 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
+from alphapilot.systems.live.types import Direction
+
+
+@dataclass
+class TargetPosition:
+    """Future-ready target position expression.
+
+    The current executor does not route these in LIVE mode yet; they are carried
+    through parsing/status so future futures adapters can reuse the same target
+    envelope.
+    """
+
+    symbol: str
+    target_volume: float
+    direction: Direction = Direction.NET
+    price: float = 0.0
+    offset_policy: str = "auto"
+
 
 @dataclass
 class TargetPortfolio:
@@ -28,6 +46,7 @@ class TargetPortfolio:
     cash: float | None = None
     source: str = ""
     market: str | None = None
+    positions: list[TargetPosition] = field(default_factory=list)
 
     @classmethod
     def from_holdings(
@@ -56,3 +75,33 @@ class TargetPortfolio:
                 except (TypeError, ValueError):
                     pass
         return cls(date=date, holdings=holdings, prices=prices, source=source, market=market)
+
+
+def parse_target_positions(raw: Any) -> list[TargetPosition]:
+    """Parse future-ready target positions from JSON-like input."""
+    if not raw:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError("positions must be a list")
+    positions: list[TargetPosition] = []
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        symbol = str(row.get("symbol") or row.get("instrument") or "").strip()
+        if not symbol:
+            continue
+        direction_raw = str(row.get("direction") or Direction.NET.value).lower()
+        try:
+            direction = Direction(direction_raw)
+        except ValueError:
+            direction = Direction.NET
+        positions.append(
+            TargetPosition(
+                symbol=symbol,
+                target_volume=float(row.get("target_volume") or row.get("volume") or 0.0),
+                direction=direction,
+                price=float(row.get("price") or 0.0),
+                offset_policy=str(row.get("offset_policy") or "auto"),
+            )
+        )
+    return positions

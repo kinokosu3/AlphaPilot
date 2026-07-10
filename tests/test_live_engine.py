@@ -15,10 +15,49 @@ from alphapilot.systems.live.brokers.sim import SimBroker
 from alphapilot.systems.live.clock import SimulatedClock
 from alphapilot.systems.live.config import LiveConfig, RunMode
 from alphapilot.systems.live.engine import LiveEngine
+from alphapilot.systems.live.gateway import BrokerGateway
 from alphapilot.systems.live.ledger import Ledger
-from alphapilot.systems.live.types import Exchange, OrderRequest, OrderStatus
+from alphapilot.systems.live.types import Account, CancelRequest, Exchange, OrderRequest, OrderStatus, TickData
 
 KEY = "600000.SSE"
+
+
+class TrackingGateway(BrokerGateway):
+    def __init__(self, name: str) -> None:
+        super().__init__(name)
+        self.connected = 0
+        self.closed = 0
+        self.subscribed: list[list[str]] = []
+        self.orders: list[OrderRequest] = []
+        self.cancels: list[CancelRequest] = []
+        self.account_queries = 0
+        self.position_queries = 0
+
+    def connect(self, setting: dict) -> None:
+        self.connected += 1
+        self._emit_account(Account(account_id=self.name, balance=100_000, available=100_000, gateway=self.name))
+
+    def close(self) -> None:
+        self.closed += 1
+
+    def send_order(self, req: OrderRequest) -> str:
+        self.orders.append(req)
+        order_id = f"{self.name}-1"
+        self._emit_order(req.create_order(order_id, self.name))
+        return order_id
+
+    def cancel_order(self, req: CancelRequest) -> None:
+        self.cancels.append(req)
+
+    def query_account(self) -> None:
+        self.account_queries += 1
+
+    def query_position(self) -> None:
+        self.position_queries += 1
+
+    def subscribe(self, codes: list[str]) -> None:
+        self.subscribed.append(list(codes))
+        self._emit_tick(TickData(code="600000", exchange=Exchange.SSE, last_price=10.0, gateway=self.name))
 
 
 def _engine(tmp_path: Path, broker, mode: str = RunMode.PAPER, clock=None) -> LiveEngine:
@@ -46,6 +85,42 @@ def test_paper_buy_end_to_end(tmp_path: Path) -> None:
     assert engine.oms.buying_power() == 90_000.0   # 100k - 1000*10
     assert engine.oms.get_order(order_id).status is OrderStatus.ALLTRADED
     assert {"connected", "submit", "order", "trade"} <= _kinds(engine)
+
+
+def test_engine_separates_trade_and_quote_gateways(tmp_path: Path) -> None:
+    trade = TrackingGateway("trade")
+    quote = TrackingGateway("quote")
+    cfg = LiveConfig(mode=RunMode.PAPER, ledger_dir=tmp_path / "ledger")
+    engine = LiveEngine(cfg, trade, quote_gateway=quote, ledger=Ledger(tmp_path / "ledger"))
+
+    engine.connect({"trade": {"trade": True}, "quote": {"quote": True}})
+    engine.subscribe_market_data(["SH600000"])
+    order_id = engine.submit(OrderRequest.buy("600000", Exchange.SSE, 100, 10.0))
+    engine.cancel(order_id, active_only=False)
+    engine.reconcile_after_reconnect(auto_resume=False)
+
+    assert trade.connected == 2
+    assert quote.connected == 2
+    assert quote.subscribed == [["SH600000"]]
+    assert trade.subscribed == []
+    assert len(trade.orders) == 1
+    assert len(quote.orders) == 0
+    assert len(trade.cancels) == 1
+    assert trade.account_queries == 1
+    assert trade.position_queries == 1
+    assert engine.oms.get_tick(KEY).last_price == 10.0
+
+
+def test_engine_reuses_same_gateway_for_trade_and_quote(tmp_path: Path) -> None:
+    gateway = TrackingGateway("same")
+    cfg = LiveConfig(mode=RunMode.PAPER, ledger_dir=tmp_path / "ledger")
+    engine = LiveEngine(cfg, gateway, quote_gateway=gateway, ledger=Ledger(tmp_path / "ledger"))
+
+    engine.connect({"trade": {"cash": 1}, "quote": {"cash": 2}})
+    engine.close()
+
+    assert gateway.connected == 1
+    assert gateway.closed == 1
 
 
 def test_dry_run_submits_nothing(tmp_path: Path) -> None:

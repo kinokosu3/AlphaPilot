@@ -28,7 +28,7 @@ from typing import Any
 
 from alphapilot.systems.live.config import RiskLimits
 from alphapilot.systems.live.config import RunMode
-from alphapilot.systems.live.types import Direction, OrderRequest, OrderType
+from alphapilot.systems.live.types import Direction, OrderRequest, OrderType, Product
 
 
 @dataclass
@@ -91,6 +91,11 @@ class RiskGate:
             return RiskVerdict.reject("volume", "order volume must be positive")
 
         contract = oms.get_contract(req.key) if hasattr(oms, "get_contract") else None
+        if (
+            getattr(runmode, "mode", None) == RunMode.LIVE
+            and getattr(contract, "product", None) == Product.FUTURES
+        ):
+            return RiskVerdict.reject("unsupported_product", "futures live routing is not enabled")
         if getattr(runmode, "mode", None) == RunMode.LIVE and contract is None:
             return RiskVerdict.reject("unknown_contract", f"{req.key} contract metadata is required in LIVE mode")
 

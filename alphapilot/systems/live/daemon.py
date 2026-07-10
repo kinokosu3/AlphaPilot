@@ -16,7 +16,7 @@ from typing import Any
 
 from alphapilot.systems.live.config import LiveConfig, RunMode
 from alphapilot.systems.live.runtime import clone_config, require_live_confirmation
-from alphapilot.systems.live.targets import TargetPortfolio
+from alphapilot.systems.live.targets import TargetPortfolio, parse_target_positions
 
 
 def daemon_path(state_dir: str | Path | None = None) -> Path:
@@ -204,6 +204,8 @@ def start_daemon(
     *,
     mode: str | None = None,
     broker: str | None = None,
+    trade_broker: str | None = None,
+    quote_provider: str | None = None,
     symbols: list[str] | None = None,
     cash: float | None = None,
     interval: float = 2.0,
@@ -219,8 +221,22 @@ def start_daemon(
     window: int = 250,
 ) -> dict[str, Any]:
     selected_mode = mode or config.mode
-    selected_broker = broker or ("paper" if selected_mode != RunMode.LIVE else config.broker)
-    cfg = clone_config(config, mode=selected_mode, broker=selected_broker, ledger_dir=ledger_dir, state_dir=state_dir)
+    trade_override = trade_broker or broker
+    selected_broker = trade_override or ("paper" if selected_mode != RunMode.LIVE else config.trade_broker)
+    selected_quote = quote_provider or (
+        "paper" if selected_mode != RunMode.LIVE
+        else selected_broker if trade_override
+        else config.quote_provider or selected_broker
+    )
+    cfg = clone_config(
+        config,
+        mode=selected_mode,
+        broker=selected_broker,
+        trade_broker=selected_broker,
+        quote_provider=selected_quote,
+        ledger_dir=ledger_dir,
+        state_dir=state_dir,
+    )
 
     if timing_strategy and not symbols:
         raise ValueError("symbols are required when timing_strategy is enabled")
@@ -241,6 +257,10 @@ def start_daemon(
         cfg.mode,
         "--broker",
         cfg.broker,
+        "--trade-broker",
+        cfg.trade_broker,
+        "--quote-provider",
+        cfg.quote_provider,
         "--interval",
         str(float(interval)),
         "--timeout",
@@ -283,6 +303,8 @@ def start_daemon(
         "running": False,
         "mode": cfg.mode,
         "broker": cfg.broker,
+        "trade_broker": cfg.trade_broker,
+        "quote_provider": cfg.quote_provider,
         "symbols": symbols or [],
         "interval": float(interval),
         "timeout": float(timeout),
@@ -431,6 +453,9 @@ def _apply_command(
                 volume=float(payload["volume"]),
                 price=float(payload.get("price") or 0.0),
                 order_type=str(payload.get("order_type") or "limit"),
+                exchange=payload.get("exchange"),
+                offset=str(payload.get("offset") or "none"),
+                product=str(payload.get("product") or "equity"),
                 reference=str(payload.get("reference") or "daemon"),
             )
             ack = (
@@ -468,6 +493,7 @@ def _apply_command(
                 cash=payload.get("cash"),
                 source=str(payload.get("source") or "daemon"),
                 market=payload.get("market"),
+                positions=parse_target_positions(payload.get("positions")),
             )
             routed = runtime.submit_target(target, route=route)
             fully_routed = bool(routed.get("fully_routed", True))
@@ -661,6 +687,8 @@ def run_daemon(
     *,
     mode: str | None = None,
     broker: str | None = None,
+    trade_broker: str | None = None,
+    quote_provider: str | None = None,
     symbols: list[str] | None = None,
     cash: float | None = None,
     interval: float = 2.0,
@@ -678,10 +706,20 @@ def run_daemon(
     from alphapilot.kernel import build_engine
 
     base = LiveConfig.load()
+    selected_mode = mode or base.mode
+    trade_override = trade_broker or broker
+    selected_trade = trade_override or ("paper" if selected_mode != RunMode.LIVE else base.trade_broker)
+    selected_quote = quote_provider or (
+        "paper" if selected_mode != RunMode.LIVE
+        else selected_trade if trade_override
+        else base.quote_provider or selected_trade
+    )
     cfg = clone_config(
         base,
-        mode=mode,
-        broker=broker or ("paper" if (mode or base.mode) != RunMode.LIVE else base.broker),
+        mode=selected_mode,
+        broker=selected_trade,
+        trade_broker=selected_trade,
+        quote_provider=selected_quote,
         ledger_dir=ledger_dir,
         state_dir=state_dir,
     )
@@ -698,6 +736,8 @@ def run_daemon(
     runtime = engine.get_system("live").create_runtime(
         mode=cfg.mode,
         broker=cfg.broker,
+        trade_broker=cfg.trade_broker,
+        quote_provider=cfg.quote_provider,
         ledger_dir=str(cfg.ledger_dir),
         state_dir=str(cfg.state_dir),
     )
@@ -706,6 +746,8 @@ def run_daemon(
         "status": "connecting",
         "mode": cfg.mode,
         "broker": cfg.broker,
+        "trade_broker": cfg.trade_broker,
+        "quote_provider": cfg.quote_provider,
         "symbols": symbols or [],
         "commands_processed": 0,
         "recovery": None,
@@ -738,7 +780,7 @@ def run_daemon(
             window=window,
         )
         if symbols and runner is None:
-            runtime.engine.gateway.subscribe(symbols)
+            runtime.engine.subscribe_market_data(symbols)
         runner_holder = {
             "runner": runner,
             "config": meta["runner"],
@@ -815,6 +857,8 @@ def main(argv: list[str] | None = None) -> int:
     run = sub.add_parser("run")
     run.add_argument("--mode")
     run.add_argument("--broker")
+    run.add_argument("--trade-broker")
+    run.add_argument("--quote-provider")
     run.add_argument("--symbols")
     run.add_argument("--cash", type=float)
     run.add_argument("--interval", type=float, default=2.0)
@@ -833,6 +877,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_daemon(
             mode=ns.mode,
             broker=ns.broker,
+            trade_broker=ns.trade_broker,
+            quote_provider=ns.quote_provider,
             symbols=_split_symbols(ns.symbols),
             cash=ns.cash,
             interval=ns.interval,

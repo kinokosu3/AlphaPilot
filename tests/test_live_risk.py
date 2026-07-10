@@ -9,7 +9,7 @@ from alphapilot.systems.live.fsm.runmode_fsm import RunModeMachine
 from alphapilot.systems.live.fsm.session_fsm import SessionClock
 from alphapilot.systems.live.oms import OMS
 from alphapilot.systems.live.risk import RiskGate
-from alphapilot.systems.live.types import Account, Contract, Exchange, OrderRequest, Position, TickData
+from alphapilot.systems.live.types import Account, Contract, Exchange, OrderRequest, Position, Product, TickData
 
 
 def _permissive() -> RiskLimits:
@@ -95,6 +95,19 @@ def test_live_mode_requires_contract_metadata() -> None:
     live_mode = RunModeMachine(RunMode.LIVE)
     v = gate.check(OrderRequest.buy("600000", Exchange.SSE, 100, 10.0), _oms(ticks={"600000": 10.0}), session, live_mode)
     assert not v.ok and v.rule == "unknown_contract"
+
+
+def test_live_mode_rejects_futures_contracts_until_supported() -> None:
+    gate = RiskGate(_permissive(), enforce_session=False)
+    session = SessionClock(now_fn=lambda: datetime(2026, 7, 1, 10, 0))
+    live_mode = RunModeMachine(RunMode.LIVE)
+    oms = _oms(
+        ticks={"RB2410.SHFE": 3500.0},
+        contracts={"RB2410.SHFE": {"product": Product.FUTURES, "lot_size": 1, "price_tick": 1.0}},
+    )
+    verdict = gate.check(OrderRequest.buy("RB2410", Exchange.SHFE, 1, 3500.0), oms, session, live_mode)
+    assert not verdict.ok
+    assert verdict.rule == "unsupported_product"
 
 
 def test_insufficient_cash_rejected() -> None:

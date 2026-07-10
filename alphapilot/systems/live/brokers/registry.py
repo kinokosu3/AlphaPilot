@@ -64,8 +64,8 @@ _COMMON_FIELDS: tuple[SettingField, ...] = (
 )
 
 _EMT_FIELDS: tuple[SettingField, ...] = _COMMON_FIELDS + (
-    SettingField("QUOTE_ACCOUNT", "行情账号", str, ""),
-    SettingField("QUOTE_PASSWORD", "行情密码", str, ""),
+    SettingField("QUOTE_ACCOUNT", "行情账号", str, "", required=False),
+    SettingField("QUOTE_PASSWORD", "行情密码", str, "", required=False),
 )
 
 
@@ -171,6 +171,44 @@ def create_gateway(name: str):
     return VnpyBrokerAdapter(spec.gateway_name, gateway_class=gateway_class)
 
 
+def create_quote_gateway(name: str):
+    """Instantiate a market-data provider for ``name``.
+
+    Built-in EMT/XTP gateways currently expose quote and trade from one class, so
+    this delegates to :func:`create_gateway`. Future pure quote providers can
+    register their own factory behind this function without changing runtime code.
+    """
+    if name == "paper":
+        return _NoopQuoteGateway("paper")
+    return create_gateway(name)
+
+
+class _NoopQuoteGateway:
+    """A harmless placeholder quote provider for tests/config previews."""
+
+    def __init__(self, name: str = "paper") -> None:
+        self.name = name
+        self._callback = None
+
+    def register_callback(self, callback) -> None:  # noqa: ANN001
+        self._callback = callback
+
+    def connect(self, setting: dict) -> None:  # noqa: ARG002
+        callback = self._callback
+        handler = getattr(callback, "on_gateway_connected", None)
+        if handler is not None:
+            handler(self.name, "quote", "noop")
+
+    def close(self) -> None:
+        callback = self._callback
+        handler = getattr(callback, "on_gateway_disconnected", None)
+        if handler is not None:
+            handler(self.name, "quote", "noop", halt=False)
+
+    def subscribe(self, codes: list[str]) -> None:
+        return None
+
+
 def build_connect_setting(name: str, env: Mapping[str, str] | None = None) -> dict[str, Any]:
     """Build the gateway's native connect-setting dict from the environment.
 
@@ -198,6 +236,19 @@ def build_connect_setting(name: str, env: Mapping[str, str] | None = None) -> di
     return setting
 
 
+def build_quote_connect_setting(name: str, env: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """Build quote-provider settings.
+
+    For the current native EMT/XTP adapters a single connect call still logs in
+    both quote and trade SDK channels, so the setting shape remains identical to
+    the broker setting. The separate function is the public extension point for
+    future pure quote providers.
+    """
+    if name == "paper":
+        return {}
+    return build_connect_setting(name, env=env)
+
+
 def missing_setting_fields(name: str, env: Mapping[str, str] | None = None) -> list[str]:
     """Required env variable names still unset for broker ``name``."""
     spec = get_broker(name)
@@ -209,6 +260,38 @@ def missing_setting_fields(name: str, env: Mapping[str, str] | None = None) -> l
         prefix + fld.env_suffix
         for fld in spec.setting_fields
         if fld.is_required and not env.get(prefix + fld.env_suffix)
+    ]
+
+
+def missing_quote_setting_fields(name: str, env: Mapping[str, str] | None = None) -> list[str]:
+    """Required env vars for quote-provider connection."""
+    if name == "paper":
+        return []
+    return missing_setting_fields(name, env=env)
+
+
+def quote_provider_importable(name: str) -> bool:
+    if name == "paper":
+        return True
+    return gateway_importable(name)
+
+
+def list_quote_providers() -> list[BrokerSpec]:
+    """Quote-provider catalog.
+
+    The returned spec type intentionally mirrors BrokerSpec so the portal can
+    render capabilities and env field names with the same table component.
+    """
+    return [
+        BrokerSpec(
+            name="paper",
+            gateway_path="alphapilot.systems.live.brokers.paper:PaperBroker",
+            gateway_name="PAPER",
+            setting_fields=(),
+            description="In-process PaperBroker quote sandbox",
+            capabilities=BrokerCapabilities(asset_classes=("stock",), supports_tick=True),
+        ),
+        *list_brokers(),
     ]
 
 

@@ -1,6 +1,8 @@
 export type LiveConfigSnapshot = {
   mode: string;
   broker: string;
+  trade_broker?: string;
+  quote_provider?: string;
   timezone: string;
   ledger_dir: string;
   state_dir: string;
@@ -59,7 +61,7 @@ export type LiveState = {
   orders: LiveOrder[];
   trades: LiveTrade[];
   ledger: Array<{ ts: string; kind: string }>;
-  runtime?: { mode?: string; broker?: string; state_dir?: string; ledger_dir?: string };
+  runtime?: { mode?: string; broker?: string; trade_broker?: string; quote_provider?: string; state_dir?: string; ledger_dir?: string };
 };
 
 export type LiveStatus = {
@@ -70,7 +72,7 @@ export type LiveStatus = {
 };
 
 export type LiveRuntimeSnapshot = {
-  config: { mode: string; broker: string; ledger_dir: string; state_dir: string };
+  config: { mode: string; broker: string; trade_broker?: string; quote_provider?: string; ledger_dir: string; state_dir: string };
   engine: LiveEngineSnapshot;
   account: { account_id?: string; balance: number; available: number; frozen?: number; buying_power?: number; gateway?: string } | null;
   positions: LivePosition[];
@@ -88,7 +90,23 @@ export type LiveRuntimeState = {
 
 export type LivePreflight = {
   broker: string;
+  trade_broker?: string;
+  quote_provider?: string;
   description?: string;
+  gateway_importable: boolean;
+  missing_env: string[];
+  network_checked: boolean;
+  endpoints: Array<{ name: string; host: string; port: number; ok: boolean; detail: string }>;
+  ok: boolean;
+  trade?: LivePreflightChannel;
+  quote?: LivePreflightChannel;
+};
+
+export type LivePreflightChannel = {
+  name: string;
+  broker: string;
+  description?: string;
+  gateway?: string;
   gateway_importable: boolean;
   missing_env: string[];
   network_checked: boolean;
@@ -119,6 +137,8 @@ export type LiveBrokerSpec = {
   capabilities: LiveBrokerCapabilities;
 };
 
+export type LiveQuoteProviderSpec = LiveBrokerSpec;
+
 export type LiveConnectResult = { ready: boolean; state: LiveRuntimeSnapshot };
 
 export type LiveDaemonStatus = {
@@ -132,6 +152,8 @@ export type LiveDaemonStatus = {
   ready?: boolean;
   mode?: string;
   broker?: string;
+  trade_broker?: string;
+  quote_provider?: string;
   commands_processed?: number;
   runner?: { enabled?: boolean; strategy?: string; freq?: string };
   runner_status?: LiveRunnerStatus | null;

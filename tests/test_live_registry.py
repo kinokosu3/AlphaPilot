@@ -78,6 +78,8 @@ def test_missing_setting_fields() -> None:
     # ints with non-empty defaults are not "missing"
     assert "ALPHAPILOT_LIVE_EMT_CLIENT_ID" not in missing
     assert "ALPHAPILOT_LIVE_EMT_LOG_LEVEL" not in missing
+    assert "ALPHAPILOT_LIVE_EMT_QUOTE_ACCOUNT" not in missing
+    assert "ALPHAPILOT_LIVE_EMT_QUOTE_PASSWORD" not in missing
     assert reg.missing_setting_fields("emt", {"ALPHAPILOT_LIVE_EMT_SETTING_JSON": "{}"}) == []
 
 

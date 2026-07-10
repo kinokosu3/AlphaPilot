@@ -24,7 +24,7 @@ from alphapilot.systems.live.events import LiveEvent, LiveEventBus
 from alphapilot.systems.live.fsm.connection_fsm import ConnectionMachine, ConnectionState
 from alphapilot.systems.live.fsm.runmode_fsm import RunModeMachine
 from alphapilot.systems.live.fsm.session_fsm import SessionClock
-from alphapilot.systems.live.gateway import BrokerGateway
+from alphapilot.systems.live.gateway import BrokerGateway, QuoteGateway
 from alphapilot.systems.live.ledger import Ledger
 from alphapilot.systems.live.oms import OMS
 from alphapilot.systems.live.types import (
@@ -48,6 +48,7 @@ class LiveEngine:
         config: LiveConfig,
         gateway: BrokerGateway,
         *,
+        quote_gateway: QuoteGateway | None = None,
         now_fn: Callable[[], Any] | None = None,
         is_trading_day_fn: Callable[[Any], bool] | None = None,
         ledger: Ledger | None = None,
@@ -55,7 +56,10 @@ class LiveEngine:
         risk: Any = None,
     ) -> None:
         self.config = config
-        self.gateway = gateway
+        self.trade_gateway = gateway
+        self.quote_gateway = quote_gateway or gateway
+        # Backward-compatible alias used by older runtime/daemon/tests.
+        self.gateway = self.trade_gateway
         self.oms = OMS()
         self.runmode = RunModeMachine(config.mode)
         self.connection = ConnectionMachine()
@@ -65,7 +69,9 @@ class LiveEngine:
         self._event_now = getattr(self.ledger, "_now_fn", datetime.now)
         self.risk = risk  # installed in Phase 3; None => no pre-trade checks
         self._tick_listeners: list[Callable[[TickData], None]] = []
-        gateway.register_callback(self)
+        self.trade_gateway.register_callback(self)
+        if self.quote_gateway is not self.trade_gateway:
+            self.quote_gateway.register_callback(self)
 
     def add_tick_listener(self, listener: Callable[[TickData], None]) -> None:
         """Attach a tick consumer (e.g. a strategy runner's bar aggregator).
@@ -137,21 +143,45 @@ class LiveEngine:
     # ---- lifecycle ------------------------------------------------------- #
     def connect(self, setting: dict | None = None) -> None:
         self.connection.transition(ConnectionState.CONNECTING)
+        trade_setting, quote_setting = _split_gateway_settings(setting)
         try:
-            self.gateway.connect(setting or {})
+            self.trade_gateway.connect(trade_setting)
+            if self.quote_gateway is not self.trade_gateway:
+                self.quote_gateway.connect(quote_setting)
         except Exception as exc:  # noqa: BLE001 - surface as connection error
             self.connection.transition(ConnectionState.ERROR)
-            self._audit("connect_error", {"error": str(exc)}, source=self.gateway.name)
+            self._audit("connect_error", {"error": str(exc)}, source=self.trade_gateway.name)
             raise
         self.connection.transition(ConnectionState.CONNECTED)
         self.connection.transition(ConnectionState.LOGGED_IN)
-        self._audit("connected", {"broker": self.gateway.name, "mode": self.config.mode}, source=self.gateway.name)
+        self._audit(
+            "connected",
+            {
+                "broker": self.trade_gateway.name,
+                "trade_broker": self.trade_gateway.name,
+                "quote_provider": self.quote_gateway.name,
+                "mode": self.config.mode,
+            },
+            source=self.trade_gateway.name,
+        )
 
     def close(self) -> None:
-        self.gateway.close()
+        errors: list[str] = []
+        for gateway in _unique_gateways(self.trade_gateway, self.quote_gateway):
+            try:
+                gateway.close()
+            except Exception as exc:  # noqa: BLE001 - close every channel best-effort
+                errors.append(f"{getattr(gateway, 'name', 'gateway')}: {exc}")
         if self.connection.state != ConnectionState.DISCONNECTED:
             self.connection.transition(ConnectionState.DISCONNECTED)
-        self._audit("closed", {"broker": self.gateway.name}, source=self.gateway.name)
+        payload: dict[str, Any] = {
+            "broker": self.trade_gateway.name,
+            "trade_broker": self.trade_gateway.name,
+            "quote_provider": self.quote_gateway.name,
+        }
+        if errors:
+            payload["errors"] = errors
+        self._audit("closed", payload, source=self.trade_gateway.name)
 
     # ---- guarded actions ------------------------------------------------- #
     def submit(self, req: OrderRequest) -> str | None:
@@ -175,7 +205,7 @@ class LiveEngine:
                     reference=req.reference,
                 )
                 return None
-        order_id = self.gateway.send_order(req)
+        order_id = self.trade_gateway.send_order(req)
         self._audit("submit", {"order_id": order_id, "req": _req(req)}, order_id=order_id, reference=req.reference)
         return order_id
 
@@ -194,7 +224,7 @@ class LiveEngine:
                 reference=order.reference,
             )
             return {"cancelled": False, "order_id": order.order_id, "reason": "not_active"}
-        self.gateway.cancel_order(order.create_cancel())
+        self.trade_gateway.cancel_order(order.create_cancel())
         self._audit("cancel", {"order_id": order.order_id}, order_id=order.order_id, reference=order.reference)
         return {"cancelled": True, "order_id": order.order_id, "reference": order.reference}
 
@@ -204,7 +234,7 @@ class LiveEngine:
         This is intended for operator recovery only; the normal path is
         :meth:`cancel`, which verifies the order is known and active.
         """
-        self.gateway.cancel_order(req)
+        self.trade_gateway.cancel_order(req)
         payload = {
             "order_id": req.order_id,
             "code": req.code,
@@ -221,7 +251,7 @@ class LiveEngine:
         self._audit("halt", {"reason": reason})
         for order in self.oms.get_active_orders():
             try:
-                self.gateway.cancel_order(order.create_cancel())
+                self.trade_gateway.cancel_order(order.create_cancel())
             except Exception as exc:  # noqa: BLE001 - best-effort flatten of working orders
                 self._audit("halt_cancel_error", {"order_id": order.order_id, "error": str(exc)}, order_id=order.order_id)
 
@@ -234,7 +264,7 @@ class LiveEngine:
         if self.connection.state != ConnectionState.DISCONNECTED:
             self.connection.transition(ConnectionState.DISCONNECTED)
         self.runmode.halt(reason)
-        self._audit("disconnected", {"reason": reason}, source=self.gateway.name)
+        self._audit("disconnected", {"reason": reason}, source=self.trade_gateway.name)
 
     def reconcile_after_reconnect(
         self,
@@ -250,19 +280,23 @@ class LiveEngine:
         """
         if self.connection.state != ConnectionState.DISCONNECTED:
             try:
-                self.gateway.close()
+                for gateway in _unique_gateways(self.trade_gateway, self.quote_gateway):
+                    gateway.close()
             except Exception as exc:  # noqa: BLE001 - reconnect still records the safety halt
-                self._audit("reconnect_close_error", {"error": str(exc)}, source=self.gateway.name)
+                self._audit("reconnect_close_error", {"error": str(exc)}, source=self.trade_gateway.name)
             self.handle_disconnect("reconnect")
         elif not auto_resume and not self.runmode.halted:
             self.runmode.halt("reconnect")
             self._audit("halt", {"reason": "reconnect"})
         self.connection.transition(ConnectionState.CONNECTING)
-        self.gateway.connect(setting or {})
+        trade_setting, quote_setting = _split_gateway_settings(setting)
+        self.trade_gateway.connect(trade_setting)
+        if self.quote_gateway is not self.trade_gateway:
+            self.quote_gateway.connect(quote_setting)
         self.connection.transition(ConnectionState.CONNECTED)
         self.connection.transition(ConnectionState.LOGGED_IN)
-        self.gateway.query_account()
-        self.gateway.query_position()
+        self.trade_gateway.query_account()
+        self.trade_gateway.query_position()
         if auto_resume:
             self.runmode.resume()
         report = {
@@ -272,8 +306,12 @@ class LiveEngine:
             "active_orders": len(self.oms.get_active_orders()),
             "positions": len(self.oms.get_positions()),
         }
-        self._audit("reconciled", report, source=self.gateway.name)
+        self._audit("reconciled", report, source=self.trade_gateway.name)
         return report
+
+    def subscribe_market_data(self, symbols: list[str]) -> None:
+        """Subscribe through the quote channel, not the trade channel."""
+        self.quote_gateway.subscribe(symbols)
 
     def reconcile_and_resume(self) -> dict[str, Any]:
         """Backward-compatible reconnect helper that resumes after reconciliation."""
@@ -332,9 +370,30 @@ class LiveEngine:
 def _req(req: OrderRequest) -> dict[str, Any]:
     return {
         "code": req.code, "exchange": req.exchange.value, "direction": req.direction.value,
-        "volume": req.volume, "price": req.price, "type": req.type.value, "reference": req.reference,
+        "volume": req.volume, "price": req.price, "type": req.type.value, "offset": req.offset.value,
+        "reference": req.reference,
     }
 
 
 def _source(value: Any, engine: LiveEngine) -> str:
-    return str(getattr(value, "gateway", "") or engine.gateway.name or "live")
+    return str(getattr(value, "gateway", "") or engine.trade_gateway.name or "live")
+
+
+def _split_gateway_settings(setting: dict | None) -> tuple[dict, dict]:
+    setting = setting or {}
+    if "trade" in setting or "quote" in setting:
+        trade = setting.get("trade") or {}
+        quote = setting.get("quote") or trade
+        return dict(trade), dict(quote)
+    return dict(setting), dict(setting)
+
+
+def _unique_gateways(*gateways: Any) -> list[Any]:
+    seen: set[int] = set()
+    unique: list[Any] = []
+    for gateway in gateways:
+        marker = id(gateway)
+        if marker not in seen:
+            seen.add(marker)
+            unique.append(gateway)
+    return unique

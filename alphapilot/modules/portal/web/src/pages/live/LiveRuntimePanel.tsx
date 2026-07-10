@@ -7,6 +7,7 @@ import type {
   LiveConfigSnapshot,
   LiveLedgerEvent,
   LivePreflight,
+  LiveQuoteProviderSpec,
   LiveRiskStatus,
   LiveRuntimeState,
 } from "./types";
@@ -24,6 +25,12 @@ type Props = {
   liveBrokerOptions: LiveBrokerSpec[];
   selectedBrokerSpec?: LiveBrokerSpec;
   brokerCatalog: AsyncResource<LiveBrokerSpec[]>;
+  quoteProviderOptions: LiveQuoteProviderSpec[];
+  selectedRuntimeQuoteProvider: string;
+  runtimeQuoteProvider: string;
+  setRuntimeQuoteProvider: Dispatch<SetStateAction<string>>;
+  selectedQuoteProviderSpec?: LiveQuoteProviderSpec;
+  quoteProviderCatalog: AsyncResource<LiveQuoteProviderSpec[]>;
   preflight?: LivePreflight | null;
   preflightNetwork: boolean;
   setPreflightNetwork: Dispatch<SetStateAction<boolean>>;
@@ -45,6 +52,12 @@ export function LiveRuntimePanel({
   liveBrokerOptions,
   selectedBrokerSpec,
   brokerCatalog,
+  quoteProviderOptions,
+  selectedRuntimeQuoteProvider,
+  runtimeQuoteProvider,
+  setRuntimeQuoteProvider,
+  selectedQuoteProviderSpec,
+  quoteProviderCatalog,
   preflight,
   preflightNetwork,
   setPreflightNetwork,
@@ -74,7 +87,8 @@ export function LiveRuntimePanel({
         {cfg ? (
           <div className="metric-grid compact">
             <div className="metric"><span className="metric-label">{t("liveMode")}</span><StatusPill status={cfg.mode} /></div>
-            <div className="metric"><span className="metric-label">{t("liveBroker")}</span><strong>{cfg.broker}</strong></div>
+            <div className="metric"><span className="metric-label">{t("liveTradeBroker")}</span><strong>{cfg.trade_broker || cfg.broker}</strong></div>
+            <div className="metric"><span className="metric-label">{t("liveQuoteProvider")}</span><strong>{cfg.quote_provider || cfg.trade_broker || cfg.broker}</strong></div>
             {riskRows.map(([label, value]) => (
               <div className="metric" key={label}><span className="metric-label">{label}</span><strong>{value}</strong></div>
             ))}
@@ -102,12 +116,26 @@ export function LiveRuntimePanel({
             </select>
           </label>
           <label className="field">
-            <span>{t("liveBroker")}</span>
+            <span>{t("liveTradeBroker")}</span>
             <select value={runtimeMode === "live" ? runtimeBroker : "paper"} onChange={(e) => setRuntimeBroker(e.target.value)} disabled={runtimeMode !== "live"}>
               {runtimeMode !== "live" ? <option value="paper">paper</option> : null}
               {runtimeMode === "live" && !liveBrokerOptions.length ? <option value="">{brokerCatalog.loading ? t("loading") : t("empty")}</option> : null}
               {runtimeMode === "live" ? liveBrokerOptions.map((broker) => (
                 <option value={broker.name} key={broker.name}>{broker.name} - {broker.description || broker.gateway}</option>
+              )) : null}
+            </select>
+          </label>
+          <label className="field">
+            <span>{t("liveQuoteProvider")}</span>
+            <select
+              value={runtimeMode === "live" ? runtimeQuoteProvider || selectedRuntimeQuoteProvider : "paper"}
+              onChange={(e) => setRuntimeQuoteProvider(e.target.value)}
+              disabled={runtimeMode !== "live"}
+            >
+              {runtimeMode !== "live" ? <option value="paper">paper</option> : null}
+              {runtimeMode === "live" && !quoteProviderOptions.length ? <option value="">{quoteProviderCatalog.loading ? t("loading") : t("empty")}</option> : null}
+              {runtimeMode === "live" ? quoteProviderOptions.map((provider) => (
+                <option value={provider.name} key={provider.name}>{provider.name} - {provider.description || provider.gateway}</option>
               )) : null}
             </select>
           </label>
@@ -121,6 +149,7 @@ export function LiveRuntimePanel({
           </div>
         </div>
         {brokerCatalog.error ? <Alert tone="error">{brokerCatalog.error}</Alert> : null}
+        {quoteProviderCatalog.error ? <Alert tone="error">{quoteProviderCatalog.error}</Alert> : null}
         {selectedBrokerSpec ? (
           <div className="metric-grid compact">
             <div className="metric"><span className="metric-label">{t("liveBrokerStatus")}</span><StatusPill status={selectedBrokerSpec.gateway_importable ? "importable" : "missing"} /></div>
@@ -129,16 +158,42 @@ export function LiveRuntimePanel({
             <div className="metric wide"><span className="metric-label">{t("liveDescription")}</span><strong>{selectedBrokerSpec.description || selectedBrokerSpec.gateway}</strong></div>
           </div>
         ) : null}
+        {selectedQuoteProviderSpec && selectedQuoteProviderSpec.name !== selectedBrokerSpec?.name ? (
+          <div className="metric-grid compact">
+            <div className="metric"><span className="metric-label">{t("liveQuoteStatus")}</span><StatusPill status={selectedQuoteProviderSpec.gateway_importable ? "importable" : "missing"} /></div>
+            <div className="metric"><span className="metric-label">{t("liveMissingEnv")}</span><strong>{selectedQuoteProviderSpec.missing_env.length}</strong></div>
+            <div className="metric wide"><span className="metric-label">{t("liveDescription")}</span><strong>{selectedQuoteProviderSpec.description || selectedQuoteProviderSpec.gateway}</strong></div>
+          </div>
+        ) : null}
         {preflight ? (
           <div className="stack">
             <div className="metric-grid compact">
-              <div className="metric"><span className="metric-label">{t("liveBroker")}</span><strong>{preflight.broker}</strong></div>
+              <div className="metric"><span className="metric-label">{t("liveTradeBroker")}</span><strong>{preflight.trade_broker || preflight.broker}</strong></div>
+              <div className="metric"><span className="metric-label">{t("liveQuoteProvider")}</span><strong>{preflight.quote_provider || preflight.broker}</strong></div>
               <div className="metric"><span className="metric-label">{t("status")}</span><StatusPill status={preflight.ok ? "ok" : "blocked"} /></div>
               <div className="metric"><span className="metric-label">{t("liveGateway")}</span><StatusPill status={preflight.gateway_importable ? "ok" : "missing"} /></div>
               <div className="metric"><span className="metric-label">{t("liveMissingEnv")}</span><strong>{preflight.missing_env.length}</strong></div>
               <div className="metric"><span className="metric-label">{t("liveEndpoints")}</span><strong>{preflight.endpoints.filter((e) => e.ok).length}/{preflight.endpoints.length}</strong></div>
               <div className="metric"><span className="metric-label">{t("liveNetworkCheck")}</span><StatusPill status={preflight.network_checked ? "checked" : "skipped"} /></div>
             </div>
+            {preflight.trade || preflight.quote ? (
+              <div className="metric-grid compact">
+                {preflight.trade ? (
+                  <>
+                    <div className="metric"><span className="metric-label">{t("liveTradeChannel")}</span><StatusPill status={preflight.trade.ok ? "ok" : "blocked"} /></div>
+                    <div className="metric"><span className="metric-label">{t("liveTradeBroker")}</span><strong>{preflight.trade.name}</strong></div>
+                    <div className="metric"><span className="metric-label">{t("liveMissingEnv")}</span><strong>{preflight.trade.missing_env.length}</strong></div>
+                  </>
+                ) : null}
+                {preflight.quote ? (
+                  <>
+                    <div className="metric"><span className="metric-label">{t("liveQuoteChannel")}</span><StatusPill status={preflight.quote.ok ? "ok" : "blocked"} /></div>
+                    <div className="metric"><span className="metric-label">{t("liveQuoteProvider")}</span><strong>{preflight.quote.name}</strong></div>
+                    <div className="metric"><span className="metric-label">{t("liveMissingEnv")}</span><strong>{preflight.quote.missing_env.length}</strong></div>
+                  </>
+                ) : null}
+              </div>
+            ) : null}
             {preflight.description ? <Alert>{preflight.description}</Alert> : null}
             {preflight.missing_env.length ? <Alert tone="info">{preflight.missing_env.join(", ")}</Alert> : null}
             {preflight.endpoints.length ? (

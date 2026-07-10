@@ -87,6 +87,7 @@ EXPECTED_CLI_COMMANDS: frozenset[str] = frozenset(
         "live_cancel",
         "live_order",
         "live_preflight",
+        "live_quote_providers",
         "live_risk_status",
         "live_run",
         "live_state",

@@ -34,12 +34,16 @@ class LiveModule(BaseModule):
         *,
         mode: str | None = None,
         broker: str | None = None,
+        trade_broker: str | None = None,
+        quote_provider: str | None = None,
         ledger_dir: str | None = None,
         state_dir: str | None = None,
     ):
         return self._system().create_runtime(
             mode=mode,
             broker=broker,
+            trade_broker=trade_broker,
+            quote_provider=quote_provider,
             ledger_dir=ledger_dir,
             state_dir=state_dir,
         )
@@ -88,17 +92,68 @@ class LiveModule(BaseModule):
             )
         return rows
 
+    def live_quote_providers(self) -> list[dict[str, Any]]:
+        """List registered quote providers without exposing secret values."""
+        from alphapilot.systems.live.brokers.registry import (
+            ENV_PREFIX,
+            list_quote_providers,
+            missing_quote_setting_fields,
+            quote_provider_importable,
+        )
+
+        rows = []
+        for spec in list_quote_providers():
+            prefix = f"{ENV_PREFIX}{spec.name.upper()}_"
+            rows.append(
+                {
+                    "name": spec.name,
+                    "description": spec.description,
+                    "gateway": spec.gateway_path,
+                    "gateway_importable": quote_provider_importable(spec.name),
+                    "env_fields": [prefix + f.env_suffix for f in spec.setting_fields],
+                    "missing_env": missing_quote_setting_fields(spec.name),
+                    "capabilities": {
+                        "asset_classes": list(spec.capabilities.asset_classes),
+                        "supports_tick": spec.capabilities.supports_tick,
+                        "supports_contract_query": spec.capabilities.supports_contract_query,
+                        "supports_account_query": spec.capabilities.supports_account_query,
+                        "supports_position_query": spec.capabilities.supports_position_query,
+                        "supports_order_query": spec.capabilities.supports_order_query,
+                        "supports_trade_query": spec.capabilities.supports_trade_query,
+                        "supports_cancel": spec.capabilities.supports_cancel,
+                        "supports_margin": spec.capabilities.supports_margin,
+                        "supports_history": spec.capabilities.supports_history,
+                    },
+                }
+            )
+        return rows
+
     def live_risk_status(
         self,
         mode: str | None = None,
         broker: str | None = None,
+        trade_broker: str | None = None,
+        quote_provider: str | None = None,
         state_dir: str | None = None,
         ledger_dir: str | None = None,
         tail: int = 20,
     ) -> dict[str, Any]:
         """Show persisted risk/recovery status without connecting to a broker."""
-        runtime = self._runtime(mode=mode, broker=broker, state_dir=state_dir, ledger_dir=ledger_dir)
-        status = self.live_state(mode=mode, broker=broker, state_dir=state_dir)
+        runtime = self._runtime(
+            mode=mode,
+            broker=broker,
+            trade_broker=trade_broker,
+            quote_provider=quote_provider,
+            state_dir=state_dir,
+            ledger_dir=ledger_dir,
+        )
+        status = self.live_state(
+            mode=mode,
+            broker=broker,
+            trade_broker=trade_broker,
+            quote_provider=quote_provider,
+            state_dir=state_dir,
+        )
         state = status.get("state") if status.get("exists") else runtime.snapshot()
         engine = state.get("engine") if isinstance(state, dict) else {}
         return {
@@ -121,11 +176,20 @@ class LiveModule(BaseModule):
         limit: int = 50,
         mode: str | None = None,
         broker: str | None = None,
+        trade_broker: str | None = None,
+        quote_provider: str | None = None,
         ledger_dir: str | None = None,
         state_dir: str | None = None,
     ) -> dict[str, Any]:
         """Query live audit ledger events by common correlation fields."""
-        runtime = self._runtime(mode=mode, broker=broker, ledger_dir=ledger_dir, state_dir=state_dir)
+        runtime = self._runtime(
+            mode=mode,
+            broker=broker,
+            trade_broker=trade_broker,
+            quote_provider=quote_provider,
+            ledger_dir=ledger_dir,
+            state_dir=state_dir,
+        )
         events = runtime.engine.ledger.events(
             kind=kind,
             command_id=command_id,
@@ -144,10 +208,13 @@ class LiveModule(BaseModule):
         self,
         mode: str | None = None,
         broker: str | None = None,
+        trade_broker: str | None = None,
+        quote_provider: str | None = None,
         state_dir: str | None = None,
     ) -> dict[str, Any]:
         """Read the last persisted live runtime state without connecting."""
-        runtime = self._runtime(mode=mode, broker=broker, state_dir=state_dir)
+        runtime = self._runtime(mode=mode, broker=broker, trade_broker=trade_broker,
+                                quote_provider=quote_provider, state_dir=state_dir)
         path = runtime.state_path
         if not path.exists():
             return {"exists": False, "state_path": str(path), "config": runtime.snapshot()["config"]}
@@ -157,6 +224,8 @@ class LiveModule(BaseModule):
         self,
         mode: str | None = None,
         broker: str | None = None,
+        trade_broker: str | None = None,
+        quote_provider: str | None = None,
         cash: float | None = None,
         timeout: float = 20.0,
         ledger_dir: str | None = None,
@@ -167,7 +236,14 @@ class LiveModule(BaseModule):
         Use this as the AlphaPilot-native smoke path. In LIVE mode credentials
         are still read only from environment variables.
         """
-        runtime = self._runtime(mode=mode, broker=broker, ledger_dir=ledger_dir, state_dir=state_dir)
+        runtime = self._runtime(
+            mode=mode,
+            broker=broker,
+            trade_broker=trade_broker,
+            quote_provider=quote_provider,
+            ledger_dir=ledger_dir,
+            state_dir=state_dir,
+        )
         try:
             state = runtime.connect(paper_cash=cash)
             ready = runtime.wait_ready(timeout=timeout)
@@ -178,63 +254,41 @@ class LiveModule(BaseModule):
     def live_preflight(
         self,
         broker: str | None = None,
+        trade_broker: str | None = None,
+        quote_provider: str | None = None,
         network: bool = False,
         timeout: float = 3.0,
     ) -> dict[str, Any]:
         """Check broker registry, env fields and optional TCP endpoint reachability."""
-        from alphapilot.systems.live.brokers.registry import (
-            build_connect_setting,
-            gateway_importable,
-            get_broker,
-            missing_setting_fields,
-        )
-
-        name = broker or self._system().config.broker
-        if name == "paper":
-            return {
-                "broker": "paper",
-                "description": "In-process PaperBroker sandbox",
-                "gateway": "alphapilot.systems.live.brokers.paper:PaperBroker",
-                "gateway_importable": True,
-                "missing_env": [],
-                "network_checked": False,
-                "endpoints": [],
-                "ok": True,
-            }
-        spec = get_broker(name)
-        missing = missing_setting_fields(name)
+        cfg = self._system().config
+        trade_override = trade_broker or broker
+        selected_trade = trade_override or cfg.trade_broker or cfg.broker
+        selected_quote = quote_provider or (selected_trade if trade_override else cfg.quote_provider or selected_trade)
+        trade = _preflight_provider(selected_trade, kind="trade", network=network, timeout=timeout)
+        quote = _preflight_provider(selected_quote, kind="quote", network=network, timeout=timeout)
+        endpoints = [*trade["endpoints"], *quote["endpoints"]]
         result: dict[str, Any] = {
-            "broker": name,
-            "description": spec.description,
-            "gateway": spec.gateway_path,
-            "gateway_importable": gateway_importable(name),
-            "missing_env": missing,
-            "network_checked": False,
-            "endpoints": [],
+            "broker": selected_trade,
+            "trade_broker": selected_trade,
+            "quote_provider": selected_quote,
+            "description": trade.get("description"),
+            "gateway": trade.get("gateway"),
+            "gateway_importable": trade.get("gateway_importable"),
+            "missing_env": trade.get("missing_env", []),
+            "network_checked": bool(network),
+            "endpoints": endpoints,
+            "trade": trade,
+            "quote": quote,
         }
-        if network and not missing:
-            setting = build_connect_setting(name)
-            endpoints = []
-            for label, host_key, port_key in (
-                ("quote", "行情地址", "行情端口"),
-                ("trade", "交易地址", "交易端口"),
-            ):
-                host = setting.get(host_key)
-                port = setting.get(port_key)
-                if host and port:
-                    ok, detail = _tcp_probe(str(host), int(port), timeout)
-                    endpoints.append({"name": label, "host": host, "port": int(port), "ok": ok, "detail": detail})
-            result["network_checked"] = True
-            result["endpoints"] = endpoints
-        result["ok"] = result["gateway_importable"] and not result["missing_env"] and all(
-            item.get("ok", True) for item in result["endpoints"]
-        )
+        result["ok"] = bool(trade.get("ok")) and bool(quote.get("ok"))
         return result
 
     def live_run(
         self,
         mode: str | None = None,
         broker: str | None = None,
+        trade_broker: str | None = None,
+        quote_provider: str | None = None,
         symbols: str | list[str] | None = None,
         cash: float | None = None,
         interval: float = 2.0,
@@ -248,7 +302,14 @@ class LiveModule(BaseModule):
         Omit ``duration`` for a foreground daemon. This command does not route
         orders by itself; strategy/target routing is done by explicit commands.
         """
-        runtime = self._runtime(mode=mode, broker=broker, ledger_dir=ledger_dir, state_dir=state_dir)
+        runtime = self._runtime(
+            mode=mode,
+            broker=broker,
+            trade_broker=trade_broker,
+            quote_provider=quote_provider,
+            ledger_dir=ledger_dir,
+            state_dir=state_dir,
+        )
         try:
             runtime.connect(paper_cash=cash)
             ready = runtime.wait_ready(timeout=timeout)
@@ -265,19 +326,30 @@ class LiveModule(BaseModule):
         self,
         mode: str | None = None,
         broker: str | None = None,
+        trade_broker: str | None = None,
+        quote_provider: str | None = None,
         state_dir: str | None = None,
     ) -> dict[str, Any]:
         """Show the long-lived live runtime daemon status and latest state."""
         from alphapilot.systems.live.daemon import daemon_status
         from alphapilot.systems.live.runtime import clone_config
 
-        cfg = clone_config(self._system().config, mode=mode, broker=broker, state_dir=state_dir)
+        cfg = clone_config(
+            self._system().config,
+            mode=mode,
+            broker=broker,
+            trade_broker=trade_broker,
+            quote_provider=quote_provider,
+            state_dir=state_dir,
+        )
         return daemon_status(cfg, state_dir=state_dir)
 
     def live_daemon_start(
         self,
         mode: str | None = None,
         broker: str | None = None,
+        trade_broker: str | None = None,
+        quote_provider: str | None = None,
         symbols: str | list[str] | None = None,
         cash: float | None = None,
         interval: float = 2.0,
@@ -305,6 +377,8 @@ class LiveModule(BaseModule):
             self._system().config,
             mode=mode,
             broker=broker,
+            trade_broker=trade_broker,
+            quote_provider=quote_provider,
             symbols=_split_symbols(symbols),
             cash=cash,
             interval=interval,
@@ -555,6 +629,9 @@ class LiveModule(BaseModule):
         volume: float,
         price: float = 0.0,
         order_type: str = "limit",
+        exchange: str | None = None,
+        offset: str = "none",
+        product: str = "equity",
         state_dir: str | None = None,
         wait: bool = False,
         timeout: float = 5.0,
@@ -575,6 +652,9 @@ class LiveModule(BaseModule):
                 "volume": float(volume),
                 "price": float(price),
                 "order_type": order_type,
+                "exchange": exchange,
+                "offset": offset,
+                "product": product,
                 "reference": reference,
                 "confirm_live": confirm_live,
                 "event_timeout": float(event_timeout),
@@ -589,6 +669,7 @@ class LiveModule(BaseModule):
         target_path: str | None = None,
         holdings: str | dict | None = None,
         prices: str | dict | None = None,
+        positions: list[dict[str, Any]] | None = None,
         date: str | None = None,
         source: str | None = None,
         session: str | None = None,
@@ -613,6 +694,7 @@ class LiveModule(BaseModule):
             target_path=target_path,
             holdings=holdings,
             prices=prices,
+            positions=positions,
             date=date,
             source=source,
             session=session,
@@ -643,8 +725,13 @@ class LiveModule(BaseModule):
         volume: float,
         price: float = 0.0,
         order_type: str = "limit",
+        exchange: str | None = None,
+        offset: str = "none",
+        product: str = "equity",
         mode: str | None = None,
         broker: str | None = None,
+        trade_broker: str | None = None,
+        quote_provider: str | None = None,
         cash: float | None = None,
         timeout: float = 20.0,
         event_timeout: float = 3.0,
@@ -660,7 +747,14 @@ class LiveModule(BaseModule):
         """
         from alphapilot.systems.live.runtime import require_live_confirmation
 
-        runtime = self._runtime(mode=mode, broker=broker, ledger_dir=ledger_dir, state_dir=state_dir)
+        runtime = self._runtime(
+            mode=mode,
+            broker=broker,
+            trade_broker=trade_broker,
+            quote_provider=quote_provider,
+            ledger_dir=ledger_dir,
+            state_dir=state_dir,
+        )
         require_live_confirmation(runtime.config, confirm_live=confirm_live)
         try:
             runtime.connect(paper_cash=cash)
@@ -671,6 +765,9 @@ class LiveModule(BaseModule):
                 volume=volume,
                 price=price,
                 order_type=order_type,
+                exchange=exchange,
+                offset=offset,
+                product=product,
                 reference=reference,
             )
             if result.get("submitted"):
@@ -692,6 +789,8 @@ class LiveModule(BaseModule):
         force: bool = False,
         mode: str | None = None,
         broker: str | None = None,
+        trade_broker: str | None = None,
+        quote_provider: str | None = None,
         cash: float | None = None,
         timeout: float = 20.0,
         event_timeout: float = 3.0,
@@ -703,7 +802,14 @@ class LiveModule(BaseModule):
         One-shot cancel can only cancel OMS-known active orders unless
         ``force=True`` and ``symbol`` are supplied for a raw broker cancel.
         """
-        runtime = self._runtime(mode=mode, broker=broker, ledger_dir=ledger_dir, state_dir=state_dir)
+        runtime = self._runtime(
+            mode=mode,
+            broker=broker,
+            trade_broker=trade_broker,
+            quote_provider=quote_provider,
+            ledger_dir=ledger_dir,
+            state_dir=state_dir,
+        )
         try:
             runtime.connect(paper_cash=cash)
             runtime.wait_ready(timeout=timeout)
@@ -727,6 +833,7 @@ class LiveModule(BaseModule):
         target_path: str | None = None,
         holdings: str | dict | None = None,
         prices: str | dict | None = None,
+        positions: list[dict[str, Any]] | None = None,
         date: str | None = None,
         source: str | None = None,
         session: str | None = None,
@@ -738,6 +845,8 @@ class LiveModule(BaseModule):
         route: bool = False,
         mode: str | None = None,
         broker: str | None = None,
+        trade_broker: str | None = None,
+        quote_provider: str | None = None,
         cash: float | None = None,
         timeout: float = 20.0,
         ledger_dir: str | None = None,
@@ -752,13 +861,21 @@ class LiveModule(BaseModule):
         """
         from alphapilot.systems.live.runtime import require_live_confirmation
 
-        runtime = self._runtime(mode=mode, broker=broker, ledger_dir=ledger_dir, state_dir=state_dir)
+        runtime = self._runtime(
+            mode=mode,
+            broker=broker,
+            trade_broker=trade_broker,
+            quote_provider=quote_provider,
+            ledger_dir=ledger_dir,
+            state_dir=state_dir,
+        )
         if route:
             require_live_confirmation(runtime.config, confirm_live=confirm_live)
         target = self._load_target(
             target_path=target_path,
             holdings=holdings,
             prices=prices,
+            positions=positions,
             date=date,
             source=source,
             session=session,
@@ -781,6 +898,7 @@ class LiveModule(BaseModule):
         target_path: str | None,
         holdings: str | dict | None,
         prices: str | dict | None,
+        positions: list[dict[str, Any]] | None,
         date: str | None,
         source: str | None,
         session: str | None,
@@ -790,7 +908,7 @@ class LiveModule(BaseModule):
         yaml_params: str | None,
         refresh_data: bool,
     ):
-        from alphapilot.systems.live.targets import TargetPortfolio
+        from alphapilot.systems.live.targets import TargetPortfolio, parse_target_positions
 
         if target_path:
             data = json.loads(Path(target_path).expanduser().read_text(encoding="utf-8"))
@@ -801,13 +919,15 @@ class LiveModule(BaseModule):
                 cash=data.get("cash"),
                 source=str(data.get("source") or source or "target_file"),
                 market=data.get("market"),
+                positions=parse_target_positions(data.get("positions")),
             )
-        if holdings is not None:
+        if holdings is not None or positions is not None:
             return TargetPortfolio(
                 date=str(date or "inline"),
                 holdings={str(k): float(v) for k, v in _parse_mapping(holdings).items()},
                 prices={str(k): float(v) for k, v in _parse_mapping(prices).items()},
                 source=source or "inline",
+                positions=parse_target_positions(positions),
             )
 
         from alphapilot.modules.daily_trade.module import _parse_yaml_params
@@ -836,6 +956,7 @@ class LiveModule(BaseModule):
             "live_status": self.live_status,
             "live_modes": self.live_modes,
             "live_brokers": self.live_brokers,
+            "live_quote_providers": self.live_quote_providers,
             "live_risk_status": self.live_risk_status,
             "live_ledger_events": self.live_ledger_events,
             "live_state": self.live_state,
@@ -891,6 +1012,67 @@ def _tcp_probe(host: str, port: int, timeout: float) -> tuple[bool, str]:
             return True, "reachable"
     except OSError as exc:
         return False, f"{type(exc).__name__}: {exc}"
+
+
+def _preflight_provider(name: str, *, kind: str, network: bool, timeout: float) -> dict[str, Any]:
+    if name == "paper":
+        return {
+            "name": "paper",
+            "broker": "paper",
+            "description": "In-process PaperBroker sandbox",
+            "gateway": "alphapilot.systems.live.brokers.paper:PaperBroker",
+            "gateway_importable": True,
+            "missing_env": [],
+            "network_checked": False,
+            "endpoints": [],
+            "ok": True,
+        }
+
+    from alphapilot.systems.live.brokers.registry import (
+        build_connect_setting,
+        build_quote_connect_setting,
+        gateway_importable,
+        get_broker,
+        missing_quote_setting_fields,
+        missing_setting_fields,
+        quote_provider_importable,
+    )
+
+    spec = get_broker(name)
+    if kind == "quote":
+        missing = missing_quote_setting_fields(name)
+        importable = quote_provider_importable(name)
+        build_setting = build_quote_connect_setting
+        endpoint_specs = (("quote", "行情地址", "行情端口"),)
+    else:
+        missing = missing_setting_fields(name)
+        importable = gateway_importable(name)
+        build_setting = build_connect_setting
+        endpoint_specs = (("trade", "交易地址", "交易端口"),)
+
+    result: dict[str, Any] = {
+        "name": name,
+        "broker": name,
+        "description": spec.description,
+        "gateway": spec.gateway_path,
+        "gateway_importable": importable,
+        "missing_env": missing,
+        "network_checked": False,
+        "endpoints": [],
+    }
+    if network and not missing:
+        setting = build_setting(name)
+        endpoints = []
+        for label, host_key, port_key in endpoint_specs:
+            host = setting.get(host_key)
+            port = setting.get(port_key)
+            if host and port:
+                ok, detail = _tcp_probe(str(host), int(port), timeout)
+                endpoints.append({"name": label, "host": host, "port": int(port), "ok": ok, "detail": detail})
+        result["network_checked"] = True
+        result["endpoints"] = endpoints
+    result["ok"] = importable and not missing and all(item.get("ok", True) for item in result["endpoints"])
+    return result
 
 
 def _require_daemon_live_confirmation(status: dict[str, Any], *, confirm_live: bool) -> None:

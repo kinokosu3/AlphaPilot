@@ -67,6 +67,8 @@ function mockLiveFetch() {
         config: {
           mode: "paper",
           broker: "paper",
+          trade_broker: "emt",
+          quote_provider: "emt",
           timezone: "Asia/Shanghai",
           ledger_dir: "/tmp/ledger",
           state_dir: "/tmp/state",
@@ -114,6 +116,37 @@ function mockLiveFetch() {
         },
       ]);
     }
+    if (path === "/api/live/quote-providers") {
+      return Response.json([
+        {
+          name: "paper",
+          description: "Paper quote sandbox",
+          gateway: "alphapilot.systems.live.brokers.paper:PaperBroker",
+          gateway_importable: true,
+          env_fields: [],
+          missing_env: [],
+          capabilities: { asset_classes: ["stock"], supports_tick: true },
+        },
+        {
+          name: "emt",
+          description: "东方财富证券 EMT",
+          gateway: "alphapilot.systems.live.brokers.emt:EmtGateway",
+          gateway_importable: true,
+          env_fields: ["ALPHAPILOT_LIVE_EMT_ACCOUNT"],
+          missing_env: [],
+          capabilities: {
+            asset_classes: ["stock"],
+            supports_tick: true,
+            supports_contract_query: true,
+            supports_account_query: true,
+            supports_position_query: true,
+            supports_order_query: true,
+            supports_trade_query: true,
+            supports_cancel: true,
+          },
+        },
+      ]);
+    }
     if (path.startsWith("/api/live/runtime/state")) {
       return Response.json({ exists: true, state_path: "/tmp/state/runtime_state.json", state: daemonState });
     }
@@ -145,13 +178,35 @@ function mockLiveFetch() {
     }
     if (path === "/api/live/runtime/preflight" && init?.method === "POST") {
       const body = JSON.parse(String(init.body || "{}"));
+      const trade = body.trade_broker || body.broker || "emt";
+      const quote = body.quote_provider || trade;
       return Response.json({
-        broker: body.broker || "emt",
+        broker: trade,
+        trade_broker: trade,
+        quote_provider: quote,
         description: "东方财富证券 EMT",
         gateway_importable: true,
         missing_env: [],
         network_checked: Boolean(body.network),
         endpoints: body.network ? [{ name: "quote", host: "127.0.0.1", port: 1001, ok: true, detail: "reachable" }] : [],
+        trade: {
+          name: trade,
+          broker: trade,
+          gateway_importable: true,
+          missing_env: [],
+          network_checked: Boolean(body.network),
+          endpoints: [],
+          ok: true,
+        },
+        quote: {
+          name: quote,
+          broker: quote,
+          gateway_importable: true,
+          missing_env: [],
+          network_checked: Boolean(body.network),
+          endpoints: body.network ? [{ name: "quote", host: "127.0.0.1", port: 1001, ok: true, detail: "reachable" }] : [],
+          ok: true,
+        },
         ok: true,
       });
     }
@@ -206,12 +261,16 @@ describe("LivePage", () => {
       expect(postedJson(fetchMock, "/api/live/runtime/preflight")?.network).toBe(true);
     });
     expect(postedJson(fetchMock, "/api/live/runtime/preflight")?.broker).toBe("emt");
+    expect(postedJson(fetchMock, "/api/live/runtime/preflight")?.trade_broker).toBe("emt");
+    expect(postedJson(fetchMock, "/api/live/runtime/preflight")?.quote_provider).toBe("emt");
 
     fireEvent.click(screen.getByRole("button", { name: "提交委托" }));
     await waitFor(() => {
       expect(postedJson(fetchMock, "/api/live/daemon/order")?.confirm_live).toBe(true);
     });
     expect(postedJson(fetchMock, "/api/live/daemon/order")?.symbol).toBe("SH600000");
+    expect(postedJson(fetchMock, "/api/live/daemon/order")?.product).toBe("equity");
+    expect(postedJson(fetchMock, "/api/live/daemon/order")?.offset).toBe("none");
 
     fireEvent.click(screen.getByLabelText("真实路由下单"));
     fireEvent.click(screen.getByRole("button", { name: "对账并下单" }));

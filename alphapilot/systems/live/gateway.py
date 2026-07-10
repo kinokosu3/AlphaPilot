@@ -59,6 +59,22 @@ class GatewayCallback(Protocol):
     ) -> None: ...
 
 
+@runtime_checkable
+class QuoteGateway(Protocol):
+    """Market-data adapter port.
+
+    A broker gateway can satisfy this protocol directly, but separating the type
+    lets the runtime pair one trade broker with a different quote provider later.
+    """
+
+    name: str
+
+    def register_callback(self, callback: GatewayCallback) -> None: ...
+    def connect(self, setting: dict) -> None: ...
+    def close(self) -> None: ...
+    def subscribe(self, codes: list[str]) -> None: ...
+
+
 class BrokerGateway(ABC):
     """Abstract broker adapter. Concrete brokers implement the abstract methods.
 

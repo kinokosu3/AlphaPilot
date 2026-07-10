@@ -76,8 +76,12 @@ class LiveConfig:
 
     #: One of ``RunMode.{DRY_RUN,PAPER,LIVE}``.
     mode: str = field(default_factory=lambda: _env("ALPHAPILOT_LIVE_MODE", RunMode.DRY_RUN))
-    #: Which broker gateway to use in LIVE mode (``emt`` / ``xtp`` / …).
-    broker: str = field(default_factory=lambda: _env("ALPHAPILOT_LIVE_BROKER", "paper"))
+    #: Backward-compatible alias for the trade broker.
+    broker: str | None = field(default_factory=lambda: _env("ALPHAPILOT_LIVE_BROKER", "paper"))
+    #: Which broker gateway to use for orders/account/positions in LIVE mode.
+    trade_broker: str | None = field(default_factory=lambda: os.getenv("ALPHAPILOT_LIVE_TRADE_BROKER"))
+    #: Which provider to use for market data subscriptions. Defaults to trade_broker.
+    quote_provider: str | None = field(default_factory=lambda: os.getenv("ALPHAPILOT_LIVE_QUOTE_PROVIDER"))
     #: Append-only order/trade audit ledger location.
     ledger_dir: Path = field(
         default_factory=lambda: _env_path(
@@ -94,6 +98,14 @@ class LiveConfig:
     timezone: str = field(default_factory=lambda: _env("ALPHAPILOT_TIMEZONE", "Asia/Shanghai"))
     risk: RiskLimits = field(default_factory=RiskLimits)
 
+    def __post_init__(self) -> None:
+        trade = str(self.trade_broker or self.broker or "paper").strip() or "paper"
+        quote = str(self.quote_provider or trade).strip() or trade
+        self.trade_broker = trade
+        self.quote_provider = quote
+        # Keep the public legacy field stable for old CLI/API/tests.
+        self.broker = trade
+
     @classmethod
     def load(cls) -> "LiveConfig":
         return cls()
@@ -101,7 +113,8 @@ class LiveConfig:
     def summary(self) -> str:
         return (
             "LiveConfig("
-            f"mode={self.mode}, broker={self.broker}, timezone={self.timezone}, "
+            f"mode={self.mode}, trade_broker={self.trade_broker}, "
+            f"quote_provider={self.quote_provider}, timezone={self.timezone}, "
             f"ledger_dir={self.ledger_dir}, "
             f"risk=[max_order_value={self.risk.max_order_value}, "
             f"max_position_pct={self.risk.max_position_pct}, "

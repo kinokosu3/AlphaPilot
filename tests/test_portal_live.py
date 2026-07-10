@@ -42,6 +42,12 @@ def test_live_broker_catalog_exposes_capabilities_without_secret_values(engine, 
     assert "ALPHAPILOT_LIVE_XTP_ACCOUNT" in brokers["xtp"]["env_fields"]
     assert "portal-secret-account" not in resp.text
 
+    quote_resp = client.get("/api/live/quote-providers")
+    providers = {row["name"]: row for row in quote_resp.json()}
+    assert {"paper", "emt", "xtp"} <= set(providers)
+    assert providers["paper"]["gateway_importable"] is True
+    assert "portal-secret-account" not in quote_resp.text
+
 
 def test_live_paper_full_flow(engine) -> None:
     client = _client(engine)
@@ -101,6 +107,9 @@ def test_live_runtime_control_endpoints(engine, isolated_env) -> None:
 
     preflight = client.post("/api/live/runtime/preflight", json={"broker": "xtp", "network": False}).json()
     assert preflight["broker"] == "xtp"
+    assert preflight["trade_broker"] == "xtp"
+    assert preflight["quote_provider"] == "xtp"
+    assert "trade" in preflight and "quote" in preflight
     assert preflight["network_checked"] is False
     assert "gateway_importable" in preflight
 
@@ -164,6 +173,8 @@ def test_live_runtime_preflight_can_probe_configured_network_endpoints(engine, m
         trade_sock.close()
 
     assert preflight["broker"] == "emt"
+    assert preflight["trade"]["name"] == "emt"
+    assert preflight["quote"]["name"] == "emt"
     assert preflight["network_checked"] is True
     assert preflight["missing_env"] == []
     assert {item["name"]: item["ok"] for item in preflight["endpoints"]} == {"quote": True, "trade": True}

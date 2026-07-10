@@ -82,7 +82,7 @@ class LiveTimingRunner:
         self._stopped = False
         self._paused = False
         self.engine.add_tick_listener(self.on_tick)
-        self.engine.gateway.subscribe(self.symbols)
+        self.engine.subscribe_market_data(self.symbols)
         self._started = True
 
     def pause(self) -> dict[str, Any]:

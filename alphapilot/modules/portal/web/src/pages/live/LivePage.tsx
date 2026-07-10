@@ -16,6 +16,7 @@ import type {
   LiveLedgerEvents,
   LiveOrder,
   LivePreflight,
+  LiveQuoteProviderSpec,
   LiveRiskStatus,
   LiveRuntimeState,
   LiveStatus,
@@ -27,17 +28,30 @@ export function LivePage() {
   const confirm = useConfirm();
   const status = useAsync(() => api.get<LiveStatus>("/api/live/status"), []);
   const brokerCatalog = useAsync(() => api.get<LiveBrokerSpec[]>("/api/live/brokers"), []);
+  const quoteProviderCatalog = useAsync(() => api.get<LiveQuoteProviderSpec[]>("/api/live/quote-providers"), []);
   const { run } = useAction();
   const [runtimeMode, setRuntimeMode] = useState("live");
   const [runtimeBroker, setRuntimeBroker] = useState("");
+  const [runtimeQuoteProvider, setRuntimeQuoteProvider] = useState("");
   const selectedRuntimeBroker = runtimeMode === "live" ? runtimeBroker.trim() : "paper";
+  const selectedRuntimeQuoteProvider = runtimeMode === "live" ? (runtimeQuoteProvider.trim() || selectedRuntimeBroker) : "paper";
   const runtimeState = useAsync(
-    () => api.get<LiveRuntimeState>(`/api/live/runtime/state${qs({ mode: runtimeMode, broker: selectedRuntimeBroker })}`),
-    [runtimeMode, selectedRuntimeBroker],
+    () => api.get<LiveRuntimeState>(`/api/live/runtime/state${qs({
+      mode: runtimeMode,
+      broker: selectedRuntimeBroker,
+      trade_broker: selectedRuntimeBroker,
+      quote_provider: selectedRuntimeQuoteProvider,
+    })}`),
+    [runtimeMode, selectedRuntimeBroker, selectedRuntimeQuoteProvider],
   );
   const daemonStatus = useAsync(
-    () => api.get<LiveDaemonStatus>(`/api/live/daemon/status${qs({ mode: runtimeMode, broker: selectedRuntimeBroker })}`),
-    [runtimeMode, selectedRuntimeBroker],
+    () => api.get<LiveDaemonStatus>(`/api/live/daemon/status${qs({
+      mode: runtimeMode,
+      broker: selectedRuntimeBroker,
+      trade_broker: selectedRuntimeBroker,
+      quote_provider: selectedRuntimeQuoteProvider,
+    })}`),
+    [runtimeMode, selectedRuntimeBroker, selectedRuntimeQuoteProvider],
   );
   const [preflight, setPreflight] = useState<LivePreflight | null>(null);
   const [preflightNetwork, setPreflightNetwork] = useState(false);
@@ -45,18 +59,26 @@ export function LivePage() {
   const [ledgerReference, setLedgerReference] = useState("");
   const [ledgerLimit, setLedgerLimit] = useState("25");
   const riskStatus = useAsync(
-    () => api.get<LiveRiskStatus>(`/api/live/risk/status${qs({ mode: runtimeMode, broker: selectedRuntimeBroker, tail: 10 })}`),
-    [runtimeMode, selectedRuntimeBroker],
+    () => api.get<LiveRiskStatus>(`/api/live/risk/status${qs({
+      mode: runtimeMode,
+      broker: selectedRuntimeBroker,
+      trade_broker: selectedRuntimeBroker,
+      quote_provider: selectedRuntimeQuoteProvider,
+      tail: 10,
+    })}`),
+    [runtimeMode, selectedRuntimeBroker, selectedRuntimeQuoteProvider],
   );
   const ledgerEvents = useAsync(
     () => api.get<LiveLedgerEvents>(`/api/live/ledger/events${qs({
       mode: runtimeMode,
       broker: selectedRuntimeBroker,
+      trade_broker: selectedRuntimeBroker,
+      quote_provider: selectedRuntimeQuoteProvider,
       kind: ledgerKind.trim(),
       reference: ledgerReference.trim(),
       limit: Number(ledgerLimit) || 25,
     })}`),
-    [runtimeMode, selectedRuntimeBroker, ledgerKind, ledgerReference, ledgerLimit],
+    [runtimeMode, selectedRuntimeBroker, selectedRuntimeQuoteProvider, ledgerKind, ledgerReference, ledgerLimit],
   );
   const [daemonSymbols, setDaemonSymbols] = useState("600000");
   const [daemonTimingStrategy, setDaemonTimingStrategy] = useState("");
@@ -67,6 +89,9 @@ export function LivePage() {
   const [daemonOrderVol, setDaemonOrderVol] = useState("100");
   const [daemonOrderPrice, setDaemonOrderPrice] = useState("");
   const [daemonOrderType, setDaemonOrderType] = useState("limit");
+  const [daemonOrderExchange, setDaemonOrderExchange] = useState("");
+  const [daemonOrderProduct, setDaemonOrderProduct] = useState("equity");
+  const [daemonOrderOffset, setDaemonOrderOffset] = useState("none");
   const [daemonOrderRef, setDaemonOrderRef] = useState("portal_manual");
   const daemonTargetJson = useJsonInput(
     '{\n  "holdings": { "SH600000": 1000 },\n  "prices": { "SH600000": 10.0 }\n}',
@@ -83,21 +108,36 @@ export function LivePage() {
 
   const cfg = status.data?.config;
   const liveBrokerOptions = useMemo(() => brokerCatalog.data || [], [brokerCatalog.data]);
+  const quoteProviderOptions = useMemo(() => quoteProviderCatalog.data || [], [quoteProviderCatalog.data]);
   const selectedBrokerSpec = liveBrokerOptions.find((item) => item.name === selectedRuntimeBroker);
+  const selectedQuoteProviderSpec = quoteProviderOptions.find((item) => item.name === selectedRuntimeQuoteProvider);
   const running = Boolean(status.data?.running);
   const state = status.data?.state;
 
   useEffect(() => {
     if (runtimeBroker.trim() || !liveBrokerOptions.length) return;
-    const configured = cfg?.broker && cfg.broker !== "paper" ? cfg.broker : "";
+    const configured = (cfg?.trade_broker || cfg?.broker) && (cfg?.trade_broker || cfg?.broker) !== "paper" ? (cfg?.trade_broker || cfg?.broker || "") : "";
     const configuredBroker = configured ? liveBrokerOptions.find((item) => item.name === configured) : undefined;
     const importableBroker = liveBrokerOptions.find((item) => item.gateway_importable);
     setRuntimeBroker((configuredBroker || importableBroker || liveBrokerOptions[0]).name);
-  }, [cfg?.broker, liveBrokerOptions, runtimeBroker]);
+  }, [cfg?.broker, cfg?.trade_broker, liveBrokerOptions, runtimeBroker]);
+
+  useEffect(() => {
+    if (runtimeMode !== "live") {
+      setRuntimeQuoteProvider("");
+      return;
+    }
+    if (runtimeQuoteProvider.trim() || !quoteProviderOptions.length) return;
+    const configured = cfg?.quote_provider && cfg.quote_provider !== "paper" ? cfg.quote_provider : "";
+    const configuredProvider = configured ? quoteProviderOptions.find((item) => item.name === configured) : undefined;
+    const matchingTrade = selectedRuntimeBroker ? quoteProviderOptions.find((item) => item.name === selectedRuntimeBroker) : undefined;
+    const importableProvider = quoteProviderOptions.find((item) => item.gateway_importable);
+    setRuntimeQuoteProvider((configuredProvider || matchingTrade || importableProvider || quoteProviderOptions[0]).name);
+  }, [cfg?.quote_provider, quoteProviderOptions, runtimeMode, runtimeQuoteProvider, selectedRuntimeBroker]);
 
   useEffect(() => {
     setPreflight(null);
-  }, [runtimeMode, selectedRuntimeBroker, preflightNetwork]);
+  }, [runtimeMode, selectedRuntimeBroker, selectedRuntimeQuoteProvider, preflightNetwork]);
 
   const refreshLiveOps = async () => {
     await Promise.all([runtimeState.refresh(), daemonStatus.refresh(), riskStatus.refresh(), ledgerEvents.refresh()]);
@@ -107,6 +147,8 @@ export function LivePage() {
     run(async () => {
       const result = await api.post<LivePreflight>("/api/live/runtime/preflight", {
         broker: selectedRuntimeBroker || undefined,
+        trade_broker: selectedRuntimeBroker || undefined,
+        quote_provider: selectedRuntimeQuoteProvider || undefined,
         network: preflightNetwork,
       });
       setPreflight(result);
@@ -118,6 +160,8 @@ export function LivePage() {
       await api.post<LiveConnectResult>("/api/live/runtime/connect", {
         mode: runtimeMode,
         broker: selectedRuntimeBroker || undefined,
+        trade_broker: selectedRuntimeBroker || undefined,
+        quote_provider: selectedRuntimeQuoteProvider || undefined,
         timeout: 30,
       });
       await refreshLiveOps();
@@ -131,6 +175,8 @@ export function LivePage() {
       await api.post("/api/live/daemon/start", {
         mode: runtimeMode,
         broker: selectedRuntimeBroker || undefined,
+        trade_broker: selectedRuntimeBroker || undefined,
+        quote_provider: selectedRuntimeQuoteProvider || undefined,
         symbols: daemonSymbols,
         interval: 2,
         timeout: 30,
@@ -234,6 +280,7 @@ export function LivePage() {
   };
 
   const submitDaemonOrder = async () => {
+    if (daemonOrderProduct === "futures") return;
     if (runtimeMode === "live" && !(await confirm({ message: t("liveDaemonOrderConfirm"), danger: true }))) return;
     await run(async () => {
       if (!daemonOrderCode.trim()) throw new Error(t("liveCode"));
@@ -243,6 +290,9 @@ export function LivePage() {
         volume: Number(daemonOrderVol),
         price: Number(daemonOrderPrice) || 0,
         order_type: daemonOrderType,
+        exchange: daemonOrderExchange.trim() || undefined,
+        product: daemonOrderProduct,
+        offset: daemonOrderOffset,
         reference: daemonOrderRef.trim() || "portal_manual",
         wait: true,
         timeout: 5,
@@ -342,6 +392,12 @@ export function LivePage() {
         selectedRuntimeBroker={selectedRuntimeBroker}
         liveBrokerOptions={liveBrokerOptions}
         selectedBrokerSpec={selectedBrokerSpec}
+        quoteProviderOptions={quoteProviderOptions}
+        selectedRuntimeQuoteProvider={selectedRuntimeQuoteProvider}
+        runtimeQuoteProvider={runtimeQuoteProvider}
+        setRuntimeQuoteProvider={setRuntimeQuoteProvider}
+        selectedQuoteProviderSpec={selectedQuoteProviderSpec}
+        quoteProviderCatalog={quoteProviderCatalog}
         brokerCatalog={brokerCatalog}
         preflight={preflight}
         preflightNetwork={preflightNetwork}
@@ -371,6 +427,12 @@ export function LivePage() {
         setDaemonOrderPrice={setDaemonOrderPrice}
         daemonOrderType={daemonOrderType}
         setDaemonOrderType={setDaemonOrderType}
+        daemonOrderExchange={daemonOrderExchange}
+        setDaemonOrderExchange={setDaemonOrderExchange}
+        daemonOrderProduct={daemonOrderProduct}
+        setDaemonOrderProduct={setDaemonOrderProduct}
+        daemonOrderOffset={daemonOrderOffset}
+        setDaemonOrderOffset={setDaemonOrderOffset}
         daemonOrderRef={daemonOrderRef}
         setDaemonOrderRef={setDaemonOrderRef}
         daemonTargetJson={daemonTargetJson}

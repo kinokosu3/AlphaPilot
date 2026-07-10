@@ -41,7 +41,7 @@ class LiveSystem(BaseSystem):
         if self.config.mode == RunMode.LIVE:
             from alphapilot.systems.live.brokers.registry import create_gateway
 
-            return create_gateway(self.config.broker)
+            return create_gateway(self.config.trade_broker or self.config.broker)
         from alphapilot.systems.live.brokers.paper import PaperBroker
 
         return PaperBroker()
@@ -85,6 +85,8 @@ class LiveSystem(BaseSystem):
         *,
         mode: str | None = None,
         broker: str | None = None,
+        trade_broker: str | None = None,
+        quote_provider: str | None = None,
         ledger_dir: str | None = None,
         state_dir: str | None = None,
         now_fn=None,
@@ -102,6 +104,8 @@ class LiveSystem(BaseSystem):
             self.config,
             mode=mode,
             broker=broker,
+            trade_broker=trade_broker,
+            quote_provider=quote_provider,
             ledger_dir=ledger_dir,
             state_dir=state_dir,
         )
@@ -121,6 +125,8 @@ class LiveSystem(BaseSystem):
         return {
             "mode": cfg.mode,
             "broker": cfg.broker,
+            "trade_broker": cfg.trade_broker,
+            "quote_provider": cfg.quote_provider,
             "timezone": cfg.timezone,
             "ledger_dir": str(cfg.ledger_dir),
             "state_dir": str(cfg.state_dir),

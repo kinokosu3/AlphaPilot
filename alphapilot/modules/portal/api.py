@@ -1445,14 +1445,31 @@ def create_app(
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
+    @app.get("/api/live/quote-providers")
+    def live_quote_providers() -> list[dict[str, Any]]:
+        try:
+            return _jsonable(_live_module().live_quote_providers())
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
     @app.get("/api/live/runtime/state")
     def live_runtime_state(
         mode: str | None = Query(default=None),
         broker: str | None = Query(default=None),
+        trade_broker: str | None = Query(default=None),
+        quote_provider: str | None = Query(default=None),
         state_dir: str | None = Query(default=None),
     ) -> dict[str, Any]:
         try:
-            return _jsonable(_live_module().live_state(mode=mode, broker=broker, state_dir=state_dir))
+            return _jsonable(
+                _live_module().live_state(
+                    mode=mode,
+                    broker=broker,
+                    trade_broker=trade_broker,
+                    quote_provider=quote_provider,
+                    state_dir=state_dir,
+                )
+            )
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
@@ -1462,6 +1479,8 @@ def create_app(
             return _jsonable(
                 _live_module().live_preflight(
                     broker=payload.get("broker"),
+                    trade_broker=payload.get("trade_broker"),
+                    quote_provider=payload.get("quote_provider"),
                     network=bool(payload.get("network", False)),
                     timeout=float(payload.get("timeout") or 3.0),
                 )
@@ -1476,6 +1495,8 @@ def create_app(
                 _live_module().live_connect(
                     mode=payload.get("mode"),
                     broker=payload.get("broker"),
+                    trade_broker=payload.get("trade_broker"),
+                    quote_provider=payload.get("quote_provider"),
                     cash=payload.get("cash"),
                     timeout=float(payload.get("timeout") or 20.0),
                     ledger_dir=payload.get("ledger_dir"),
@@ -1489,6 +1510,8 @@ def create_app(
     def live_risk_status(
         mode: str | None = Query(default=None),
         broker: str | None = Query(default=None),
+        trade_broker: str | None = Query(default=None),
+        quote_provider: str | None = Query(default=None),
         state_dir: str | None = Query(default=None),
         ledger_dir: str | None = Query(default=None),
         tail: int = Query(default=20),
@@ -1498,6 +1521,8 @@ def create_app(
                 _live_module().live_risk_status(
                     mode=mode,
                     broker=broker,
+                    trade_broker=trade_broker,
+                    quote_provider=quote_provider,
                     state_dir=state_dir,
                     ledger_dir=ledger_dir,
                     tail=tail,
@@ -1516,6 +1541,8 @@ def create_app(
         limit: int = Query(default=50),
         mode: str | None = Query(default=None),
         broker: str | None = Query(default=None),
+        trade_broker: str | None = Query(default=None),
+        quote_provider: str | None = Query(default=None),
         ledger_dir: str | None = Query(default=None),
         state_dir: str | None = Query(default=None),
     ) -> dict[str, Any]:
@@ -1530,6 +1557,8 @@ def create_app(
                     limit=limit,
                     mode=mode,
                     broker=broker,
+                    trade_broker=trade_broker,
+                    quote_provider=quote_provider,
                     ledger_dir=ledger_dir,
                     state_dir=state_dir,
                 )
@@ -1541,10 +1570,20 @@ def create_app(
     def live_daemon_status(
         mode: str | None = Query(default=None),
         broker: str | None = Query(default=None),
+        trade_broker: str | None = Query(default=None),
+        quote_provider: str | None = Query(default=None),
         state_dir: str | None = Query(default=None),
     ) -> dict[str, Any]:
         try:
-            return _jsonable(_live_module().live_daemon_status(mode=mode, broker=broker, state_dir=state_dir))
+            return _jsonable(
+                _live_module().live_daemon_status(
+                    mode=mode,
+                    broker=broker,
+                    trade_broker=trade_broker,
+                    quote_provider=quote_provider,
+                    state_dir=state_dir,
+                )
+            )
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
@@ -1555,6 +1594,8 @@ def create_app(
                 _live_module().live_daemon_start(
                     mode=payload.get("mode"),
                     broker=payload.get("broker"),
+                    trade_broker=payload.get("trade_broker"),
+                    quote_provider=payload.get("quote_provider"),
                     symbols=payload.get("symbols"),
                     cash=payload.get("cash"),
                     interval=float(payload.get("interval") or 2.0),
@@ -1740,6 +1781,9 @@ def create_app(
                     volume=float(payload["volume"]),
                     price=float(payload.get("price") or 0.0),
                     order_type=str(payload.get("order_type") or "limit"),
+                    exchange=payload.get("exchange"),
+                    offset=str(payload.get("offset") or "none"),
+                    product=str(payload.get("product") or "equity"),
                     state_dir=payload.get("state_dir"),
                     wait=bool(payload.get("wait", False)),
                     timeout=float(payload.get("timeout") or 5.0),
@@ -1759,6 +1803,7 @@ def create_app(
                     target_path=payload.get("target_path"),
                     holdings=payload.get("holdings"),
                     prices=payload.get("prices"),
+                    positions=payload.get("positions"),
                     date=payload.get("date"),
                     source=payload.get("source") or "portal_daemon",
                     session=payload.get("session"),
