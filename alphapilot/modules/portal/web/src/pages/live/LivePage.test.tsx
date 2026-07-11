@@ -14,7 +14,7 @@ function renderLivePage() {
   );
 }
 
-function mockLiveFetch(options: { alive?: boolean; accountMetrics?: boolean } = {}) {
+function mockLiveFetch(options: { alive?: boolean; accountMetrics?: boolean; daemonMode?: "paper" | "live" } = {}) {
   const alive = options.alive ?? true;
   const daemonState = {
     engine: {
@@ -51,6 +51,7 @@ function mockLiveFetch(options: { alive?: boolean; accountMetrics?: boolean } = 
     trades: [{ trade_id: "trade-1", code: "600000", side: "buy", price: 10, volume: 100 }],
   };
   const daemonStatus = {
+    mode: options.daemonMode,
     exists: true,
     path: "/tmp/daemon.json",
     alive,
@@ -365,6 +366,7 @@ describe("LivePage", () => {
 
     const code = screen.getByLabelText("代码");
     fireEvent.change(code, { target: { value: "SH600000" } });
+    fireEvent.change(screen.getByLabelText("价格"), { target: { value: "10.12" } });
     fireEvent.click(screen.getByRole("button", { name: "提交委托" }));
     await waitFor(() => expect(postedJson(fetchMock, "/api/live/daemon/order")?.confirm_live).toBe(true));
     expect(postedJson(fetchMock, "/api/live/daemon/order")?.symbol).toBe("SH600000");
@@ -389,6 +391,17 @@ describe("LivePage", () => {
     fireEvent.click(screen.getByRole("button", { name: "停止 daemon" }));
     await waitFor(() => expect(screen.getByRole("tab", { name: "模拟 PAPER" })).toBeEnabled());
     expect(fetchMock.mock.calls.some(([input]) => String(input) === "/api/live/daemon/stop")).toBe(true);
+  });
+
+  it("blocks invalid order values before they reach the daemon", async () => {
+    const fetchMock = mockLiveFetch();
+    renderLivePage();
+    await screen.findByText("手工交易");
+    fireEvent.change(screen.getByLabelText("代码"), { target: { value: "SH600000" } });
+    fireEvent.change(screen.getByLabelText("数量"), { target: { value: "0" } });
+    fireEvent.click(screen.getByRole("button", { name: "提交委托" }));
+    expect(await screen.findByText("order volume must be a positive integer")).toBeInTheDocument();
+    expect(postedJson(fetchMock, "/api/live/daemon/order")).toBeNull();
   });
 
   it("starts the Paper daemon with the selected initial cash", async () => {
@@ -432,6 +445,16 @@ describe("LivePage", () => {
     expect(screen.getByLabelText("真实路由下单")).not.toBeChecked();
     fireEvent.click(screen.getByRole("tab", { name: "普通委托" }));
     expect(screen.getByLabelText("代码")).toHaveValue("");
+  });
+
+  it("corrects the remembered workspace to the daemon's actual mode", async () => {
+    window.localStorage.setItem("portal_live_workspace", "paper");
+    mockLiveFetch({ daemonMode: "live" });
+    renderLivePage();
+    await waitFor(() => expect(screen.getByRole("tab", { name: "实盘 LIVE" })).toHaveAttribute("aria-selected", "true"));
+    expect(window.localStorage.getItem("portal_live_workspace")).toBe("live");
+    fireEvent.click(screen.getByRole("tab", { name: "目标仓位" }));
+    expect(screen.getByLabelText("真实路由下单")).not.toBeChecked();
   });
 
   it("stops polling the previous environment after a workspace switch", async () => {

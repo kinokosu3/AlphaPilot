@@ -44,14 +44,14 @@ export function useSerialPolling<T>(
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const inFlight = useRef(false);
+  const inFlightGeneration = useRef<number | null>(null);
   const mounted = useRef(true);
   const generation = useRef(0);
 
   const refresh = useCallback(async () => {
-    if (inFlight.current) return;
-    inFlight.current = true;
     const requestGeneration = generation.current;
+    if (inFlightGeneration.current === requestGeneration) return;
+    inFlightGeneration.current = requestGeneration;
     try {
       const next = await loader();
       if (mounted.current && requestGeneration === generation.current) {
@@ -63,8 +63,8 @@ export function useSerialPolling<T>(
         setError(err instanceof Error ? err.message : String(err));
       }
     } finally {
-      inFlight.current = false;
-      if (mounted.current) setLoading(false);
+      if (inFlightGeneration.current === requestGeneration) inFlightGeneration.current = null;
+      if (mounted.current && requestGeneration === generation.current) setLoading(false);
     }
   }, deps);
 
@@ -99,6 +99,32 @@ export function useSerialPolling<T>(
   return { data, error, loading, refresh };
 }
 
+/**
+ * Sequence arbitrary event-driven requests (detail pickers, symbol lists, etc.).
+ * The request still settles normally, but callers can only commit a response
+ * when ``current`` is true, preventing an older response from overwriting the
+ * user's latest selection.
+ */
+export function useLatestRequest() {
+  const sequence = useRef(0);
+  const mounted = useRef(true);
+
+  useEffect(() => () => {
+    mounted.current = false;
+    sequence.current += 1;
+  }, []);
+
+  return useCallback(async <T>(loader: () => Promise<T>): Promise<{ current: boolean; data?: T; error?: unknown }> => {
+    const request = ++sequence.current;
+    try {
+      const data = await loader();
+      return { current: mounted.current && request === sequence.current, data };
+    } catch (error) {
+      return { current: mounted.current && request === sequence.current, error };
+    }
+  }, []);
+}
+
 export function useJsonInput(initial = "{}") {
   const [raw, setRaw] = useState(initial);
   const parse = () => {
@@ -116,10 +142,28 @@ export function useParamForm(specs: FieldSpec[], advancedJson = "{}") {
   const [values, setValues] = useState<Record<string, FieldValue>>(() => defaultValuesFor(specs));
   const [errors, setErrors] = useState<Record<string, string>>({});
 
-  const signature = specs.map((field) => `${field.key}:${String(field.defaultValue ?? "")}`).join("|");
+  const signature = specs.map((field) => [
+    field.key,
+    String(field.defaultValue ?? ""),
+    (field.options || []).map((option) => String(option.value)).join(","),
+  ].join(":")).join("|");
 
   useEffect(() => {
-    setValues(defaultValuesFor(specs));
+    const defaults = defaultValuesFor(specs);
+    setValues((current) => {
+      const next: Record<string, FieldValue> = {};
+      for (const field of specs) {
+        let value = Object.prototype.hasOwnProperty.call(current, field.key) ? current[field.key] : defaults[field.key];
+        if (field.type === "select" && field.options?.length) {
+          const isAllowed = (candidate: FieldValue) => field.options?.some((option) => String(option.value) === String(candidate));
+          if (!isAllowed(value)) {
+            value = isAllowed(defaults[field.key]) ? defaults[field.key] : field.options[0].value;
+          }
+        }
+        next[field.key] = value;
+      }
+      return next;
+    });
     setErrors({});
   }, [signature]);
 

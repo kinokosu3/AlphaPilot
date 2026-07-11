@@ -1,7 +1,7 @@
 import { api, Factor, Job, JobProgress, qs, Schedule } from "./api";
 import { Alert, AsyncButton, DataTable, DynamicForm, HybridJsonEditor, InfoDot, JobsPanel, JsonTextArea, PageTitle, PanelHelp, ProgressBar, RefreshButton, Spinner, StatusPill, Tabs, Tooltip, useConfirm } from "./components";
 import { BacktestDetail, BacktestDetailData, LeaderboardPanel } from "./backtestDetail";
-import { useAsync, useJsonInput, useParamForm } from "./hooks";
+import { useAsync, useJsonInput, useLatestRequest, useParamForm } from "./hooks";
 import { useI18n } from "./i18n";
 import { SessionOverview } from "./pages/dailyTrade/SessionOverview";
 import type { TradeSessionDetail, TradeSessionManifest } from "./pages/dailyTrade/types";
@@ -20,6 +20,7 @@ import {
   sessionRunSpecs,
   strategyBacktestSpecs,
   timingBacktestSpecs,
+  validateParams,
   withStrategyOptions,
   withInstrumentSetOptions,
 } from "./paramSpecs";
@@ -117,6 +118,7 @@ function mergeTimingAdvanced(base: Record<string, unknown>, advanced: Record<str
 
 export function MiningPage() {
   const { t } = useI18n();
+  const toast = useToast();
   const confirm = useConfirm();
   const instrumentSets = useAsync(() => api.get<{ sets: string[] }>("/api/data/instrument-sets"), []);
   const poolNames = instrumentSets.data?.sets || [];
@@ -128,6 +130,8 @@ export function MiningPage() {
   const afForm = useParamForm(afSpecs, afAdvanced.raw);
   const sessions = useAsync(() => api.get<Array<Record<string, unknown>>>("/api/mining/sessions"), []);
   const { busy, run } = useAction();
+  const latestSession = useLatestRequest();
+  const latestSessionFile = useLatestRequest();
   const [sessionDetail, setSessionDetail] = useState<Record<string, unknown> | null>(null);
   const [sessionFile, setSessionFile] = useState<Record<string, unknown> | null>(null);
 
@@ -147,18 +151,35 @@ export function MiningPage() {
     }, t("started"));
   }
 
-  async function openSession(name: string) {
-    setSessionDetail(await api.get(`/api/mining/sessions/${encodeURIComponent(name)}`));
+  function openSession(name: string) {
+    void latestSessionFile(() => Promise.resolve(null));
     setSessionFile(null);
+    void latestSession(() => api.get<Record<string, unknown>>(`/api/mining/sessions/${encodeURIComponent(name)}`))
+      .then((result) => {
+        if (!result.current) return;
+        if (result.error) throw result.error;
+        setSessionDetail(result.data || null);
+        setSessionFile(null);
+      })
+      .catch((error) => toast.error(error instanceof Error ? error.message : String(error)));
   }
 
-  async function openSessionFile(path: string) {
+  function openSessionFile(path: string) {
     if (!sessionDetail?.name) return;
-    setSessionFile(await api.get(`/api/mining/sessions/${encodeURIComponent(String(sessionDetail.name))}/files/${encodeURIComponent(path)}`));
+    const sessionName = String(sessionDetail.name);
+    void latestSessionFile(() => api.get<Record<string, unknown>>(`/api/mining/sessions/${encodeURIComponent(sessionName)}/files/${encodeURIComponent(path)}`))
+      .then((result) => {
+        if (!result.current) return;
+        if (result.error) throw result.error;
+        setSessionFile(result.data || null);
+      })
+      .catch((error) => toast.error(error instanceof Error ? error.message : String(error)));
   }
 
   async function deleteSession(name: string) {
     if (!(await confirm({ message: `${t("delete")} ${name}?`, danger: true }))) return;
+    void latestSession(() => Promise.resolve(null));
+    void latestSessionFile(() => Promise.resolve(null));
     void run(async () => {
       await api.delete(`/api/mining/sessions/${encodeURIComponent(name)}`);
       setSessionDetail(null);
@@ -275,6 +296,7 @@ export function MiningPage() {
 
 export function BacktestPage() {
   const { t } = useI18n();
+  const toast = useToast();
   const confirm = useConfirm();
   const instrumentSets = useAsync(() => api.get<{ sets: string[] }>("/api/data/instrument-sets"), []);
   const poolNames = instrumentSets.data?.sets || [];
@@ -291,6 +313,7 @@ export function BacktestPage() {
   const list = useAsync(() => api.get<Array<Record<string, unknown>>>("/api/backtests"), []);
   const [detail, setDetail] = useState<BacktestDetailData | null>(null);
   const { busy, run } = useAction();
+  const latestBacktest = useLatestRequest();
 
   function startFactorBacktest() {
     void run(async () => {
@@ -306,12 +329,19 @@ export function BacktestPage() {
     }, t("started"));
   }
 
-  async function open(workspaceId: string) {
-    setDetail(await api.get<BacktestDetailData>(`/api/backtests/${encodeURIComponent(workspaceId)}`));
+  function open(workspaceId: string) {
+    void latestBacktest(() => api.get<BacktestDetailData>(`/api/backtests/${encodeURIComponent(workspaceId)}`))
+      .then((result) => {
+        if (!result.current) return;
+        if (result.error) throw result.error;
+        if (result.data) setDetail(result.data);
+      })
+      .catch((error) => toast.error(error instanceof Error ? error.message : String(error)));
   }
 
   async function deleteWorkspace(workspaceId: string) {
     if (!(await confirm({ message: `${t("delete")} ${workspaceId}?`, danger: true }))) return;
+    void latestBacktest(() => Promise.resolve(null));
     void run(async () => {
       await api.delete(`/api/backtests/${encodeURIComponent(workspaceId)}`);
       if (detail?.workspace_id === workspaceId) setDetail(null);
@@ -423,7 +453,9 @@ export function TimingPage() {
   function parseTimingPayload() {
     const base = form.parse();
     const extra = advanced.parse();
-    return mergeTimingAdvanced(base, extra);
+    const payload = mergeTimingAdvanced(base, extra);
+    validateParams(payload);
+    return payload;
   }
 
   function previewSignals() {
@@ -448,7 +480,9 @@ export function TimingPage() {
     if (!activeJob?.job_id || activeJob.status !== "running") return;
     const jobId = activeJob.job_id;
     let alive = true;
+    let timer: number | undefined;
     async function poll() {
+      let terminal = false;
       try {
         const next = await api.get<JobProgress>(`/api/jobs/${jobId}/progress`);
         if (!alive) return;
@@ -457,6 +491,7 @@ export function TimingPage() {
           const loaded = await api.get<TimingDetailPayload>(`/api/timing/jobs/${jobId}/detail`);
           if (alive) setDetail(loaded);
         }
+        terminal = ["succeeded", "failed", "cancelled", "lost"].includes(String(next.status));
         if (!alive) return;
         setActiveJob((current) => current && current.job_id === jobId
           ? { ...current, status: String(next.status || current.status), progress: next }
@@ -471,13 +506,14 @@ export function TimingPage() {
           message: err instanceof Error ? err.message : String(err),
         });
         setActiveJob((current) => current && current.job_id === jobId ? { ...current, status: "failed" } : current);
+        terminal = true;
       }
+      if (alive && !terminal) timer = window.setTimeout(poll, 3000);
     }
     void poll();
-    const id = window.setInterval(poll, 3000);
     return () => {
       alive = false;
-      window.clearInterval(id);
+      if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [activeJob?.job_id, activeJob?.status]);
 
@@ -1052,19 +1088,23 @@ function SymbolPicker({ onAdd, selectedText }: { onAdd: (symbols: string[]) => v
   const [source, setSource] = useState("baostock_cn");
   const [symbols, setSymbols] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [checked, setChecked] = useState<Set<string>>(new Set());
+  const latestSymbols = useLatestRequest();
 
   async function load(src = source) {
     setLoading(true);
-    try {
-      const result = await api.get<Record<string, string[]>>(`/api/data/symbols${qs({ source: src })}`);
-      setSymbols(Array.from(new Set(Object.values(result).flat())).sort());
-    } catch {
+    setError("");
+    const result = await latestSymbols(() => api.get<Record<string, string[]>>(`/api/data/symbols${qs({ source: src })}`));
+    if (!result.current) return;
+    setLoading(false);
+    if (result.error) {
       setSymbols([]);
-    } finally {
-      setLoading(false);
+      setError(result.error instanceof Error ? result.error.message : String(result.error));
+      return;
     }
+    setSymbols(Array.from(new Set(Object.values(result.data || {}).flat())).sort());
   }
   useEffect(() => {
     void load();
@@ -1108,6 +1148,8 @@ function SymbolPicker({ onAdd, selectedText }: { onAdd: (symbols: string[]) => v
       </div>
       {loading ? (
         <div className="empty loading-row"><Spinner /> {t("loading")}</div>
+      ) : error ? (
+        <div className="empty"><Alert tone="error">{error}</Alert></div>
       ) : symbols.length === 0 ? (
         <div className="empty">{t("spNoDownloaded")}</div>
       ) : (
@@ -1143,18 +1185,24 @@ function StockPoolManager() {
   const [csv, setCsv] = useState("");
   const [addText, setAddText] = useState("");
   const [renameTo, setRenameTo] = useState("");
+  const latestPoolDetail = useLatestRequest();
 
   async function loadDetail(poolName: string) {
     setSelected(poolName);
+    const result = await latestPoolDetail(() => poolName
+      ? callPool<PoolDetail>("pool_show", { name: poolName })
+      : Promise.resolve(null));
+    if (!result.current) return;
     if (!poolName) {
       setDetail(null);
       return;
     }
-    try {
-      setDetail(await callPool<PoolDetail>("pool_show", { name: poolName }));
-    } catch {
+    if (result.error) {
       setDetail(null);
+      toast.error(result.error instanceof Error ? result.error.message : String(result.error));
+      return;
     }
+    setDetail(result.data || null);
   }
 
   function reportExtra(r: PoolReport): string {
@@ -1218,8 +1266,7 @@ function StockPoolManager() {
     void run(async () => {
       await callPool("pool_delete", { name: poolName });
       if (selected === poolName) {
-        setSelected("");
-        setDetail(null);
+        await loadDetail("");
       }
       await pools.refresh();
     }, t("spDeleted"));
@@ -1333,34 +1380,46 @@ export function MarketPage() {
   const [dropDates, setDropDates] = useState("");
   const [applyTarget, setApplyTarget] = useState("forward");
   const { busy, run } = useAction();
+  const latestMarketSymbols = useLatestRequest();
+  const latestManageSymbols = useLatestRequest();
 
   React.useEffect(() => {
     if (!activeDataJob?.job_id) return;
     let alive = true;
+    let timer: number | undefined;
     const poll = async () => {
+      let terminal = false;
       try {
         const progress = await api.get<JobProgress>(`/api/jobs/${activeDataJob.job_id}/progress`);
         if (!alive) return;
         setDataProgress(progress);
         if (progress.status && ["succeeded", "failed", "cancelled", "lost"].includes(progress.status)) {
+          terminal = true;
           await dataJobs.refresh();
+          if (alive) setActiveDataJob(null);
         }
       } catch (err) {
         if (alive) setDataMessage(err instanceof Error ? err.message : String(err));
       }
+      if (alive && !terminal) timer = window.setTimeout(poll, 2000);
     };
     void poll();
-    const id = window.setInterval(poll, 2000);
     return () => {
       alive = false;
-      window.clearInterval(id);
+      if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [activeDataJob?.job_id]);
 
-  async function loadSymbols(path: string) {
+  function loadSymbols(path: string) {
     setDataDir(path);
     setKline(null);
-    setSymbols(await api.get<string[]>(`/api/market/symbols${qs({ data_dir: path })}`));
+    void latestMarketSymbols(() => api.get<string[]>(`/api/market/symbols${qs({ data_dir: path })}`))
+      .then((result) => {
+        if (!result.current) return;
+        if (result.error) throw result.error;
+        setSymbols(result.data || []);
+      })
+      .catch((error) => setDataMessage(error instanceof Error ? error.message : String(error)));
   }
 
   function loadKline() {
@@ -1389,11 +1448,18 @@ export function MarketPage() {
     });
   }
 
-  async function loadManageSymbols(source = manageSource) {
-    const result = await api.get<Record<string, string[]>>(`/api/data/symbols${qs({ source })}`);
-    const all = Array.from(new Set(Object.values(result).flat())).sort();
+  async function loadManageSymbolsImpl(source = manageSource) {
+    const result = await latestManageSymbols(() => api.get<Record<string, string[]>>(`/api/data/symbols${qs({ source })}`));
+    if (!result.current) return;
+    if (result.error) throw result.error;
+    if (!result.data) return;
+    const all = Array.from(new Set(Object.values(result.data).flat())).sort();
     setManageSymbols(all);
     if (!all.includes(manageSymbol)) setManageSymbol(all[0] || "");
+  }
+
+  function loadManageSymbols(source = manageSource) {
+    void loadManageSymbolsImpl(source).catch((error) => setDataMessage(error instanceof Error ? error.message : String(error)));
   }
 
   function symbolAction(path: string, options: Record<string, unknown>) {
@@ -1401,7 +1467,7 @@ export function MarketPage() {
     void run(async () => {
       const result = await api.post(path, { symbol: manageSymbol, options: { source: manageSource, ...options } });
       setDataMessage(JSON.stringify(result, null, 2));
-      await loadManageSymbols();
+      await loadManageSymbolsImpl();
     });
   }
 
@@ -1608,12 +1674,20 @@ export function DailyTradePage() {
   const [cashAmount, setCashAmount] = useState("");
   const [cashNote, setCashNote] = useState("");
   const { busy, run } = useAction();
+  const latestRunSession = useLatestRequest();
+  const latestSessionDetail = useLatestRequest();
 
   async function refreshRunSession(name: string) {
-    if (!name) { setRunSession(null); return; }
-    try {
-      setRunSession(await api.get<TradeSessionDetail>(`/api/trade-sessions/${encodeURIComponent(name)}`));
-    } catch { setRunSession(null); }
+    const result = await latestRunSession(() => name
+      ? api.get<TradeSessionDetail>(`/api/trade-sessions/${encodeURIComponent(name)}`)
+      : Promise.resolve(null as unknown as TradeSessionDetail));
+    if (!result.current) return;
+    if (result.error || !name) {
+      setRunSession(null);
+      if (result.error) setMessage(result.error instanceof Error ? result.error.message : String(result.error));
+      return;
+    }
+    setRunSession(result.data || null);
   }
   function selectRunSession(name: string) {
     setRunSessionName(name);
@@ -1651,14 +1725,19 @@ export function DailyTradePage() {
   }
 
   function viewSession(name: string) {
-    void run(async () => {
-      setDetail(await api.get<TradeSessionDetail>(`/api/trade-sessions/${encodeURIComponent(name)}`));
-      setDetailTab("overview");
-    });
+    void latestSessionDetail(() => api.get<TradeSessionDetail>(`/api/trade-sessions/${encodeURIComponent(name)}`))
+      .then((result) => {
+        if (!result.current) return;
+        if (result.error) throw result.error;
+        setDetail(result.data || null);
+        setDetailTab("overview");
+      })
+      .catch((error) => setMessage(error instanceof Error ? error.message : String(error)));
   }
 
   async function removeSession(name: string) {
     if (!(await confirm({ message: `${t("delete")} ${name}?`, danger: true }))) return;
+    void latestSessionDetail(() => Promise.resolve(null));
     void run(async () => {
       await api.delete(`/api/trade-sessions/${encodeURIComponent(name)}`);
       if (detail?.manifest?.name === name) setDetail(null);
@@ -1674,16 +1753,21 @@ export function DailyTradePage() {
   // the MarketPage data-job pattern so the page shows a run-status card instead of nothing.
   useEffect(() => {
     if (!activeJob?.job_id) return;
+    const jobId = activeJob.job_id;
+    const sessionName = runSessionName;
     let alive = true;
+    let timer: number | undefined;
     const poll = async () => {
+      let terminal = false;
       try {
-        const p = await api.get<JobProgress>(`/api/jobs/${activeJob.job_id}/progress`);
+        const p = await api.get<JobProgress>(`/api/jobs/${jobId}/progress`);
         if (!alive) return;
         setProgress(p);
         if (p.status && ["succeeded", "failed", "cancelled", "lost"].includes(p.status)) {
+          terminal = true;
           if (p.status === "succeeded") {
-            try { setResult(await api.get(`/api/jobs/${activeJob.job_id}/result`)); } catch { /* result may be empty */ }
-            if (runSessionName) void refreshRunSession(runSessionName);
+            try { setResult(await api.get(`/api/jobs/${jobId}/result`)); } catch { /* result may be empty */ }
+            if (sessionName) void refreshRunSession(sessionName);
             void sessions.refresh();
           }
           setActiveJob(null);
@@ -1691,10 +1775,13 @@ export function DailyTradePage() {
       } catch (err) {
         if (alive) setMessage(err instanceof Error ? err.message : String(err));
       }
+      if (alive && !terminal) timer = window.setTimeout(poll, 2000);
     };
     void poll();
-    const id = window.setInterval(poll, 2000);
-    return () => { alive = false; window.clearInterval(id); };
+    return () => {
+      alive = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
   }, [activeJob?.job_id]);
 
   function runDailyTrade() {

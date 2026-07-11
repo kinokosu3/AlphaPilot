@@ -96,6 +96,7 @@ function useDaemonStatus(): boolean {
   const [running, setRunning] = useState(false);
   useEffect(() => {
     let alive = true;
+    let timer: number | undefined;
     const poll = async () => {
       try {
         const data = await api.get<{ running?: boolean }>("/api/schedules/daemon");
@@ -103,12 +104,12 @@ function useDaemonStatus(): boolean {
       } catch {
         /* ignore */
       }
+      if (alive) timer = window.setTimeout(poll, 15000);
     };
     void poll();
-    const id = window.setInterval(poll, 15000);
     return () => {
       alive = false;
-      window.clearInterval(id);
+      if (timer !== undefined) window.clearTimeout(timer);
     };
   }, []);
   return running;
@@ -170,12 +171,15 @@ export function AsyncButton({
   type?: "button" | "submit";
 }) {
   const [busy, setBusy] = useState(false);
+  const inFlight = useRef(false);
   async function handle() {
-    if (busy || disabled) return;
+    if (inFlight.current || disabled) return;
+    inFlight.current = true;
     setBusy(true);
     try {
       await onClick();
     } finally {
+      inFlight.current = false;
       setBusy(false);
     }
   }
@@ -714,32 +718,53 @@ export function JobsPanel({ compact = false }: { compact?: boolean }) {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
+  const selectedRef = useRef<Job | null>(null);
+  const refreshInFlight = useRef(false);
+  const detailSequence = useRef(0);
 
-  async function refresh() {
+  useEffect(() => {
+    selectedRef.current = selected;
+  }, [selected]);
+
+  const refresh = useCallback(async () => {
+    if (refreshInFlight.current) return;
+    refreshInFlight.current = true;
     setSyncing(true);
     try {
       const data = await api.get<Job[]>("/api/jobs");
       setJobs(data);
       setError(null);
-      if (selected) {
-        const next = data.find((j) => j.job_id === selected.job_id);
-        if (next) setSelected(next);
+      if (selectedRef.current) {
+        const next = data.find((j) => j.job_id === selectedRef.current?.job_id) || null;
+        selectedRef.current = next;
+        setSelected(next);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
+      refreshInFlight.current = false;
       setLoading(false);
       setSyncing(false);
     }
-  }
-
-  useEffect(() => {
-    void refresh();
-    const id = window.setInterval(refresh, 5000);
-    return () => window.clearInterval(id);
   }, []);
 
+  useEffect(() => {
+    let active = true;
+    let timer: number | undefined;
+    const poll = async () => {
+      await refresh();
+      if (active) timer = window.setTimeout(poll, 5000);
+    };
+    void poll();
+    return () => {
+      active = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [refresh]);
+
   async function loadJob(job: Job) {
+    const request = ++detailSequence.current;
+    selectedRef.current = job;
     setSelected(job);
     setLog("");
     setResult(null);
@@ -747,8 +772,12 @@ export function JobsPanel({ compact = false }: { compact?: boolean }) {
       api.get<{ log: string }>(`/api/jobs/${job.job_id}/log`),
       api.get<unknown>(`/api/jobs/${job.job_id}/result`)
     ]);
+    if (request !== detailSequence.current || selectedRef.current?.job_id !== job.job_id) return;
     if (logRes.status === "fulfilled") setLog(logRes.value.log);
     if (resultRes.status === "fulfilled") setResult(resultRes.value);
+    if (logRes.status === "rejected" && resultRes.status === "rejected") {
+      setError(logRes.reason instanceof Error ? logRes.reason.message : String(logRes.reason));
+    }
   }
 
   async function cancel(job: Job) {
@@ -765,6 +794,8 @@ export function JobsPanel({ compact = false }: { compact?: boolean }) {
     if (!(await confirm({ message: `${t("delete")} ${job.job_id}?`, danger: true }))) return;
     try {
       await api.delete(`/api/jobs/${job.job_id}`);
+      detailSequence.current += 1;
+      selectedRef.current = null;
       setSelected(null);
       await refresh();
     } catch (err) {
@@ -776,6 +807,8 @@ export function JobsPanel({ compact = false }: { compact?: boolean }) {
     if (!(await confirm({ message: t("clearFinishedConfirm"), danger: true }))) return;
     try {
       const res = await api.post<{ deleted: number }>("/api/jobs/clear");
+      detailSequence.current += 1;
+      selectedRef.current = null;
       setSelected(null);
       await refresh();
       toast.success(`${t("clearFinished")}: ${res.deleted}`);
@@ -864,15 +897,24 @@ const ConfirmContext = createContext<((opts: ConfirmOptions) => Promise<boolean>
 export function ConfirmProvider({ children }: { children: React.ReactNode }) {
   const { t } = useI18n();
   const [state, setState] = useState<ConfirmState | null>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const previousFocus = useRef<HTMLElement | null>(null);
 
   const confirm = useCallback(
-    (opts: ConfirmOptions) => new Promise<boolean>((resolve) => setState({ ...opts, resolve })),
+    (opts: ConfirmOptions) => new Promise<boolean>((resolve) => {
+      previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      setState((current) => {
+        current?.resolve(false);
+        return { ...opts, resolve };
+      });
+    }),
     [],
   );
 
   function close(ok: boolean) {
     setState((cur) => {
       cur?.resolve(ok);
+      window.setTimeout(() => previousFocus.current?.focus(), 0);
       return null;
     });
   }
@@ -881,7 +923,20 @@ export function ConfirmProvider({ children }: { children: React.ReactNode }) {
     if (!state) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") close(false);
-      if (e.key === "Enter") close(true);
+      if (e.key !== "Tab" || !dialogRef.current) return;
+      const focusable = Array.from(dialogRef.current.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ));
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -892,10 +947,17 @@ export function ConfirmProvider({ children }: { children: React.ReactNode }) {
       {children}
       {state ? (
         <div className="modal-overlay" onClick={() => close(false)}>
-          <div className="modal-card" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
+          <div
+            ref={dialogRef}
+            className="modal-card"
+            role={state.danger ? "alertdialog" : "dialog"}
+            aria-modal="true"
+            aria-labelledby="portal-confirm-title"
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="modal-head">
               {state.danger ? <AlertTriangle size={18} className="modal-danger-icon" /> : <Info size={18} className="modal-info-icon" />}
-              <strong>{state.title || t("confirmTitle")}</strong>
+              <strong id="portal-confirm-title">{state.title || t("confirmTitle")}</strong>
             </div>
             <p className="modal-body">{state.message}</p>
             <div className="modal-actions">

@@ -63,8 +63,11 @@ export function useToast() {
 export function useAction() {
   const toast = useToast();
   const [busy, setBusy] = useState(false);
+  const inFlight = useRef(false);
   const run = useCallback(
     async (fn: () => Promise<void>, success?: string) => {
+      if (inFlight.current) return;
+      inFlight.current = true;
       setBusy(true);
       try {
         await fn();
@@ -72,6 +75,7 @@ export function useAction() {
       } catch (err) {
         toast.error(err instanceof Error ? err.message : String(err));
       } finally {
+        inFlight.current = false;
         setBusy(false);
       }
     },

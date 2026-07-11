@@ -39,6 +39,14 @@ function initialWorkspace(): Workspace {
   }
 }
 
+function rememberWorkspace(workspace: Workspace): void {
+  try {
+    window.localStorage.setItem(WORKSPACE_STORAGE_KEY, workspace);
+  } catch {
+    // Storage can be unavailable in privacy-restricted browsers; Paper remains the safe default.
+  }
+}
+
 const EMPTY_DAEMON: LiveDaemonStatus = { exists: false, path: "", alive: false, running: false, status: "stopped" };
 const EMPTY_RUNTIME: LiveRuntimeState = { exists: false, state_path: "" };
 const EMPTY_RISK: LiveRiskStatus = { exists: false, state_path: "", ledger_dir: "", recent_rejections: [] };
@@ -149,9 +157,11 @@ export function LivePage() {
     const actualMode = daemonStatus.data.mode;
     if (actualMode === "live" && workspace !== "live") {
       setWorkspaceState("live");
+      rememberWorkspace("live");
       setTargetRoute(false);
     } else if ((actualMode === "paper" || actualMode === "dry_run") && workspace !== "paper") {
       setWorkspaceState("paper");
+      rememberWorkspace("paper");
       setSimulationMode(actualMode);
       setTargetRoute(false);
     }
@@ -163,11 +173,7 @@ export function LivePage() {
     setTargetRoute(false);
     setOrderCode("");
     targetJson.setRaw('{\n  "holdings": {},\n  "prices": {}\n}');
-    try {
-      window.localStorage.setItem(WORKSPACE_STORAGE_KEY, next);
-    } catch {
-      // Storage can be unavailable in privacy-restricted browsers; the safe Paper default remains.
-    }
+    rememberWorkspace(next);
   };
 
   const closeDiagnostics = useCallback(() => setDiagnosticsOpen(false), []);
@@ -200,6 +206,9 @@ export function LivePage() {
     if (workspace === "live" && (!selectedBrokerSpec?.gateway_importable || !selectedQuoteProviderSpec?.gateway_importable)) return;
     if (workspace === "live" && !(await confirm({ message: t("liveDaemonStartConfirm"), danger: true }))) return;
     await run(async () => {
+      if (workspace === "paper" && (!Number.isFinite(Number(initialCash)) || Number(initialCash) <= 0)) {
+        throw new Error("initial cash must be greater than 0");
+      }
       const timingParams = daemonTimingStrategy.trim() ? daemonTimingParams.parse() : undefined;
       await api.post("/api/live/daemon/start", {
         ...query,
@@ -259,12 +268,22 @@ export function LivePage() {
 
   const submitOrder = async () => {
     if (!orderCode.trim()) return;
+    const volume = Number(orderVolume);
+    const price = Number(orderPrice);
+    if (!Number.isInteger(volume) || volume <= 0) {
+      await run(async () => { throw new Error("order volume must be a positive integer"); });
+      return;
+    }
+    if (!Number.isFinite(price) || price < 0 || (orderType === "limit" && price <= 0)) {
+      await run(async () => { throw new Error("limit order price must be greater than 0"); });
+      return;
+    }
     if (workspace === "live" && !(await confirm({ message: t("liveDaemonOrderConfirm"), danger: true }))) return;
     await command("/api/live/daemon/order", t("liveDaemonOrderDone"), {
       symbol: orderCode.trim(),
       side: orderSide,
-      volume: Number(orderVolume),
-      price: Number(orderPrice) || 0,
+      volume,
+      price,
       order_type: orderType,
       exchange: orderExchange.trim() || undefined,
       product: "equity",

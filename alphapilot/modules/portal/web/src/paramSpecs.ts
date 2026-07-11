@@ -51,6 +51,71 @@ function assignParam(params: Record<string, unknown>, key: string, value: unknow
   node[parts[parts.length - 1]] = value;
 }
 
+function nestedValue(params: Record<string, unknown>, key: string): unknown {
+  return key.split(".").reduce<unknown>((node, part) => {
+    if (!node || typeof node !== "object" || Array.isArray(node)) return undefined;
+    return (node as Record<string, unknown>)[part];
+  }, params);
+}
+
+function finiteValue(params: Record<string, unknown>, key: string): number | undefined {
+  const value = nestedValue(params, key);
+  if (value === "" || value === null || value === undefined) return undefined;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) throw new Error(`${key} must be a finite number`);
+  return parsed;
+}
+
+/** Cross-field invariants shared by direct runs, schedules and advanced JSON overrides. */
+export function validateParams(params: Record<string, unknown>): void {
+  const datePairs = [
+    ["start_date", "end_date"],
+    ["yaml_params.test_start", "yaml_params.test_end"],
+    ["yaml_params.backtest_start", "yaml_params.backtest_end"],
+  ];
+  for (const [startKey, endKey] of datePairs) {
+    const start = String(nestedValue(params, startKey) || "");
+    const end = String(nestedValue(params, endKey) || "");
+    if (start && end && start > end) throw new Error(`${startKey} must not be after ${endKey}`);
+  }
+
+  for (const key of ["cash", "init_cash", "yaml_params.account"]) {
+    const value = finiteValue(params, key);
+    if (value !== undefined && value <= 0) throw new Error(`${key} must be greater than 0`);
+  }
+  for (const key of ["target_percent", "yaml_params.risk_degree"]) {
+    const value = finiteValue(params, key);
+    if (value !== undefined && (value < 0 || value > 1)) throw new Error(`${key} must be between 0 and 1`);
+  }
+  for (const key of [
+    "open_cost", "close_cost", "min_cost", "slippage", "trade_unit",
+    "yaml_params.open_cost", "yaml_params.close_cost", "yaml_params.min_cost",
+  ]) {
+    const value = finiteValue(params, key);
+    if (value !== undefined && value < 0) throw new Error(`${key} must not be negative`);
+  }
+  for (const key of ["step_n", "top_n", "yaml_params.topk"]) {
+    const value = finiteValue(params, key);
+    if (value !== undefined && (!Number.isInteger(value) || value <= 0)) throw new Error(`${key} must be a positive integer`);
+  }
+  for (const key of ["trade_unit", "yaml_params.n_drop"]) {
+    const value = finiteValue(params, key);
+    if (value !== undefined && (!Number.isInteger(value) || value < 0)) throw new Error(`${key} must be a non-negative integer`);
+  }
+
+  const topk = finiteValue(params, "yaml_params.topk");
+  const drop = finiteValue(params, "yaml_params.n_drop");
+  if (topk !== undefined && drop !== undefined && drop > topk) throw new Error("yaml_params.n_drop must not exceed yaml_params.topk");
+  const shortWindow = finiteValue(params, "strategy_params.short_window");
+  const longWindow = finiteValue(params, "strategy_params.long_window");
+  if (shortWindow !== undefined && longWindow !== undefined && shortWindow >= longWindow) {
+    throw new Error("strategy_params.short_window must be less than strategy_params.long_window");
+  }
+  const low = finiteValue(params, "strategy_params.low");
+  const high = finiteValue(params, "strategy_params.high");
+  if (low !== undefined && high !== undefined && low >= high) throw new Error("strategy_params.low must be less than strategy_params.high");
+}
+
 export function buildParams(
   specs: FieldSpec[],
   values: Record<string, FieldValue>,
@@ -88,6 +153,7 @@ export function buildParams(
     }
     Object.assign(params, advanced as Record<string, unknown>);
   }
+  validateParams(params);
   return params;
 }
 
