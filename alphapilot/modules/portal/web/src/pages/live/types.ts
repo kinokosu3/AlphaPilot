@@ -7,6 +7,13 @@ export type LiveConfigSnapshot = {
   ledger_dir: string;
   state_dir: string;
   risk: Record<string, number>;
+  market_data?: {
+    enabled: boolean;
+    data_dir: string;
+    retention_days: number;
+    snapshot_interval: number;
+    stale_after_seconds: number;
+  };
 };
 
 export type LivePosition = {
@@ -18,6 +25,10 @@ export type LivePosition = {
   yd_volume: number;
   frozen: number;
   price: number;
+  settlement_price?: number;
+  margin?: number;
+  pnl?: number;
+  gateway?: string;
 };
 
 export type LiveOrder = {
@@ -31,6 +42,11 @@ export type LiveOrder = {
   traded: number;
   status: string;
   active: boolean;
+  type?: string;
+  offset?: string;
+  reference?: string;
+  gateway?: string;
+  message?: string;
 };
 
 export type LiveTrade = {
@@ -40,6 +56,24 @@ export type LiveTrade = {
   side: string;
   price: number;
   volume: number;
+  exchange?: string;
+  order_id?: string;
+  offset?: string;
+  gateway?: string;
+};
+
+export type LiveAccount = {
+  account_id?: string;
+  balance: number;
+  available: number;
+  frozen?: number;
+  buying_power?: number;
+  margin?: number;
+  commission?: number;
+  close_profit?: number;
+  position_profit?: number;
+  risk_ratio?: number;
+  gateway?: string;
 };
 
 export type LiveEngineSnapshot = {
@@ -52,11 +86,12 @@ export type LiveEngineSnapshot = {
   positions: number;
   contracts?: number;
   ticks?: number;
+  subscribed_symbols?: string[];
 };
 
 export type LiveState = {
   snapshot: LiveEngineSnapshot;
-  account: { buying_power: number; balance: number; available?: number };
+  account: LiveAccount;
   positions: LivePosition[];
   orders: LiveOrder[];
   trades: LiveTrade[];
@@ -74,7 +109,7 @@ export type LiveStatus = {
 export type LiveRuntimeSnapshot = {
   config: { mode: string; broker: string; trade_broker?: string; quote_provider?: string; ledger_dir: string; state_dir: string };
   engine: LiveEngineSnapshot;
-  account: { account_id?: string; balance: number; available: number; frozen?: number; buying_power?: number; gateway?: string } | null;
+  account: LiveAccount | null;
   positions: LivePosition[];
   orders: LiveOrder[];
   trades: LiveTrade[];
@@ -166,6 +201,62 @@ export type LivePluginDiagnostics = {
   }>;
 };
 
+export type LiveMarketTick = {
+  [key: string]: unknown;
+  key: string;
+  code: string;
+  exchange: string;
+  name?: string;
+  last_price: number;
+  pre_close: number;
+  change: number;
+  change_pct: number;
+  bid_price_1: number;
+  ask_price_1: number;
+  bid_volume_1: number;
+  ask_volume_1: number;
+  volume: number;
+  turnover: number;
+  datetime?: string | null;
+  received_at?: string | null;
+  age_seconds?: number | null;
+  stale: boolean;
+  gateway?: string;
+};
+
+export type LiveMarketRecorder = {
+  enabled: boolean;
+  healthy: boolean;
+  degraded: boolean;
+  queue_depth: number;
+  written_ticks: number;
+  written_bars: number;
+  dropped_ticks: number;
+  dropped_bars: number;
+  last_error?: string | null;
+  last_flush_at?: string | null;
+};
+
+export type LiveMarketSnapshot = {
+  exists: boolean;
+  generated_at?: string;
+  quote_provider?: string;
+  daemon_running?: boolean;
+  daemon_status?: string;
+  subscribed_symbols: string[];
+  stale_after_seconds: number;
+  ticks: LiveMarketTick[];
+  recorder?: LiveMarketRecorder;
+};
+
+export type LiveMarketBars = {
+  symbol: string;
+  label?: string;
+  interval: number;
+  date_range: string[];
+  rows: Array<Record<string, unknown>>;
+};
+
 export type LiveConnectResult = { ready: boolean; state: LiveRuntimeSnapshot };
 
 export type LiveDaemonStatus = {
@@ -198,6 +289,8 @@ export type LiveDaemonStatus = {
   log_path?: string;
   state?: LiveRuntimeSnapshot;
 };
+
+export type LiveDaemonStopResult = LiveDaemonStatus & { stopped: boolean };
 
 export type LiveDaemonCommandResult = {
   accepted: boolean;

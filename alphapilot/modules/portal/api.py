@@ -1751,6 +1751,56 @@ def create_app(
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
+    @app.get("/api/live/market/snapshot")
+    def live_market_snapshot(
+        mode: str | None = Query(default=None),
+        broker: str | None = Query(default=None),
+        trade_broker: str | None = Query(default=None),
+        quote_provider: str | None = Query(default=None),
+        state_dir: str | None = Query(default=None),
+        symbols: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        try:
+            return _jsonable(
+                _live_module().live_market_snapshot(
+                    mode=mode,
+                    broker=broker,
+                    trade_broker=trade_broker,
+                    quote_provider=quote_provider,
+                    state_dir=state_dir,
+                    symbols=symbols,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.get("/api/live/market/bars")
+    def live_market_bars(
+        symbol: str,
+        interval: int = Query(default=60),
+        limit: int = Query(default=300, ge=1, le=2000),
+        mode: str | None = Query(default=None),
+        broker: str | None = Query(default=None),
+        trade_broker: str | None = Query(default=None),
+        quote_provider: str | None = Query(default=None),
+        state_dir: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        try:
+            return _jsonable(
+                _live_module().live_market_bars(
+                    symbol=symbol,
+                    interval=interval,
+                    limit=limit,
+                    mode=mode,
+                    broker=broker,
+                    trade_broker=trade_broker,
+                    quote_provider=quote_provider,
+                    state_dir=state_dir,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
     @app.post("/api/live/daemon/start")
     def live_daemon_start(payload: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -1762,7 +1812,7 @@ def create_app(
                     quote_provider=payload.get("quote_provider"),
                     symbols=payload.get("symbols"),
                     cash=payload.get("cash"),
-                    interval=float(payload.get("interval") or 2.0),
+                    interval=float(payload.get("interval") or 1.0),
                     timeout=float(payload.get("timeout") or 20.0),
                     ledger_dir=payload.get("ledger_dir"),
                     state_dir=payload.get("state_dir"),
@@ -1773,6 +1823,7 @@ def create_app(
                     bar_seconds=int(payload.get("bar_seconds") or 60),
                     min_bars=int(payload.get("min_bars") or 30),
                     window=int(payload.get("window") or 250),
+                    record_market_data=payload.get("record_market_data"),
                 )
             )
         except Exception as exc:  # noqa: BLE001

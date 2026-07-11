@@ -436,6 +436,7 @@ summary { cursor: pointer; font-weight: 650; }
   width: min(520px, calc(100vw - 48px));
   max-height: min(560px, calc(100vh - 120px));
   overflow: auto;
+  transition: transform 0.12s ease-out;
 }
 
 .help-popover {
@@ -475,4 +476,3 @@ summary { cursor: pointer; font-weight: 650; }
 .help-popover li {
   margin: 5px 0;
 }
-

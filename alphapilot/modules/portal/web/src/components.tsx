@@ -1,5 +1,5 @@
 import { AlertTriangle, HelpCircle, Info, Loader2, Moon, RefreshCw, Sun, Trash2, XCircle } from "lucide-react";
-import React, { createContext, useCallback, useContext, useEffect, useState } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
 import { api, Job } from "./api";
 import { useI18n } from "./i18n";
@@ -202,9 +202,42 @@ export function PanelHelp({
 }) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
+  const [offsetX, setOffsetX] = useState(0);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+
+    const keepInsideViewport = () => {
+      const trigger = triggerRef.current;
+      const popover = popoverRef.current;
+      if (!trigger || !popover) return;
+
+      const viewportWidth = document.documentElement.clientWidth || window.innerWidth;
+      const viewportPadding = 16;
+      const triggerRect = trigger.getBoundingClientRect();
+      const popoverWidth = popover.getBoundingClientRect().width;
+      const naturalLeft = triggerRect.right - popoverWidth;
+      const minLeft = viewportPadding;
+      const maxLeft = Math.max(minLeft, viewportWidth - viewportPadding - popoverWidth);
+      const clampedLeft = Math.min(maxLeft, Math.max(minLeft, naturalLeft));
+      setOffsetX(clampedLeft - naturalLeft);
+    };
+
+    keepInsideViewport();
+    window.addEventListener("resize", keepInsideViewport);
+    window.addEventListener("scroll", keepInsideViewport, true);
+    return () => {
+      window.removeEventListener("resize", keepInsideViewport);
+      window.removeEventListener("scroll", keepInsideViewport, true);
+    };
+  }, [open]);
+
   return (
     <div className="panel-help">
       <button
+        ref={triggerRef}
         type="button"
         className="icon-button"
         aria-label={label}
@@ -215,7 +248,13 @@ export function PanelHelp({
         <HelpCircle size={16} />
       </button>
       {open ? (
-        <div className="help-popover" role="dialog" aria-label={label}>
+        <div
+          ref={popoverRef}
+          className="help-popover"
+          role="dialog"
+          aria-label={label}
+          style={{ transform: `translateX(${offsetX}px)` }}
+        >
           <div className="help-popover-head">
             <strong>{title}</strong>
             <button type="button" className="button ghost small icon-only" aria-label={t("cancel")} onClick={() => setOpen(false)}>×</button>

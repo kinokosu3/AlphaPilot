@@ -142,6 +142,8 @@ def test_live_config_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
         "ALPHAPILOT_LIVE_BROKER",
         "ALPHAPILOT_LIVE_TRADE_BROKER",
         "ALPHAPILOT_LIVE_QUOTE_PROVIDER",
+        "ALPHAPILOT_LIVE_MARKET_ENABLED",
+        "ALPHAPILOT_LIVE_MARKET_RETENTION_DAYS",
     ):
         monkeypatch.delenv(name, raising=False)
     cfg = LiveConfig.load()
@@ -150,6 +152,8 @@ def test_live_config_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.trade_broker == "paper"
     assert cfg.quote_provider == "paper"
     assert cfg.risk.lot_size == 100
+    assert cfg.market_data.enabled is True
+    assert cfg.market_data.retention_days == 30
     assert 0 < cfg.risk.max_position_pct <= 1
     assert "mode=" in cfg.summary()
 
@@ -161,6 +165,8 @@ def test_live_config_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALPHAPILOT_LIVE_QUOTE_PROVIDER", "xtp")
     monkeypatch.setenv("ALPHAPILOT_LIVE_MAX_ORDER_VALUE", "50000")
     monkeypatch.setenv("ALPHAPILOT_LIVE_LOT_SIZE", "200")
+    monkeypatch.setenv("ALPHAPILOT_LIVE_MARKET_ENABLED", "false")
+    monkeypatch.setenv("ALPHAPILOT_LIVE_MARKET_RETENTION_DAYS", "7")
     cfg = LiveConfig.load()
     assert cfg.mode == RunMode.PAPER
     assert cfg.broker == "emt"
@@ -168,3 +174,5 @@ def test_live_config_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.quote_provider == "xtp"
     assert cfg.risk.max_order_value == 50000.0
     assert cfg.risk.lot_size == 200
+    assert cfg.market_data.enabled is False
+    assert cfg.market_data.retention_days == 7

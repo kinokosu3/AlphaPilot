@@ -15,7 +15,9 @@ from pathlib import Path
 from typing import Any
 
 from alphapilot.systems.live.config import LiveConfig, RunMode
+from alphapilot.systems.live.market_data import market_snapshot_path
 from alphapilot.systems.live.runtime import clone_config, require_live_confirmation
+from alphapilot.systems.live.state_io import atomic_write_json
 from alphapilot.systems.live.targets import TargetPortfolio, parse_target_positions
 
 
@@ -60,6 +62,13 @@ def pid_running(pid: Any) -> bool:
     if value <= 0:
         return False
     try:
+        stat = Path(f"/proc/{value}/stat").read_text(encoding="utf-8")
+        marker = stat.rfind(")")
+        if marker >= 0 and stat[marker + 2 : marker + 3] == "Z":
+            return False
+    except OSError:
+        pass
+    try:
         os.kill(value, 0)
         return True
     except ProcessLookupError:
@@ -72,7 +81,7 @@ def write_daemon(state_dir: str | Path, payload: dict[str, Any]) -> Path:
     path = daemon_path(state_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     merged = {**payload, "updated_at": datetime.now().isoformat(timespec="seconds")}
-    path.write_text(json.dumps(merged, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    atomic_write_json(path, merged)
     return path
 
 
@@ -196,6 +205,7 @@ def daemon_status(config: LiveConfig, *, state_dir: str | Path | None = None) ->
             status["state_error"] = str(exc)
     status["command_status_path"] = str(command_status_path(cfg.state_dir))
     status["command_status_tail"] = command_status_tail(cfg.state_dir)
+    status["market_snapshot_path"] = str(market_snapshot_path(cfg.state_dir))
     return status
 
 
@@ -208,7 +218,7 @@ def start_daemon(
     quote_provider: str | None = None,
     symbols: list[str] | None = None,
     cash: float | None = None,
-    interval: float = 2.0,
+    interval: float = 1.0,
     timeout: float = 20.0,
     ledger_dir: str | Path | None = None,
     state_dir: str | Path | None = None,
@@ -219,6 +229,7 @@ def start_daemon(
     bar_seconds: int = 60,
     min_bars: int = 30,
     window: int = 250,
+    record_market_data: bool | None = None,
 ) -> dict[str, Any]:
     selected_mode = mode or config.mode
     trade_override = trade_broker or broker
@@ -263,6 +274,7 @@ def start_daemon(
         if missing:
             raise ValueError("missing live provider env fields: " + ", ".join(sorted(set(missing))))
 
+    symbols = _normalize_symbols(symbols or [])
     if timing_strategy and not symbols:
         raise ValueError("symbols are required when timing_strategy is enabled")
 
@@ -297,6 +309,8 @@ def start_daemon(
     ]
     if symbols:
         args.extend(["--symbols", ",".join(symbols)])
+    if record_market_data is not None:
+        args.append("--record-market-data" if record_market_data else "--no-record-market-data")
     if cash is not None:
         args.extend(["--cash", str(float(cash))])
     if duration is not None:
@@ -332,6 +346,7 @@ def start_daemon(
         "quote_provider": cfg.quote_provider,
         "plugins": plugin_selection,
         "symbols": symbols or [],
+        "record_market_data": cfg.market_data.enabled if record_market_data is None else bool(record_market_data),
         "interval": float(interval),
         "timeout": float(timeout),
         "runner": _runner_config(
@@ -361,24 +376,18 @@ def stop_daemon(
     status = load_daemon(cfg.state_dir)
     pid = status.get("pid")
     if not status.get("alive"):
-        return {"stopped": False, **status}
+        return {**status, "running": False, "stopped": True}
 
     os.kill(int(pid), signal.SIGTERM)
     deadline = time.time() + float(timeout)
     while time.time() < deadline:
         latest = load_daemon(cfg.state_dir)
-        if latest.get("status") in {"stopped", "error"} or not latest.get("alive"):
-            latest["running"] = False
-            latest["stopped"] = True
-            return latest
-        if not pid_running(pid):
-            status = load_daemon(cfg.state_dir)
-            status["running"] = False
-            status["stopped"] = True
-            return status
+        if not latest.get("alive"):
+            return {**latest, "running": False, "stopped": True}
         time.sleep(0.1)
 
-    return {"stopped": False, "running": True, **load_daemon(cfg.state_dir)}
+    latest = load_daemon(cfg.state_dir)
+    return {**latest, "stopped": not bool(latest.get("alive"))}
 
 
 def _read_new_commands(path: Path, offset: int) -> tuple[int, list[dict[str, Any]]]:
@@ -566,9 +575,18 @@ def _apply_command(
             strategy_name = str(payload.get("timing_strategy") or payload.get("strategy") or "").strip()
             if not strategy_name:
                 raise ValueError("timing_strategy is required")
-            symbols = _split_symbols_payload(payload.get("symbols")) or list(default_symbols or [])
+            symbols = _normalize_symbols(
+                _split_symbols_payload(payload.get("symbols")) or list(default_symbols or [])
+            )
             if not symbols:
                 raise ValueError("symbols are required when timing_strategy is enabled")
+            allowed_symbols = set(_normalize_symbols(default_symbols or []))
+            unexpected = sorted(set(symbols) - allowed_symbols)
+            if unexpected:
+                raise ValueError(
+                    "strategy symbols must be subscribed when daemon starts: "
+                    + ", ".join(unexpected)
+                )
             params = _parse_runner_params(payload.get("timing_params") or payload.get("params"))
             freq = str(payload.get("timing_freq") or payload.get("freq") or "day")
             bar_seconds = int(payload.get("bar_seconds") or 60)
@@ -717,7 +735,7 @@ def run_daemon(
     quote_provider: str | None = None,
     symbols: list[str] | None = None,
     cash: float | None = None,
-    interval: float = 2.0,
+    interval: float = 1.0,
     timeout: float = 20.0,
     ledger_dir: str | Path | None = None,
     state_dir: str | Path | None = None,
@@ -728,6 +746,7 @@ def run_daemon(
     bar_seconds: int = 60,
     min_bars: int = 30,
     window: int = 250,
+    record_market_data: bool | None = None,
 ) -> int:
     from alphapilot.kernel import build_engine
 
@@ -740,6 +759,7 @@ def run_daemon(
         else selected_trade if trade_override
         else base.quote_provider or selected_trade
     )
+    symbols = _normalize_symbols(symbols or [])
     cfg = clone_config(
         base,
         mode=selected_mode,
@@ -781,6 +801,7 @@ def run_daemon(
         "quote_provider": cfg.quote_provider,
         "plugins": plugin_selection,
         "symbols": symbols or [],
+        "record_market_data": cfg.market_data.enabled if record_market_data is None else bool(record_market_data),
         "commands_processed": 0,
         "recovery": None,
         "runner": _runner_config(
@@ -799,6 +820,8 @@ def run_daemon(
 
     try:
         _write_status(status="connecting")
+        if symbols:
+            runtime.enable_market_data(symbols, recording=record_market_data)
         runtime.connect(paper_cash=cash)
         ready = runtime.wait_ready(timeout=timeout)
         runner = _build_timing_runner(
@@ -844,6 +867,9 @@ def run_daemon(
             else:
                 runtime.engine.tick_session()
                 runner_status = None
+            if runtime.market_data is not None:
+                runtime.market_data.step(runtime.engine.session.state)
+                runtime.market_data.write_snapshot()
             runtime.write_state()
             _write_status(
                 heartbeat_at=datetime.now().isoformat(timespec="seconds"),
@@ -852,7 +878,10 @@ def run_daemon(
             )
             if duration is not None and time.time() - started >= float(duration):
                 break
-            time.sleep(max(float(interval), 0.05))
+            cadence = float(interval)
+            if runtime.market_data is not None:
+                cadence = min(cadence, float(cfg.market_data.snapshot_interval))
+            time.sleep(max(cadence, 0.05))
         return 0
     except Exception as exc:  # noqa: BLE001 - preserve error in daemon status
         _write_status(status="error", error=str(exc))
@@ -874,6 +903,20 @@ def _split_symbols(raw: str | None) -> list[str]:
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 
+def _normalize_symbols(symbols: list[str]) -> list[str]:
+    from alphapilot.systems.live.types import normalize_symbol
+
+    output: list[str] = []
+    seen: set[str] = set()
+    for raw in symbols:
+        code, exchange = normalize_symbol(raw)
+        key = f"{code}.{exchange.value}"
+        if key not in seen:
+            seen.add(key)
+            output.append(key)
+    return output
+
+
 def _parse_json_obj(raw: str | None) -> dict[str, Any]:
     if not raw:
         return {}
@@ -893,7 +936,7 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--quote-provider")
     run.add_argument("--symbols")
     run.add_argument("--cash", type=float)
-    run.add_argument("--interval", type=float, default=2.0)
+    run.add_argument("--interval", type=float, default=1.0)
     run.add_argument("--timeout", type=float, default=20.0)
     run.add_argument("--ledger-dir")
     run.add_argument("--state-dir")
@@ -904,6 +947,7 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--bar-seconds", type=int, default=60)
     run.add_argument("--min-bars", type=int, default=30)
     run.add_argument("--window", type=int, default=250)
+    run.add_argument("--record-market-data", action=argparse.BooleanOptionalAction, default=None)
     ns = parser.parse_args(argv)
     if ns.command == "run":
         return run_daemon(
@@ -924,6 +968,7 @@ def main(argv: list[str] | None = None) -> int:
             bar_seconds=ns.bar_seconds,
             min_bars=ns.min_bars,
             window=ns.window,
+            record_market_data=ns.record_market_data,
         )
     return 2
 

@@ -95,13 +95,14 @@ def test_engine_separates_trade_and_quote_gateways(tmp_path: Path) -> None:
 
     engine.connect({"trade": {"trade": True}, "quote": {"quote": True}})
     engine.subscribe_market_data(["SH600000"])
+    engine.subscribe_market_data(["600000.SSE"])
     order_id = engine.submit(OrderRequest.buy("600000", Exchange.SSE, 100, 10.0))
     engine.cancel(order_id, active_only=False)
     engine.reconcile_after_reconnect(auto_resume=False)
 
     assert trade.connected == 2
     assert quote.connected == 2
-    assert quote.subscribed == [["SH600000"]]
+    assert quote.subscribed == [["600000.SSE"]]
     assert trade.subscribed == []
     assert len(trade.orders) == 1
     assert len(quote.orders) == 0

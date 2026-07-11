@@ -11,7 +11,6 @@ long-lived daemon later.
 
 from __future__ import annotations
 
-import json
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -22,6 +21,8 @@ from alphapilot.systems.live.engine import LiveEngine
 from alphapilot.systems.live.executor import reconcile
 from alphapilot.systems.live.risk import RiskGate
 from alphapilot.systems.live.targets import TargetPortfolio
+from alphapilot.systems.live.market_data import tick_to_dict
+from alphapilot.systems.live.state_io import atomic_write_json
 from alphapilot.systems.live.types import (
     CancelRequest,
     Direction,
@@ -75,6 +76,7 @@ class LiveRuntime:
         self.engine = engine
         self.state_path = Path(config.state_dir).expanduser() / "runtime_state.json"
         self.recovery: dict[str, Any] | None = None
+        self.market_data = None
 
     # ---- construction ----------------------------------------------------- #
     @classmethod
@@ -221,8 +223,35 @@ class LiveRuntime:
                 drain(timeout=max(float(timeout), 0.0))
 
     def close(self) -> None:
-        self.engine.close()
-        self.write_state()
+        try:
+            self.engine.close()
+        finally:
+            if self.market_data is not None:
+                self.market_data.close()
+            self.write_state()
+
+    def enable_market_data(
+        self,
+        symbols: list[str],
+        *,
+        recording: bool | None = None,
+    ):
+        """Attach the daemon-owned quote projection and recorder before subscribing."""
+        if self.market_data is not None:
+            return self.market_data
+        from alphapilot.systems.live.market_data import LiveMarketDataService
+
+        service = LiveMarketDataService(
+            self.config.market_data,
+            self.config.quote_provider or self.config.trade_broker or self.config.broker or "quote",
+            symbols,
+            state_dir=self.config.state_dir,
+            timezone=self.config.timezone,
+            recording=recording,
+        )
+        service.start(self.engine)
+        self.market_data = service
+        return service
 
     def recover(self) -> dict[str, Any]:
         """Refresh broker snapshots and restore local runtime counters."""
@@ -446,6 +475,7 @@ class LiveRuntime:
                 "quote_provider": self.config.quote_provider,
                 "ledger_dir": str(self.config.ledger_dir),
                 "state_dir": str(self.config.state_dir),
+                "market_data_dir": str(self.config.market_data.data_dir),
                 "plugins": plugins,
             },
             "engine": self.engine.snapshot(),
@@ -500,6 +530,7 @@ class LiveRuntime:
                 tick_to_dict(tick)
                 for tick in oms.ticks.values()
             ],
+            "market_data": None if self.market_data is None else self.market_data.recorder.status(),
             "logs": [
                 {"level": log.level, "msg": log.msg, "gateway": log.gateway}
                 for log in list(oms.logs)[-50:]
@@ -510,8 +541,7 @@ class LiveRuntime:
     def write_state(self) -> dict[str, Any]:
         """Persist and return the compact runtime snapshot."""
         state = self.snapshot()
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        self.state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        atomic_write_json(self.state_path, state)
         return state
 
 
@@ -598,28 +628,6 @@ def order_to_dict(order: Order) -> dict[str, Any]:
         "reference": order.reference,
         "gateway": order.gateway,
         "message": order.message,
-    }
-
-
-def tick_to_dict(tick: TickData) -> dict[str, Any]:
-    return {
-        "code": tick.code,
-        "exchange": tick.exchange.value if isinstance(tick.exchange, Exchange) else str(tick.exchange),
-        "key": tick.key,
-        "name": tick.name,
-        "last_price": tick.last_price,
-        "pre_close": tick.pre_close,
-        "open_price": tick.open_price,
-        "high_price": tick.high_price,
-        "low_price": tick.low_price,
-        "limit_up": tick.limit_up,
-        "limit_down": tick.limit_down,
-        "bid_price_1": tick.bid_price_1,
-        "ask_price_1": tick.ask_price_1,
-        "bid_volume_1": tick.bid_volume_1,
-        "ask_volume_1": tick.ask_volume_1,
-        "gateway": tick.gateway,
-        "datetime": None if tick.datetime is None else tick.datetime.isoformat(),
     }
 
 

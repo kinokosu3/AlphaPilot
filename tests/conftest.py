@@ -82,6 +82,8 @@ EXPECTED_CLI_COMMANDS: frozenset[str] = frozenset(
         "live_daemon_strategy_status",
         "live_daemon_strategy_stop",
         "live_daemon_submit_target",
+        "live_market_bars",
+        "live_market_snapshot",
         "live_modes",
         "live_ledger_events",
         "live_cancel",
@@ -284,6 +286,7 @@ def isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AlphaEnv:
         "ALPHAPILOT_LIVE_BROKER": "paper",
         "ALPHAPILOT_LIVE_LEDGER_DIR": str(tmp_path / "live_ledger"),
         "ALPHAPILOT_LIVE_STATE_DIR": str(tmp_path / "live_state"),
+        "ALPHAPILOT_LIVE_MARKET_DATA_DIR": str(tmp_path / "live_market_data"),
         "ALPHAPILOT_TIMEZONE": "Asia/Shanghai",
         "USE_LOCAL": "True",
     }

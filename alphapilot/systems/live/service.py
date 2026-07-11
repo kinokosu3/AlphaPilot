@@ -140,6 +140,13 @@ class LiveSystem(BaseSystem):
             "timezone": cfg.timezone,
             "ledger_dir": str(cfg.ledger_dir),
             "state_dir": str(cfg.state_dir),
+            "market_data": {
+                "enabled": cfg.market_data.enabled,
+                "data_dir": str(cfg.market_data.data_dir),
+                "retention_days": cfg.market_data.retention_days,
+                "snapshot_interval": cfg.market_data.snapshot_interval,
+                "stale_after_seconds": cfg.market_data.stale_after_seconds,
+            },
             "risk": {
                 "max_order_value": cfg.risk.max_order_value,
                 "max_daily_value": cfg.risk.max_daily_value,

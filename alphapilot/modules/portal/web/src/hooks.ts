@@ -1,28 +1,102 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { buildParams, defaultValuesFor, FieldSpec, FieldValue } from "./paramSpecs";
 
 export function useAsync<T>(loader: () => Promise<T>, deps: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const requestSequence = useRef(0);
+  const mounted = useRef(true);
 
   const refresh = useCallback(async () => {
+    const request = ++requestSequence.current;
     setLoading(true);
     setError(null);
     try {
-      setData(await loader());
+      const next = await loader();
+      if (mounted.current && request === requestSequence.current) setData(next);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (mounted.current && request === requestSequence.current) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
-      setLoading(false);
+      if (mounted.current && request === requestSequence.current) setLoading(false);
     }
   }, deps);
 
   useEffect(() => {
+    mounted.current = true;
     void refresh();
+    return () => {
+      mounted.current = false;
+      requestSequence.current += 1;
+    };
   }, [refresh]);
 
   return { data, error, loading, refresh, setData };
+}
+
+export function useSerialPolling<T>(
+  loader: () => Promise<T>,
+  deps: unknown[] = [],
+  options: { enabled?: boolean; intervalMs?: number } = {},
+) {
+  const [data, setData] = useState<T | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const inFlight = useRef(false);
+  const mounted = useRef(true);
+  const generation = useRef(0);
+
+  const refresh = useCallback(async () => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    const requestGeneration = generation.current;
+    try {
+      const next = await loader();
+      if (mounted.current && requestGeneration === generation.current) {
+        setData(next);
+        setError(null);
+      }
+    } catch (err) {
+      if (mounted.current && requestGeneration === generation.current) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      inFlight.current = false;
+      if (mounted.current) setLoading(false);
+    }
+  }, deps);
+
+  useEffect(() => {
+    mounted.current = true;
+    generation.current += 1;
+    let timer: number | undefined;
+    let active = true;
+    const interval = Math.max(options.intervalMs ?? 1000, 100);
+    const schedule = () => {
+      if (!active || !options.enabled || document.hidden) return;
+      timer = window.setTimeout(async () => {
+        await refresh();
+        schedule();
+      }, interval);
+    };
+    const wake = () => {
+      if (timer !== undefined) window.clearTimeout(timer);
+      if (!document.hidden) void refresh().then(schedule);
+    };
+    void refresh().then(schedule);
+    document.addEventListener("visibilitychange", wake);
+    return () => {
+      active = false;
+      mounted.current = false;
+      generation.current += 1;
+      if (timer !== undefined) window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", wake);
+    };
+  }, [refresh, options.enabled, options.intervalMs]);
+
+  return { data, error, loading, refresh };
 }
 
 export function useJsonInput(initial = "{}") {

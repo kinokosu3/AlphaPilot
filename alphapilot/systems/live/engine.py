@@ -37,6 +37,7 @@ from alphapilot.systems.live.types import (
     Position,
     TickData,
     Trade,
+    normalize_symbol,
 )
 
 
@@ -69,6 +70,7 @@ class LiveEngine:
         self._event_now = getattr(self.ledger, "_now_fn", datetime.now)
         self.risk = risk  # installed in Phase 3; None => no pre-trade checks
         self._tick_listeners: list[Callable[[TickData], None]] = []
+        self._subscribed_symbols: set[str] = set()
         self.trade_gateway.register_callback(self)
         if self.quote_gateway is not self.trade_gateway:
             self.quote_gateway.register_callback(self)
@@ -80,6 +82,11 @@ class LiveEngine:
         delivers gateway events — keep them fast and non-blocking.
         """
         self._tick_listeners.append(listener)
+
+    def remove_tick_listener(self, listener: Callable[[TickData], None]) -> None:
+        """Detach a previously registered tick consumer."""
+        if listener in self._tick_listeners:
+            self._tick_listeners.remove(listener)
 
     # ---- GatewayCallback (fan-out to OMS + ledger) ----------------------- #
     def on_order(self, order: Order) -> None:
@@ -103,6 +110,8 @@ class LiveEngine:
         self._publish("contract", contract, source=_source(contract, self))
 
     def on_tick(self, tick: TickData) -> None:
+        if tick.received_at is None:
+            tick.received_at = self._event_now()
         self.oms.on_tick(tick)
         self._publish("tick", tick, source=_source(tick, self))
         for listener in self._tick_listeners:
@@ -321,7 +330,15 @@ class LiveEngine:
 
     def subscribe_market_data(self, symbols: list[str]) -> None:
         """Subscribe through the quote channel, not the trade channel."""
-        self.quote_gateway.subscribe(symbols)
+        pending: list[str] = []
+        for raw in symbols:
+            code, exchange = normalize_symbol(raw)
+            key = f"{code}.{exchange.value}"
+            if key not in self._subscribed_symbols:
+                self._subscribed_symbols.add(key)
+                pending.append(key)
+        if pending:
+            self.quote_gateway.subscribe(pending)
 
     def reconcile_and_resume(self) -> dict[str, Any]:
         """Backward-compatible reconnect helper that resumes after reconciliation."""
@@ -343,6 +360,7 @@ class LiveEngine:
             "positions": len(self.oms.get_positions()),
             "contracts": len(self.oms.contracts),
             "ticks": len(self.oms.ticks),
+            "subscribed_symbols": sorted(self._subscribed_symbols),
             "risk": self.risk.snapshot() if self.risk is not None and hasattr(self.risk, "snapshot") else None,
         }
 

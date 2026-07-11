@@ -130,6 +130,15 @@ class BarAggregator:
                 closed.append(self._close(key, working))
         return closed
 
+    def current(self, instrument: str | None = None) -> list[Bar]:
+        """Return current partial bars without closing their windows."""
+        keys = [instrument] if instrument else sorted(self._working)
+        return [
+            self._as_bar(key, self._working[key])
+            for key in keys
+            if key in self._working
+        ]
+
     # ---- internals ----------------------------------------------------------- #
     def _window_start(self, dt: datetime) -> datetime:
         if self.interval >= DAY_INTERVAL:
@@ -140,7 +149,16 @@ class BarAggregator:
         return midnight + timedelta(seconds=floored)
 
     def _close(self, key: str, working: _WorkingBar) -> Bar:
-        bar = Bar(
+        bar = self._as_bar(key, working)
+        self._carry[key] = (working.last_volume, working.last_amount)
+        del self._working[key]
+        if self.on_bar is not None:
+            self.on_bar(bar)
+        return bar
+
+    @staticmethod
+    def _as_bar(key: str, working: _WorkingBar) -> Bar:
+        return Bar(
             datetime=working.start,
             instrument=key,
             open=working.open,
@@ -150,8 +168,3 @@ class BarAggregator:
             volume=max(working.last_volume - working.base_volume, 0.0),
             amount=max(working.last_amount - working.base_amount, 0.0),
         )
-        self._carry[key] = (working.last_volume, working.last_amount)
-        del self._working[key]
-        if self.on_bar is not None:
-            self.on_bar(bar)
-        return bar

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { I18nProvider } from "../../i18n";
 import { ToastProvider } from "../../toast";
 import { LivePage } from "./LivePage";
@@ -14,7 +14,8 @@ function renderLivePage() {
   );
 }
 
-function mockLiveFetch() {
+function mockLiveFetch(options: { alive?: boolean; accountMetrics?: boolean } = {}) {
+  const alive = options.alive ?? true;
   const daemonState = {
     engine: {
       mode: "paper",
@@ -27,8 +28,13 @@ function mockLiveFetch() {
       contracts: 1,
       ticks: 1,
     },
-    account: { balance: 100000, available: 99000, frozen: 0 },
-    positions: [{ code: "600000", exchange: "SSE", volume: 100, available: 0, yd_volume: 0, frozen: 0, price: 10 }],
+    account: {
+      balance: 100000,
+      available: 99000,
+      frozen: 0,
+      ...(options.accountMetrics === false ? {} : { commission: 8.5, close_profit: 320, position_profit: 125, risk_ratio: 0.08 }),
+    },
+    positions: [{ code: "600000", exchange: "SSE", volume: 100, available: 0, yd_volume: 0, frozen: 0, price: 10, ...(options.accountMetrics === false ? {} : { pnl: 125 }) }],
     orders: [
       {
         order_id: "paper-active",
@@ -47,9 +53,9 @@ function mockLiveFetch() {
   const daemonStatus = {
     exists: true,
     path: "/tmp/daemon.json",
-    alive: true,
-    running: true,
-    status: "running",
+    alive,
+    running: alive,
+    status: alive ? "running" : "stopped",
     pid: 123,
     commands_processed: 2,
     runner: { enabled: true, strategy: "sma_filter", freq: "min" },
@@ -158,10 +164,45 @@ function mockLiveFetch() {
         issues: [],
       });
     }
+    if (path === "/api/timing/strategies") {
+      return Response.json({ names: ["sma_filter", "boll_mean_reversion"], strategies: [] });
+    }
     if (path.startsWith("/api/live/runtime/state")) {
       return Response.json({ exists: true, state_path: "/tmp/state/runtime_state.json", state: daemonState });
     }
     if (path.startsWith("/api/live/daemon/status")) return Response.json(daemonStatus);
+    if (path.startsWith("/api/live/market/snapshot")) {
+      return Response.json({
+        exists: true,
+        generated_at: "2026-07-06T10:02:03",
+        quote_provider: "emt",
+        daemon_running: true,
+        daemon_status: "running",
+        subscribed_symbols: ["600000.SSE"],
+        stale_after_seconds: 3,
+        ticks: [{
+          key: "600000.SSE", code: "600000", exchange: "SSE", name: "浦发银行",
+          last_price: 10.12, pre_close: 10, change: 0.12, change_pct: 1.2,
+          bid_price_1: 10.11, ask_price_1: 10.12, bid_volume_1: 200, ask_volume_1: 300,
+          volume: 120000, turnover: 1210000, datetime: "2026-07-06T10:02:02",
+          received_at: "2026-07-06T10:02:03", age_seconds: 1, stale: false, gateway: "emt",
+        }],
+        recorder: {
+          enabled: true, healthy: true, degraded: false, queue_depth: 0,
+          written_ticks: 1234, written_bars: 20, dropped_ticks: 0, dropped_bars: 0,
+        },
+      });
+    }
+    if (path.startsWith("/api/live/market/bars")) {
+      return Response.json({
+        symbol: "600000.SSE", interval: path.includes("interval=300") ? 300 : 60,
+        date_range: ["2026-07-06T10:01:00", "2026-07-06T10:02:00"],
+        rows: [
+          { date: "2026-07-06T10:01:00", open: 10, high: 10.1, low: 9.99, close: 10.08, volume: 1000, amount: 10080 },
+          { date: "2026-07-06T10:02:00", open: 10.08, high: 10.12, low: 10.07, close: 10.12, volume: 800, amount: 8096 },
+        ],
+      });
+    }
     if (path.startsWith("/api/live/risk/status")) {
       return Response.json({
         exists: true,
@@ -224,6 +265,10 @@ function mockLiveFetch() {
     if (path === "/api/live/daemon/strategy/pause" && init?.method === "POST") {
       return Response.json({ accepted: true, daemon: { ...daemonStatus, runner_status: { enabled: true, active: false, paused: true } } });
     }
+    if (path === "/api/live/daemon/start" && init?.method === "POST") {
+      Object.assign(daemonStatus, { alive: true, running: true, status: "running" });
+      return Response.json(daemonStatus);
+    }
     if (path === "/api/live/daemon/reconnect" && init?.method === "POST") {
       return Response.json({ accepted: true, daemon: { ...daemonStatus, last_command: { action: "reconnect", ok: true } } });
     }
@@ -235,6 +280,10 @@ function mockLiveFetch() {
     }
     if (path === "/api/live/daemon/submit-target" && init?.method === "POST") {
       return Response.json({ accepted: true, daemon: { ...daemonStatus, last_command: { action: "target", ok: true, planned: 1 } } });
+    }
+    if (path === "/api/live/daemon/stop" && init?.method === "POST") {
+      Object.assign(daemonStatus, { alive: false, running: false, status: "stopped" });
+      return Response.json({ ...daemonStatus, stopped: true });
     }
     return Response.json({}, { status: 404 });
   });
@@ -250,61 +299,153 @@ function postedJson(fetchMock: ReturnType<typeof mockLiveFetch>, path: string) {
 
 afterEach(() => {
   cleanup();
+  window.localStorage.clear();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
 describe("LivePage", () => {
-  it("shows risk and ledger panels and controls daemon operations", async () => {
+  it("defaults to Paper, renders one business tab at a time and opens an accessible diagnostics drawer", async () => {
     const fetchMock = mockLiveFetch();
     vi.spyOn(window, "confirm").mockReturnValue(true);
     renderLivePage();
 
-    expect(await screen.findByText("风控与恢复")).toBeInTheDocument();
-    expect(await screen.findByText("审计事件")).toBeInTheDocument();
-    expect(await screen.findByText("ref-1")).toBeInTheDocument();
-    expect(await screen.findByText("daemon 手动委托")).toBeInTheDocument();
-    expect(await screen.findByText("trade-1")).toBeInTheDocument();
-    expect(screen.getByLabelText("交易券商")).toBeDisabled();
-    expect(await screen.findByText(/alphapilot-broker-emt/)).toBeInTheDocument();
+    expect(await screen.findByRole("tab", { name: "模拟 PAPER" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("策略运行")).toBeInTheDocument();
+    expect(screen.getByText("手工交易")).toBeInTheDocument();
+    expect(screen.queryByText("纸面演练")).not.toBeInTheDocument();
+    expect((await screen.findAllByText("125")).length).toBeGreaterThan(0);
+    expect(screen.getByRole("tab", { name: /持仓/ })).toHaveAttribute("aria-selected", "true");
+    expect(screen.queryByText("trade-1")).not.toBeInTheDocument();
 
+    fireEvent.click(screen.getByRole("tab", { name: /成交/ }));
+    expect(await screen.findByText("trade-1")).toBeInTheDocument();
+    expect(screen.queryByText("浮盈比例")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "连接与诊断" }));
+    const drawer = await screen.findByRole("dialog", { name: "连接与诊断" });
+    expect(drawer).toHaveAttribute("aria-modal", "true");
+    expect(screen.getByText("风控与恢复")).toBeInTheDocument();
+    expect(screen.getAllByText("alphapilot-broker-emt").length).toBeGreaterThanOrEqual(1);
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "连接与诊断" })).not.toBeInTheDocument());
+
+    const badLiveRequests = fetchMock.mock.calls.filter(([input]) => {
+      const path = String(input);
+      return path.includes("mode=live") && path.includes("trade_broker=paper");
+    });
+    expect(badLiveRequests).toHaveLength(0);
+  });
+
+  it("shows unavailable account and position metrics as em dashes", async () => {
+    mockLiveFetch({ accountMetrics: false });
+    renderLivePage();
+
+    const status = await screen.findByRole("region", { name: "交易工作台状态" });
+    expect(within(status).getAllByText("—").length).toBeGreaterThanOrEqual(3);
+    expect(await screen.findByText("浮盈比例")).toBeInTheDocument();
+    expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(5);
+  });
+
+  it("remembers Live, preserves confirmations and controls daemon operations", async () => {
+    window.localStorage.setItem("portal_live_workspace", "live");
+    const fetchMock = mockLiveFetch();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    renderLivePage();
+
+    expect(await screen.findByRole("tab", { name: "实盘 LIVE" })).toHaveAttribute("aria-selected", "true");
+
+    fireEvent.click(screen.getByRole("button", { name: "连接与诊断" }));
+    expect(await screen.findByLabelText("交易券商")).toBeDisabled();
     fireEvent.click(screen.getByLabelText("网络预检"));
     fireEvent.click(screen.getByRole("button", { name: "预检" }));
-    await waitFor(() => {
-      expect(postedJson(fetchMock, "/api/live/runtime/preflight")?.network).toBe(true);
-    });
-    expect(postedJson(fetchMock, "/api/live/runtime/preflight")?.broker).toBe("emt");
+    await waitFor(() => expect(postedJson(fetchMock, "/api/live/runtime/preflight")?.network).toBe(true));
     expect(postedJson(fetchMock, "/api/live/runtime/preflight")?.trade_broker).toBe("emt");
-    expect(postedJson(fetchMock, "/api/live/runtime/preflight")?.quote_provider).toBe("emt");
+    fireEvent.keyDown(document, { key: "Escape" });
 
+    const code = screen.getByLabelText("代码");
+    fireEvent.change(code, { target: { value: "SH600000" } });
     fireEvent.click(screen.getByRole("button", { name: "提交委托" }));
-    await waitFor(() => {
-      expect(postedJson(fetchMock, "/api/live/daemon/order")?.confirm_live).toBe(true);
-    });
+    await waitFor(() => expect(postedJson(fetchMock, "/api/live/daemon/order")?.confirm_live).toBe(true));
     expect(postedJson(fetchMock, "/api/live/daemon/order")?.symbol).toBe("SH600000");
     expect(postedJson(fetchMock, "/api/live/daemon/order")?.product).toBe("equity");
-    expect(postedJson(fetchMock, "/api/live/daemon/order")?.offset).toBe("none");
 
+    fireEvent.click(screen.getByRole("tab", { name: "目标仓位" }));
     fireEvent.click(screen.getByLabelText("真实路由下单"));
     fireEvent.click(screen.getByRole("button", { name: "对账并下单" }));
-    await waitFor(() => {
-      expect(postedJson(fetchMock, "/api/live/daemon/submit-target")?.confirm_live).toBe(true);
-    });
+    await waitFor(() => expect(postedJson(fetchMock, "/api/live/daemon/submit-target")?.confirm_live).toBe(true));
     expect(postedJson(fetchMock, "/api/live/daemon/submit-target")?.route).toBe(true);
 
     fireEvent.click(screen.getByRole("button", { name: "暂停策略" }));
-    await waitFor(() => {
-      expect(fetchMock.mock.calls.some(([input, init]) => String(input) === "/api/live/daemon/strategy/pause" && init?.method === "POST")).toBe(true);
-    });
-
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input) === "/api/live/daemon/strategy/pause")).toBe(true));
+    fireEvent.click(screen.getByText("更多技术操作"));
     fireEvent.click(screen.getByRole("button", { name: "重连" }));
-    await waitFor(() => {
-      expect(fetchMock.mock.calls.some(([input, init]) => String(input) === "/api/live/daemon/reconnect" && init?.method === "POST")).toBe(true);
-    });
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input) === "/api/live/daemon/reconnect")).toBe(true));
 
+    fireEvent.click(screen.getByRole("tab", { name: /^委托\s*1$/ }));
     fireEvent.click(screen.getByRole("button", { name: "撤单" }));
-    await waitFor(() => {
-      expect(fetchMock.mock.calls.some(([input, init]) => String(input) === "/api/live/daemon/cancel" && init?.method === "POST")).toBe(true);
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input) === "/api/live/daemon/cancel")).toBe(true));
+
+    fireEvent.click(screen.getByRole("button", { name: "停止 daemon" }));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "模拟 PAPER" })).toBeEnabled());
+    expect(fetchMock.mock.calls.some(([input]) => String(input) === "/api/live/daemon/stop")).toBe(true);
+  });
+
+  it("starts the Paper daemon with the selected initial cash", async () => {
+    const fetchMock = mockLiveFetch({ alive: false });
+    renderLivePage();
+
+    expect(await screen.findByRole("button", { name: "启动 daemon" })).toBeEnabled();
+    fireEvent.change(screen.getByLabelText("初始资金"), { target: { value: "250000" } });
+    fireEvent.click(screen.getByRole("button", { name: "启动 daemon" }));
+    await waitFor(() => expect(postedJson(fetchMock, "/api/live/daemon/start")?.mode).toBe("paper"));
+    expect(postedJson(fetchMock, "/api/live/daemon/start")?.cash).toBe(250000);
+    expect(postedJson(fetchMock, "/api/live/daemon/start")?.trade_broker).toBe("paper");
+  });
+
+  it("starts the Live daemon with resolved providers and no simulated cash", async () => {
+    window.localStorage.setItem("portal_live_workspace", "live");
+    const fetchMock = mockLiveFetch({ alive: false });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    renderLivePage();
+
+    const start = await screen.findByRole("button", { name: "启动 daemon" });
+    await waitFor(() => expect(start).toBeEnabled());
+    fireEvent.click(start);
+    await waitFor(() => expect(postedJson(fetchMock, "/api/live/daemon/start")?.mode).toBe("live"));
+    expect(postedJson(fetchMock, "/api/live/daemon/start")?.trade_broker).toBe("emt");
+    expect(postedJson(fetchMock, "/api/live/daemon/start")?.quote_provider).toBe("emt");
+    expect(postedJson(fetchMock, "/api/live/daemon/start")?.cash).toBeUndefined();
+  });
+
+  it("persists environment changes and always resets target routing", async () => {
+    mockLiveFetch({ alive: false });
+    renderLivePage();
+
+    await screen.findByText("手工交易");
+    fireEvent.click(screen.getByRole("tab", { name: "目标仓位" }));
+    const route = screen.getByLabelText("真实路由下单");
+    fireEvent.click(route);
+    expect(route).toBeChecked();
+    fireEvent.click(screen.getByRole("tab", { name: "实盘 LIVE" }));
+    await waitFor(() => expect(window.localStorage.getItem("portal_live_workspace")).toBe("live"));
+    expect(screen.getByLabelText("真实路由下单")).not.toBeChecked();
+    fireEvent.click(screen.getByRole("tab", { name: "普通委托" }));
+    expect(screen.getByLabelText("代码")).toHaveValue("");
+  });
+
+  it("stops polling the previous environment after a workspace switch", async () => {
+    const fetchMock = mockLiveFetch({ alive: false });
+    renderLivePage();
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).startsWith("/api/live/daemon/status?") && String(input).includes("mode=paper"))).toBe(true));
+    fireEvent.click(screen.getByRole("tab", { name: "实盘 LIVE" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).startsWith("/api/live/daemon/status?") && String(input).includes("mode=live"))).toBe(true));
+    const paperCalls = () => fetchMock.mock.calls.filter(([input]) => String(input).startsWith("/api/live/daemon/status?") && String(input).includes("mode=paper")).length;
+    const countAfterSwitch = paperCalls();
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 1150));
     });
+    expect(paperCalls()).toBe(countAfterSwitch);
   });
 });

@@ -6,7 +6,7 @@ risk gate and executor live in submodules and are imported on demand so that
 ``import alphapilot.systems.live`` stays light and free of vn.py / broker SDKs.
 """
 
-from alphapilot.systems.live.config import LiveConfig, RiskLimits, RunMode
+from alphapilot.systems.live.config import LiveConfig, MarketDataConfig, RiskLimits, RunMode
 from alphapilot.systems.live.events import LiveEvent, LiveEventBus
 from alphapilot.systems.live.gateway import BrokerGateway, GatewayCallback, QuoteGateway
 from alphapilot.systems.live.plugin import (
@@ -52,6 +52,7 @@ __all__ = [
     "LiveEvent",
     "LiveEventBus",
     "LiveConfig",
+    "MarketDataConfig",
     "Offset",
     "Order",
     "OrderRequest",

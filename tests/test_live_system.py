@@ -251,6 +251,43 @@ def test_live_module_daemon_start_status_stop(engine, tmp_path) -> None:
     assert stopped["running"] is False
 
 
+def test_stop_daemon_waits_until_process_is_no_longer_alive(tmp_path, monkeypatch) -> None:
+    from alphapilot.systems.live import daemon as daemon_module
+    from alphapilot.systems.live.config import LiveConfig, RunMode
+
+    cfg = LiveConfig(
+        mode=RunMode.PAPER,
+        broker="paper",
+        state_dir=tmp_path / "state",
+        ledger_dir=tmp_path / "ledger",
+    )
+    statuses = [
+        {"pid": 12345, "status": "running", "alive": True, "running": True},
+        {"pid": 12345, "status": "stopped", "alive": True, "running": False},
+        {"pid": 12345, "status": "stopped", "alive": False, "running": False},
+    ]
+    calls = 0
+
+    def fake_load_daemon(_state_dir):
+        nonlocal calls
+        item = statuses[min(calls, len(statuses) - 1)]
+        calls += 1
+        return dict(item)
+
+    signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(daemon_module, "load_daemon", fake_load_daemon)
+    monkeypatch.setattr(daemon_module.os, "kill", lambda pid, sig: signals.append((pid, sig)))
+    monkeypatch.setattr(daemon_module.time, "sleep", lambda _seconds: None)
+
+    stopped = daemon_module.stop_daemon(cfg, timeout=1.0)
+
+    assert calls == 3
+    assert signals == [(12345, daemon_module.signal.SIGTERM)]
+    assert stopped["stopped"] is True
+    assert stopped["alive"] is False
+    assert stopped["running"] is False
+
+
 def test_daemon_wait_uses_command_status_log_when_last_command_is_missing(tmp_path) -> None:
     from alphapilot.systems.live.config import LiveConfig, RunMode
     from alphapilot.systems.live.daemon import record_command_status, wait_for_command, write_daemon

@@ -348,7 +348,7 @@ class LiveModule(BaseModule):
         quote_provider: str | None = None,
         symbols: str | list[str] | None = None,
         cash: float | None = None,
-        interval: float = 2.0,
+        interval: float = 1.0,
         timeout: float = 20.0,
         ledger_dir: str | None = None,
         state_dir: str | None = None,
@@ -359,6 +359,7 @@ class LiveModule(BaseModule):
         bar_seconds: int = 60,
         min_bars: int = 30,
         window: int = 250,
+        record_market_data: bool | None = None,
     ) -> dict[str, Any]:
         """Start a detached live runtime daemon.
 
@@ -388,7 +389,90 @@ class LiveModule(BaseModule):
             bar_seconds=int(bar_seconds),
             min_bars=int(min_bars),
             window=int(window),
+            record_market_data=record_market_data,
         )
+
+    def live_market_snapshot(
+        self,
+        mode: str | None = None,
+        broker: str | None = None,
+        trade_broker: str | None = None,
+        quote_provider: str | None = None,
+        state_dir: str | None = None,
+        symbols: str | list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Read the daemon's latest quote projection without touching a gateway."""
+        from alphapilot.systems.live.daemon import load_daemon
+        from alphapilot.systems.live.market_data import read_market_snapshot, refresh_snapshot_ages
+        from alphapilot.systems.live.runtime import clone_config
+
+        cfg = clone_config(
+            self._system().config,
+            mode=mode,
+            broker=broker,
+            trade_broker=trade_broker,
+            quote_provider=quote_provider,
+            state_dir=state_dir,
+        )
+        daemon = load_daemon(cfg.state_dir)
+        snapshot = refresh_snapshot_ages(
+            read_market_snapshot(cfg.state_dir),
+            symbols=_split_symbols(symbols),
+            stale_after_seconds=cfg.market_data.stale_after_seconds,
+        )
+        daemon_running = bool(daemon.get("running"))
+        daemon_status = str(daemon.get("status") or "stopped")
+        if not daemon_running and daemon_status in {"running", "starting"}:
+            daemon_status = "stopped"
+        snapshot["daemon_running"] = daemon_running
+        snapshot["daemon_status"] = daemon_status
+        if not daemon.get("exists") and not snapshot.get("exists"):
+            snapshot["exists"] = False
+        return snapshot
+
+    def live_market_bars(
+        self,
+        symbol: str,
+        interval: int = 60,
+        limit: int = 300,
+        mode: str | None = None,
+        broker: str | None = None,
+        trade_broker: str | None = None,
+        quote_provider: str | None = None,
+        state_dir: str | None = None,
+    ) -> dict[str, Any]:
+        """Read recent persisted and current live bars for one subscribed symbol."""
+        from alphapilot.systems.live.market_data import load_market_bars, read_market_snapshot
+        from alphapilot.systems.live.runtime import clone_config
+        from alphapilot.systems.live.types import normalize_symbol
+
+        cfg = clone_config(
+            self._system().config,
+            mode=mode,
+            broker=broker,
+            trade_broker=trade_broker,
+            quote_provider=quote_provider,
+            state_dir=state_dir,
+        )
+        code, exchange = normalize_symbol(symbol)
+        key = f"{code}.{exchange.value}"
+        snapshot = read_market_snapshot(cfg.state_dir)
+        provider = str(snapshot.get("quote_provider") or cfg.quote_provider or "quote")
+        rows = load_market_bars(
+            cfg.market_data.data_dir,
+            provider,
+            key,
+            int(interval),
+            limit=max(1, min(int(limit), 2000)),
+            current=snapshot.get("current_bars") if isinstance(snapshot, dict) else None,
+        )
+        return {
+            "symbol": key,
+            "label": key,
+            "interval": int(interval),
+            "date_range": [rows[0]["date"], rows[-1]["date"]] if rows else [],
+            "rows": rows,
+        }
 
     def live_daemon_stop(
         self,
@@ -962,6 +1046,8 @@ class LiveModule(BaseModule):
             "live_run": self.live_run,
             "live_daemon_status": self.live_daemon_status,
             "live_daemon_start": self.live_daemon_start,
+            "live_market_snapshot": self.live_market_snapshot,
+            "live_market_bars": self.live_market_bars,
             "live_daemon_stop": self.live_daemon_stop,
             "live_daemon_halt": self.live_daemon_halt,
             "live_daemon_resume": self.live_daemon_resume,

@@ -108,3 +108,60 @@
 .kline-stats .down strong { color: #26a69a; }
 .kline-note { margin-bottom: 8px; }
 
+.live-market-panel {
+  padding: 14px;
+}
+
+.live-market-panel .panel-head,
+.live-market-chart-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.live-market-panel .panel-head h3,
+.live-market-chart-head h3 {
+  margin: 0 0 4px;
+  font-size: 16px;
+}
+
+.live-recorder-metrics {
+  margin-top: 10px;
+}
+
+.live-recorder-metrics .metric strong {
+  font-size: 18px;
+}
+
+.live-symbol-button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.live-symbol-button:hover,
+.live-symbol-button.active {
+  color: var(--accent-700);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.market-up {
+  color: #ef5350;
+  font-weight: 650;
+}
+
+.market-down {
+  color: #26a69a;
+  font-weight: 650;
+}
+
+.live-market-chart-head {
+  margin-top: 18px;
+}

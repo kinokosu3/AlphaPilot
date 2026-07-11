@@ -108,6 +108,7 @@ def test_all_portal_pages_render_in_real_chrome_without_api_500(browser_portal_u
     options.set_capability("goog:loggingPrefs", {"browser": "ALL", "performance": "ALL"})
 
     driver = webdriver.Chrome(options=options)
+    paper_daemon_started = False
     try:
         for route in ROUTES:
             driver.get(f"{browser_portal_url}{route}")
@@ -116,6 +117,58 @@ def test_all_portal_pages_render_in_real_chrome_without_api_500(browser_portal_u
                 lambda current: not current.find_elements(By.CSS_SELECTOR, ".route-skeleton")
             )
             assert "AlphaPilot" in driver.find_element(By.TAG_NAME, "body").text
+
+        # The live route is a compact trading workspace: first visit is Paper,
+        # the strategy/order cards share the desktop first screen, and only one
+        # business tab panel is mounted at a time.
+        driver.get(f"{browser_portal_url}/live")
+        WebDriverWait(driver, 15).until(ec.presence_of_element_located((By.CSS_SELECTOR, ".live-workspace-status")))
+        selected_environment = driver.find_element(By.CSS_SELECTOR, ".live-environment-tabs [aria-selected='true']")
+        assert "PAPER" in selected_environment.text.upper()
+        assert len(driver.find_elements(By.CSS_SELECTOR, ".live-workbench-grid > .live-work-card")) == 2
+        desktop_columns = driver.execute_script(
+            "return getComputedStyle(document.querySelector('.live-workbench-grid')).gridTemplateColumns"
+        )
+        assert len(str(desktop_columns).split()) == 2
+        assert len(driver.find_elements(By.CSS_SELECTOR, ".live-tab-content [role='tabpanel']")) == 0
+        assert driver.execute_script("return document.documentElement.scrollHeight") <= 2200
+
+        start_request = urllib.request.Request(
+            f"{browser_portal_url}/api/live/daemon/start",
+            data=json.dumps(
+                {
+                    "mode": "paper",
+                    "broker": "paper",
+                    "trade_broker": "paper",
+                    "quote_provider": "paper",
+                    "cash": 100000,
+                    "symbols": "600000",
+                    "record_market_data": False,
+                    "timeout": 20,
+                }
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(start_request, timeout=30) as response:
+            assert response.status == 200
+        paper_daemon_started = True
+        driver.refresh()
+        WebDriverWait(driver, 15).until(ec.presence_of_element_located((By.CSS_SELECTOR, ".live-workspace-status .pill.running")))
+
+        driver.set_window_size(390, 844)
+        WebDriverWait(driver, 10).until(
+            lambda current: len(
+                str(
+                    current.execute_script(
+                        "return getComputedStyle(document.querySelector('.live-workbench-grid')).gridTemplateColumns"
+                    )
+                ).split()
+            ) == 1
+        )
+        assert driver.find_element(By.CSS_SELECTOR, ".live-status-actions .danger").is_displayed()
+        assert driver.find_element(By.CSS_SELECTOR, ".live-business-tabs").is_displayed()
+        driver.set_window_size(1600, 1200)
 
         # Open the seeded result. This verifies the backtest-detail UI and that the
         # reduced Plotly finance bundle can actually render the existing traces.
@@ -153,4 +206,15 @@ def test_all_portal_pages_render_in_real_chrome_without_api_500(browser_portal_u
         ]
         assert severe == []
     finally:
+        if paper_daemon_started:
+            try:
+                stop_request = urllib.request.Request(
+                    f"{browser_portal_url}/api/live/daemon/stop",
+                    data=b'{"timeout": 5}',
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                urllib.request.urlopen(stop_request, timeout=10).close()
+            except OSError:
+                pass
         driver.quit()

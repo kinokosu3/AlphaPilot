@@ -407,6 +407,8 @@ class TickData:
     bid_volume_1: float = 0.0
     ask_volume_1: float = 0.0
     gateway: str = ""
+    received_at: Optional[datetime] = None
+    trading_day: str = ""
 
     @property
     def key(self) -> str:

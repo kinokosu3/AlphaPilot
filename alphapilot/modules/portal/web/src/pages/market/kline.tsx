@@ -1,6 +1,5 @@
 import { useMemo } from "react";
-import { chartHeight } from "../../components";
-import { LazyPlot as Plot } from "../../components/LazyPlot";
+import { CandlestickPlot } from "../../components/CandlestickPlot";
 import { useI18n } from "../../i18n";
 
 export type KlineMetric = "amount" | "volume" | "turn" | "pctChg";
@@ -131,11 +130,6 @@ export function klineCategoryTicks(
   return { tickvals, ticktext: tickvals.map((i) => klineTimeLabel(rows[i].date)) };
 }
 
-function cssVar(name: string, fallback: string): string {
-  if (typeof window === "undefined") return fallback;
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
-}
-
 function formatDateLabel(value: unknown): string {
   return value ? String(value).slice(0, 10) : "-";
 }
@@ -194,21 +188,9 @@ export function MarketKlineViewer({
   const chartRange = klineXAxisType === "category"
     ? klineCategoryRange(rows, range)
     : klineRangeValue(rows, range);
-  const intradayTickProps = klineXAxisType === "category"
-    ? (() => {
-        const { tickvals, ticktext } = klineCategoryTicks(rows, chartRange as [number, number] | undefined);
-        return { tickmode: "array" as const, tickvals, ticktext };
-      })()
-    : {};
-  const chartColors = {
-    surface: cssVar("--surface", "#ffffff"),
-    surface2: cssVar("--surface-2", "#f7f8fc"),
-    border: cssVar("--border", "#e3e6ef"),
-    text: cssVar("--text", "#1a2233"),
-    muted: cssVar("--text-muted", "#667085"),
-    up: "#ef5350",
-    down: "#26a69a"
-  };
+  const intradayTicks = klineXAxisType === "category"
+    ? klineCategoryTicks(rows, chartRange as [number, number] | undefined)
+    : undefined;
   const klineHoverText = rows.map((row, index) => {
     const pct = metricValue(row, "pctChg", rows[index - 1]);
     return [
@@ -278,112 +260,17 @@ export function MarketKlineViewer({
         </div>
       </div>
       {chartMetric !== subMetric ? <p className="kline-note">{t("klineMetricFallback")}</p> : null}
-      <Plot
-        data={[
-          {
-            x: rows.map((row) => row.date),
-            open: rows.map((row) => row.open),
-            high: rows.map((row) => row.high),
-            low: rows.map((row) => row.low),
-            close: rows.map((row) => row.close),
-            type: "candlestick",
-            name: klineLabel,
-            text: klineHoverText,
-            hovertemplate: "%{text}<extra></extra>",
-            increasing: { line: { color: chartColors.up, width: 1.1 }, fillcolor: chartColors.up },
-            decreasing: { line: { color: chartColors.down, width: 1.1 }, fillcolor: chartColors.down },
-            xaxis: "x",
-            yaxis: "y"
-          },
-          {
-            x: rows.map((row) => row.date),
-            y: subMetricValues,
-            type: "bar",
-            name: metricLabels[chartMetric],
-            marker: { color: chartMetric === "pctChg" ? volumeColors : volumeColors },
-            hovertemplate: `<b>%{x}</b><br>${metricLabels[chartMetric]}: %{y:.2f}<extra></extra>`,
-            xaxis: "x2",
-            yaxis: "y2"
-          }
-        ]}
-        layout={{
-          autosize: true,
-          height: Math.max(560, Math.min(780, chartHeight() + 180)),
-          margin: { l: 18, r: 64, t: 10, b: 34 },
-          paper_bgcolor: chartColors.surface,
-          plot_bgcolor: chartColors.surface,
-          font: { color: chartColors.text, size: 12 },
-          dragmode: "pan",
-          hovermode: "x unified",
-          showlegend: false,
-          bargap: 0,
-          xaxis: {
-            domain: [0, 1],
-            anchor: "y",
-            type: klineXAxisType,
-            range: chartRange,
-            rangeslider: { visible: false },
-            showgrid: true,
-            gridcolor: chartColors.border,
-            showline: true,
-            linecolor: chartColors.border,
-            tickfont: { color: chartColors.muted },
-            showspikes: true,
-            spikemode: "across",
-            spikesnap: "cursor",
-            spikecolor: chartColors.muted,
-            spikethickness: 1,
-            ...intradayTickProps
-          },
-          xaxis2: {
-            domain: [0, 1],
-            anchor: "y2",
-            matches: "x",
-            type: klineXAxisType,
-            showgrid: true,
-            gridcolor: chartColors.border,
-            showline: true,
-            linecolor: chartColors.border,
-            tickfont: { color: chartColors.muted },
-            showspikes: true,
-            spikemode: "across",
-            spikesnap: "cursor",
-            spikecolor: chartColors.muted,
-            spikethickness: 1,
-            ...intradayTickProps
-          },
-          yaxis: {
-            domain: [0.28, 1],
-            side: "right",
-            fixedrange: false,
-            showgrid: true,
-            gridcolor: chartColors.border,
-            zeroline: false,
-            tickfont: { color: chartColors.muted }
-          },
-          yaxis2: {
-            domain: [0, 0.22],
-            side: "right",
-            fixedrange: false,
-            showgrid: true,
-            gridcolor: chartColors.border,
-            zeroline: false,
-            title: { text: metricLabels[chartMetric], font: { color: chartColors.muted, size: 11 } },
-            tickfont: { color: chartColors.muted }
-          },
-          hoverlabel: {
-            bgcolor: chartColors.surface2,
-            bordercolor: chartColors.border,
-            font: { color: chartColors.text }
-          }
-        }}
-        config={{
-          responsive: true,
-          displaylogo: false,
-          modeBarButtonsToRemove: ["select2d", "lasso2d", "autoScale2d"]
-        }}
-        useResizeHandler
-        style={{ width: "100%" }}
+      <CandlestickPlot
+        rows={rows}
+        label={klineLabel}
+        metricLabel={metricLabels[chartMetric]}
+        metricValues={subMetricValues}
+        barColors={volumeColors}
+        hoverText={klineHoverText}
+        xaxisType={klineXAxisType}
+        range={chartRange}
+        tickvals={intradayTicks?.tickvals}
+        ticktext={intradayTicks?.ticktext}
       />
     </section>
   );

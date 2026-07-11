@@ -44,6 +44,13 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _env_path(name: str, default: Path) -> Path:
     value = os.getenv(name)
     return Path(value).expanduser() if value else default
@@ -68,6 +75,39 @@ class RiskLimits:
     max_orders_per_day: int = field(default_factory=lambda: _env_int("ALPHAPILOT_LIVE_MAX_ORDERS_PER_DAY", 1000))
     #: Board-lot size (A-shares = 100; 0 disables lot rounding).
     lot_size: int = field(default_factory=lambda: _env_int("ALPHAPILOT_LIVE_LOT_SIZE", 100))
+
+
+@dataclass
+class MarketDataConfig:
+    """Non-secret settings for live quote projection and durable recording."""
+
+    enabled: bool = field(
+        default_factory=lambda: _env_bool("ALPHAPILOT_LIVE_MARKET_ENABLED", True)
+    )
+    data_dir: Path = field(
+        default_factory=lambda: _env_path(
+            "ALPHAPILOT_LIVE_MARKET_DATA_DIR",
+            Path.cwd() / "git_ignore_folder" / "live_market_data",
+        )
+    )
+    retention_days: int = field(
+        default_factory=lambda: _env_int("ALPHAPILOT_LIVE_MARKET_RETENTION_DAYS", 30)
+    )
+    queue_size: int = field(
+        default_factory=lambda: _env_int("ALPHAPILOT_LIVE_MARKET_QUEUE_SIZE", 100_000)
+    )
+    batch_size: int = field(
+        default_factory=lambda: _env_int("ALPHAPILOT_LIVE_MARKET_BATCH_SIZE", 1_000)
+    )
+    flush_interval: float = field(
+        default_factory=lambda: _env_float("ALPHAPILOT_LIVE_MARKET_FLUSH_INTERVAL", 0.5)
+    )
+    snapshot_interval: float = field(
+        default_factory=lambda: _env_float("ALPHAPILOT_LIVE_MARKET_SNAPSHOT_INTERVAL", 1.0)
+    )
+    stale_after_seconds: float = field(
+        default_factory=lambda: _env_float("ALPHAPILOT_LIVE_MARKET_STALE_AFTER", 3.0)
+    )
 
 
 @dataclass
@@ -97,6 +137,7 @@ class LiveConfig:
     #: IANA timezone for the trading session clock.
     timezone: str = field(default_factory=lambda: _env("ALPHAPILOT_TIMEZONE", "Asia/Shanghai"))
     risk: RiskLimits = field(default_factory=RiskLimits)
+    market_data: MarketDataConfig = field(default_factory=MarketDataConfig)
 
     def __post_init__(self) -> None:
         trade = str(self.trade_broker or self.broker or "paper").strip() or "paper"
@@ -116,6 +157,7 @@ class LiveConfig:
             f"mode={self.mode}, trade_broker={self.trade_broker}, "
             f"quote_provider={self.quote_provider}, timezone={self.timezone}, "
             f"ledger_dir={self.ledger_dir}, "
+            f"market_data_dir={self.market_data.data_dir}, "
             f"risk=[max_order_value={self.risk.max_order_value}, "
             f"max_position_pct={self.risk.max_position_pct}, "
             f"price_guard_pct={self.risk.price_guard_pct}, lot_size={self.risk.lot_size}]"

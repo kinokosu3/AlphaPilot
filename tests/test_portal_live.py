@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import socket
 import time
+from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
 
 from alphapilot.modules.portal.api import create_app
+from alphapilot.systems.live.market_data import LiveMarketDataService
+from alphapilot.systems.live.types import Exchange, TickData
 
 
 def _client(engine):
@@ -28,6 +32,69 @@ def test_live_status_before_connect(engine) -> None:
     assert data["config"]["mode"] in set(data["modes"])
     assert data["running"] is False
     assert "state" not in data
+
+
+def test_live_market_snapshot_and_bars_are_read_only(engine, isolated_env) -> None:
+    client = _client(engine)
+    state_dir = isolated_env.root / "market_state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "runtime_daemon.json").write_text(
+        json.dumps({"pid": 99_999_999, "status": "running"}),
+        encoding="utf-8",
+    )
+    empty = client.get("/api/live/market/snapshot", params={"state_dir": str(state_dir)}).json()
+    assert empty["exists"] is False
+    assert empty["ticks"] == []
+    assert empty["daemon_running"] is False
+    assert empty["daemon_status"] == "stopped"
+
+    cfg = engine.get_system("live").config
+    now = datetime.now().replace(microsecond=0)
+    service = LiveMarketDataService(
+        cfg.market_data,
+        "paper",
+        ["600000"],
+        state_dir=state_dir,
+        now_fn=lambda: now,
+    )
+    service.recorder.start()
+    service.on_tick(TickData(
+        code="600000", exchange=Exchange.SSE, datetime=now.replace(second=1),
+        received_at=now, last_price=10.0, pre_close=9.9, volume=100, turnover=1_000,
+        bid_price_1=9.99, ask_price_1=10.01, gateway="paper",
+    ))
+    service.on_tick(TickData(
+        code="600000", exchange=Exchange.SSE, datetime=now.replace(second=30),
+        received_at=now, last_price=10.2, pre_close=9.9, volume=180, turnover=1_820,
+        gateway="paper",
+    ))
+    service.on_tick(TickData(
+        code="600000", exchange=Exchange.SSE, datetime=(now + timedelta(minutes=1)).replace(second=0),
+        received_at=now, last_price=10.1, pre_close=9.9, volume=200, turnover=2_020,
+        gateway="paper",
+    ))
+    service.write_snapshot()
+    service.close()
+
+    snapshot = client.get(
+        "/api/live/market/snapshot",
+        params={"state_dir": str(state_dir), "symbols": "600000"},
+    ).json()
+    assert snapshot["exists"] is True
+    assert snapshot["ticks"][0]["key"] == "600000.SSE"
+    assert snapshot["ticks"][0]["turnover"] == 2_020
+    assert snapshot["recorder"]["written_ticks"] == 3
+
+    bars = client.get(
+        "/api/live/market/bars",
+        params={"state_dir": str(state_dir), "symbol": "600000", "interval": 60},
+    ).json()
+    assert bars["symbol"] == "600000.SSE"
+    assert bars["rows"][0]["high"] == 10.2
+    assert client.get(
+        "/api/live/market/bars",
+        params={"state_dir": str(state_dir), "symbol": "600000", "interval": 10},
+    ).status_code == 400
 
 
 def test_live_broker_catalog_exposes_capabilities_without_secret_values(engine, monkeypatch) -> None:
@@ -198,6 +265,7 @@ def test_live_daemon_control_endpoints(engine, isolated_env) -> None:
             json={
                 "mode": "paper",
                 "cash": 10000,
+                "symbols": ["600000"],
                 "interval": 0.05,
                 "timeout": 1,
                 "state_dir": str(state_dir),
@@ -205,6 +273,7 @@ def test_live_daemon_control_endpoints(engine, isolated_env) -> None:
         },
     ).json()
     assert started["started"] is True
+    assert started["record_market_data"] is True
     try:
         deadline = time.time() + 5.0
         status = client.get("/api/live/daemon/status", params={"mode": "paper", "state_dir": str(state_dir)}).json()
@@ -213,6 +282,13 @@ def test_live_daemon_control_endpoints(engine, isolated_env) -> None:
             status = client.get("/api/live/daemon/status", params={"mode": "paper", "state_dir": str(state_dir)}).json()
         assert status["running"] is True, status
         assert status["pid"] == started["pid"]
+        market = client.get(
+            "/api/live/market/snapshot",
+            params={"mode": "paper", "state_dir": str(state_dir)},
+        ).json()
+        assert market["exists"] is True
+        assert market["subscribed_symbols"] == ["600000.SSE"]
+        assert market["recorder"]["enabled"] is True
 
         runner_status = client.post(
             "/api/live/daemon/strategy/status",
