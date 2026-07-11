@@ -2,11 +2,11 @@
 
 <img src="docs/AlphaPilot_logo.svg" alt="AlphaPilot" width="760">
 
-### LLM-driven quantitative factor mining, backtesting, and strategy research platform
+### LLM-driven quantitative research, paper trading, and live execution platform
 
 [中文](README.md)&nbsp;|&nbsp;[English](README_en.md)
 
-`Multi-agent factor mining`&nbsp;·&nbsp;`Qlib backtesting`&nbsp;·&nbsp;`Web portal`&nbsp;·&nbsp;`Data preparation`&nbsp;·&nbsp;`Daily signals`&nbsp;·&nbsp;`Telegram/Feishu notifications`
+`Multi-agent factor mining`&nbsp;·&nbsp;`Qlib backtesting`&nbsp;·&nbsp;`Quant timing`&nbsp;·&nbsp;`Paper / live trading`&nbsp;·&nbsp;`Web portal`&nbsp;·&nbsp;`Telegram / Feishu notifications`
 
 <p>
   <img alt="Python" src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white">
@@ -23,7 +23,7 @@
 
 ## Project Overview
 
-AlphaPilot is a stock-focused quantitative research platform for factor mining and strategy validation. It provides a unified workflow around factor generation, backtest evaluation, strategy retesting, and daily research operations. The project uses an LLM-driven multi-agent research pipeline for factor discovery, Qlib for backtesting and signal validation, and a Web portal for managing data, tasks, notifications, and research assets.
+AlphaPilot is a stock-focused quantitative research and trading platform covering data preparation, factor generation, backtest evaluation, strategy assets, daily signals, paper trading, and live execution. It uses an LLM-driven multi-agent pipeline for factor research, Qlib for backtesting and signal validation, and a unified Live Runtime that connects research signals to risk controls, order management, broker gateways, and an audit ledger. The Web portal centralizes data, tasks, research assets, notifications, and trading runtime status.
 
 ## Core Features
 
@@ -36,8 +36,8 @@ AlphaPilot is a stock-focused quantitative research platform for factor mining a
 | Daily signals | `alphapilot daily_signals` | Advance positions by trading day and generate single-day rebalance signals |
 | Trade sessions | `alphapilot trade_session_create` | Snapshot a strategy into a self-contained, resumable daily-trade account |
 | Quant timing | `alphapilot timing_backtest` | Technical-indicator signal previews, long/cash backtests, and timing artifacts |
-| Live trading | `alphapilot live_*` | Paper/live runtime, risk gates, ledger, daemon controls, and pluggable XTP Pro / EMT broker and quote integrations. Still under development |
-| Unified portal | `alphapilot portal` | Central UI for data, factors, backtests, tasks, and notifications |
+| Paper / live trading | `alphapilot live_*` | `dry_run` / `paper` / `live` modes, unified risk and OMS, daemon control, recovery reconciliation, and an audit ledger; XTP Pro / EMT are optional plugins |
+| Unified portal | `alphapilot portal` | Central UI for data, factors, backtests, timing, tasks, notifications, and live controls |
 | Data preparation | `alphapilot prepare_data` | baostock / tushare to Qlib data pipeline |
 | Notifications and remote control | `alphapilot notify_commands` | Task completion notifications through Telegram / Feishu / email plus remote chat commands |
 
@@ -85,13 +85,37 @@ After a strategy asset has been saved, you can reuse existing factors and models
 
 Main entry: `alphapilot strategy_backtest --strategy_name "<strategy name>" --mode=retrain`
 
+### Paper and Live Trading
+
+The live subsystem connects target portfolios or timing signals to one execution path: `LiveRuntime → LiveEngine → RiskGate → BrokerGateway`. The default `dry_run` mode never routes orders, while `paper` is intended for local rehearsal. A command can route to a real broker only after `live` is selected and live execution is explicitly confirmed.
+
+- Three run modes—`dry_run`, `paper`, and `live`—with foreground and persistent daemon operation
+- Manual orders, cancellation, target-portfolio submission, and an optional built-in timing-strategy runner
+- A single pre-trade gate for session, board-lot, price, cash, position, concentration, per-order, and daily-turnover checks
+- OMS state, append-only audit events, runtime snapshots, and recovery reconciliation; a trade-channel disconnect halts execution and requires review before resuming
+- XTP Pro and EMT broker/quote integrations are decoupled from the core as installable pip plugins; trading and quote providers can be configured independently
+- The Portal Live page exposes preflight, connection, daemon and strategy controls, risk state, orders, and ledger queries
+
+The safest first step is a paper daemon:
+
+```bash
+alphapilot live_daemon_start --mode paper --symbols 600000,000001 --cash 100000
+alphapilot live_daemon_status --mode paper
+alphapilot live_daemon_stop --mode paper
+```
+
+> **Live-trading warning:** this subsystem is still under active development and broker-environment validation. Before using a real account, complete paper rehearsal, plugin and network preflight, a small broker-side acceptance test, and a review of risk limits and recovery results. Do not enable real routing until you understand `--confirm_live`, daemon state, and the audit ledger.
+
+See [XTP Pro / EMT live setup](docs/live-xtp.md) and the [live plugin development and installation guide](docs/live-plugins.md) for the full setup.
+
 ### Unified Web Portal
 
-AlphaPilot provides a unified Web portal as the daily research entry point. It brings data, factors, backtests, tasks, and notifications into one interface, reducing context switching across scripts and standalone pages.
+AlphaPilot provides a unified Web portal for daily research and runtime operations. It brings data, factors, backtests, timing, tasks, notifications, and live controls into one interface, reducing context switching across scripts and standalone pages.
 
-- Unified access to factor mining, backtesting, strategy libraries, market data, and notification settings
+- Unified access to factor mining, backtesting, timing, strategy libraries, market data, notification settings, and live runtime status
 - Supports background tasks, scheduled tasks, and result review
 - Built-in backtest visualizations: cumulative returns, excess returns, account composition, turnover charts, date-range filters, daily details, factor leaderboards, and benchmark comparisons
+- The Live page separates paper and live workspaces and exposes preflight, daemon, strategy, risk, and audit controls
 - Suitable for both local research environments and server deployments
 
 Main entry: `alphapilot portal`
@@ -234,12 +258,33 @@ Or run a technical-indicator timing backtest:
 alphapilot timing_backtest --strategy_name dual_ma --symbols 000001 --strategy_params '{"short_window":5,"long_window":20}'
 ```
 
+### 7. Rehearse in Paper Mode, Then Add Live Trading (Optional)
+
+First inspect the available modes and installed broker/quote plugins:
+
+```bash
+alphapilot live_modes
+alphapilot live_plugins
+alphapilot live_brokers
+alphapilot live_quote_providers
+```
+
+The built-in paper broker works without a real broker plugin. After installing an XTP Pro or EMT plugin, run a preflight that neither logs in nor places an order before attempting a connection:
+
+```bash
+alphapilot live_preflight --broker xtp --network=False
+alphapilot live_connect --mode live --broker xtp --timeout 30
+```
+
+Broker SDK bindings and adapters are not synchronized with the core repository; install them from an authorized private index or local wheelhouse. Keep real credentials only in a local `.env` or the deployment environment. See the [live setup guide](docs/live-xtp.md) for the complete procedure.
+
 ## 🧭 Typical Workflow
 
 1. Use `prepare_data` to prepare market data and Qlib data; factor h5 cache is generated automatically by backtest/mining tasks.
 2. Use `mine` or AlphaForge commands to generate candidate factors.
 3. Use `backtest` for portfolio backtests or quick IC screening, then review results in the portal.
 4. Save effective strategies as strategy assets, then continue validation with `strategy_backtest`, `daily_signals`, or a resumable `trade_session`.
+5. To move toward execution, rehearse in the order `dry_run → paper → live`; only attach a target portfolio or timing strategy to the daemon after preflight, risk, and recovery checks pass.
 
 ## 📚 More Documentation
 
@@ -256,13 +301,17 @@ alphapilot timing_backtest --strategy_name dual_ma --symbols 000001 --strategy_p
 
 ```text
 AlphaPilot/
-├── alphapilot/          # Main application and modules
+├── alphapilot/          # Core, research systems, Live Runtime, and Portal
 ├── important_data/      # Factor library, strategy assets, templates, and stock pools
-├── docs/                # Detailed documentation
-├── tests/               # Test cases
+├── docs/                # CLI, Docker, architecture, and live setup guides
+├── scripts/             # Data maintenance plus live preflight / smoke tools
+├── tests/               # Offline, integration, and live contract tests
+├── Dockerfile.live      # x86_64 broker SDK runtime image
 ├── docker-compose.yml   # Docker service orchestration
-└── README.md            # Project home page
+└── README.md            # Chinese project home page
 ```
+
+XTP Pro / EMT SDK bindings and broker plugins are optional, potentially license-restricted packages rather than part of the AlphaPilot core source. Local plugin directories used during development are excluded from Git synchronization by default.
 
 ## 🚧 Development Status and Roadmap
 

@@ -2,11 +2,11 @@
 
 <img src="docs/AlphaPilot_logo.svg" alt="AlphaPilot" width="760">
 
-### LLM 驱动的量化因子挖掘、回测与策略研究平台
+### LLM 驱动的量化研究、模拟盘与实盘执行平台
 
 [中文](README.md)&nbsp;|&nbsp;[English](README_en.md)
 
-`多 Agent 因子挖掘`&nbsp;·&nbsp;`Qlib 回测`&nbsp;·&nbsp;`Web 门户`&nbsp;·&nbsp;`数据准备`&nbsp;·&nbsp;`日频信号`&nbsp;·&nbsp;`Telegram/飞书 通讯`
+`多 Agent 因子挖掘`&nbsp;·&nbsp;`Qlib 回测`&nbsp;·&nbsp;`量化择时`&nbsp;·&nbsp;`模拟盘 / 实盘`&nbsp;·&nbsp;`Web 门户`&nbsp;·&nbsp;`Telegram / 飞书 通讯`
 
 <p>
   <img alt="Python" src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white">
@@ -23,7 +23,7 @@
 
 ## 项目简介
 
-AlphaPilot 是一个面向股票的量化研究的因子挖掘与策略验证平台，围绕因子生成、回测评估、策略复测和日常研究操作提供统一工作流。项目使用 LLM 驱动多 Agent 因子研究流程，使用 Qlib 完成回测与信号验证，并提供 Web 门户管理数据、任务、通知和研究资产。
+AlphaPilot 是一个面向股票的量化研究与交易平台，覆盖数据准备、因子生成、回测评估、策略沉淀、日频信号、模拟盘和实盘执行。项目使用 LLM 驱动多 Agent 因子研究流程，使用 Qlib 完成回测与信号验证，并通过统一的 Live Runtime 将研究信号接入风控、订单管理、券商网关和审计账本。Web 门户用于集中管理数据、任务、研究资产、通知和交易运行状态。
 
 ## 核心功能
 
@@ -35,9 +35,9 @@ AlphaPilot 是一个面向股票的量化研究的因子挖掘与策略验证平
 | 策略复测 | `alphapilot strategy_backtest` | 复用已沉淀的策略资产与模型继续验证 |
 | 日频信号 | `alphapilot daily_signals` | 按交易日推进持仓、生成单日调仓信号 |
 | 交易会话 | `alphapilot trade_session_create` | 将策略快照为可恢复的独立日频交易账户 |
-| 量化择时 | `alphapilot timing_backtest` | 技术指标信号预览、长仓/空仓回测与择时结果产物 |
-| 实盘交易 | `alphapilot live_*` | 模拟盘/实盘运行时、风控闸门、流水账本、守护进程控制，以及 XTP Pro / EMT 的可插拔券商与行情接入；仍在开发 |
-| 统一门户 | `alphapilot portal` | 数据 / 因子 / 回测 / 任务 / 通知集中到同一界面 |
+| 量化择时 | `alphapilot timing_backtest` | 技术指标信号预览、多仓/现金回测与择时结果产物 |
+| 模拟盘 / 实盘 | `alphapilot live_*` | `dry_run` / `paper` / `live` 运行模式、统一风控与 OMS、守护进程、恢复对账和审计账本；XTP Pro / EMT 通过可选插件接入 |
+| 统一门户 | `alphapilot portal` | 数据、因子、回测、择时、任务、通知和实盘控制集中到同一界面 |
 | 数据准备 | `alphapilot prepare_data` | baostock / tushare → Qlib 数据链路 |
 | 通知与远程 | `alphapilot notify_commands` | 任务完成推送（Telegram / 飞书 / 邮件）+ 聊天命令远程发起与查询任务 |
 
@@ -85,13 +85,37 @@ AlphaPilot 的主线能力是自动化因子研究。你可以用自然语言启
 
 关键入口：`alphapilot strategy_backtest --strategy_name "<策略名>" --mode=retrain`
 
+### 模拟盘与实盘交易
+
+实盘系统把研究侧生成的目标持仓或择时信号接入统一执行链路：`LiveRuntime → LiveEngine → RiskGate → BrokerGateway`。默认模式是不会路由订单的 `dry_run`，本地演练使用 `paper`；只有显式选择 `live` 并再次确认后，命令才允许向真实券商路由。
+
+- 支持 `dry_run`、`paper`、`live` 三级运行模式，以及前台运行和长驻 daemon
+- 支持人工委托、撤单、目标组合提交，并可挂载内置择时策略 runner
+- 所有订单统一经过交易时段、整手、价格、资金、持仓、集中度、单笔和日累计限额检查
+- 维护 OMS 状态、追加式审计账本、运行时快照和恢复对账；交易通道断线会触发 halt，恢复后仍需人工检查再继续
+- XTP Pro 和 EMT 券商 / 行情接入已从核心仓库解耦为可安装、可卸载的 pip 插件，交易通道和行情源可分别配置
+- Portal「实盘交易」页面提供预检、连接、daemon 控制、策略控制、风控状态、委托与 ledger 查询
+
+最安全的体验路径是先从 paper daemon 开始：
+
+```bash
+alphapilot live_daemon_start --mode paper --symbols 600000,000001 --cash 100000
+alphapilot live_daemon_status --mode paper
+alphapilot live_daemon_stop --mode paper
+```
+
+> **实盘风险提示：** 该功能仍在持续开发和券商环境验证中。接入真实账户前，请先完成 paper 演练、插件与网络预检、小额柜台测试，并逐项确认风控限额和恢复结果。不要在未理解 `--confirm_live`、daemon 状态和 ledger 的情况下启用真实路由。
+
+详细安装、环境变量和验收流程见 [XTP Pro / EMT 实盘接入](docs/live-xtp.md) 与 [实盘插件开发和安装](docs/live-plugins.md)。
+
 ### 统一 Web 门户
 
-AlphaPilot 提供统一 Web 门户作为日常研究入口，将数据、因子、回测、任务和通知集中到同一个界面，避免在多个独立脚本和页面之间切换。
+AlphaPilot 提供统一 Web 门户作为日常研究与运行入口，将数据、因子、回测、择时、任务、通知和实盘控制集中到同一个界面，避免在多个独立脚本和页面之间切换。
 
-- 统一访问因子挖掘、回测、策略库、市场数据和通知配置
+- 统一访问因子挖掘、回测、择时、策略库、市场数据、通知配置和实盘运行状态
 - 支持后台任务、定时任务和结果查看
 - 「回测」页内置完整可视化：累计收益 / 超额 / 账户 / 换手率图表、日期范围筛选、每日明细、因子排行榜与对比基准
+- 「实盘交易」页区分 paper / live 工作区，并提供预检、daemon、策略、风险与审计控制面
 - 适合本地研究环境和服务器部署场景
 
 关键入口：`alphapilot portal`
@@ -234,12 +258,33 @@ alphapilot daily_signals --session demo_session
 alphapilot timing_backtest --strategy_name dual_ma --symbols 000001 --strategy_params '{"short_window":5,"long_window":20}'
 ```
 
+### 7. 体验模拟盘，再接入实盘（可选）
+
+先查看当前运行模式和已安装的券商 / 行情插件：
+
+```bash
+alphapilot live_modes
+alphapilot live_plugins
+alphapilot live_brokers
+alphapilot live_quote_providers
+```
+
+不安装任何真实券商插件也可以使用内置 paper broker。安装 XTP Pro / EMT 插件后，先做不登录、不下单的预检，再尝试连接：
+
+```bash
+alphapilot live_preflight --broker xtp --network=False
+alphapilot live_connect --mode live --broker xtp --timeout 30
+```
+
+券商 SDK 和适配器不随核心仓库同步，请从授权的私有索引或本地 wheelhouse 安装。真实连接所需凭证只应放在本地 `.env` 或部署环境中；完整步骤见 [实盘接入文档](docs/live-xtp.md)。
+
 ## 🧭 典型工作流
 
 1. 先用 `prepare_data` 准备行情和 Qlib 数据；因子 h5 cache 会由回测/挖掘任务按需自动生成。
 2. 用 `mine` 或 AlphaForge 系列命令生成候选因子。
 3. 用 `backtest` 做组合回测或 IC 快筛，并在门户中查看结果。
 4. 将有效策略沉淀到策略资产，再用 `strategy_backtest`、`daily_signals` 或可恢复的 `trade_session` 持续验证。
+5. 如需走向交易，按 `dry_run → paper → live` 顺序演练；通过预检、风控和恢复检查后，再把目标组合或择时策略接入 daemon。
 
 ## 📚 更多文档
 
@@ -256,13 +301,17 @@ alphapilot timing_backtest --strategy_name dual_ma --symbols 000001 --strategy_p
 
 ```text
 AlphaPilot/
-├── alphapilot/          # 主程序与模块
+├── alphapilot/          # 核心、研究系统、Live Runtime 与 Portal
 ├── important_data/      # 因子库、策略资产、模板、股票池
-├── docs/                # 详细文档
-├── tests/               # 测试用例
+├── docs/                # CLI、Docker、架构与实盘接入文档
+├── scripts/             # 数据维护及实盘预检 / smoke 工具
+├── tests/               # 离线、集成与实盘契约测试
+├── Dockerfile.live      # x86_64 券商 SDK 运行镜像
 ├── docker-compose.yml   # Docker 服务编排
-└── README.md            # 项目首页
+└── README_en.md         # 英文项目首页
 ```
+
+XTP Pro / EMT 的 SDK 绑定和 broker 插件属于可选、可能受许可约束的独立包，不是 AlphaPilot 核心源码的一部分；开发环境中出现的本地插件目录默认不参与 Git 同步。
 
 ## 🚧 开发状态与路线图
 
