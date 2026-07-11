@@ -54,6 +54,37 @@ def prepare_factor_csv(request: FactorBacktestRequest) -> tuple[Path, bool]:
 VALID_MODES = ("multi_combined", "single_ic", "multi_sequential")
 
 
+def _yaml_provider_uri(yaml_params) -> str | None:  # noqa: ANN001
+    if isinstance(yaml_params, dict):
+        value = yaml_params.get("provider_uri")
+    else:
+        value = getattr(yaml_params, "provider_uri", None)
+    return str(value).strip() if value else None
+
+
+def _resolve_factor_qlib_dir(context, request, freq: str) -> str:  # noqa: ANN001
+    """Resolve the provider used to build factor H5 data.
+
+    An explicit request/YAML provider must win over the conventional per-frequency
+    baostock layout.  Otherwise a custom minute dataset can be rendered into qrun
+    correctly while factor calculation silently reads a different directory.
+    """
+    explicit = _yaml_provider_uri(getattr(request, "yaml_params", None))
+    if explicit:
+        return str(Path(explicit).expanduser())
+    env_override = os.getenv("ALPHAPILOT_QLIB_DATA_DIR")
+    if env_override:
+        return str(Path(env_override).expanduser())
+
+    from alphapilot.systems.data.frequency import get_frequency
+
+    if get_frequency(freq).is_intraday:
+        from alphapilot.systems.data.data_paths import baostock_qlib_dir
+
+        return str(baostock_qlib_dir(freq))
+    return str(context.config.data.qlib_data_dir)
+
+
 def _cleanup_temp_csv(path: Path, is_temp: bool) -> None:
     if is_temp:
         try:
@@ -144,15 +175,9 @@ class FactorEvaluationPipeline:
         from alphapilot.systems.data.frequency import get_frequency
 
         use_local = _resolve_use_local(context, request.use_local)
-        # Intraday backtests read the per-frequency qlib dir (the configured one is daily).
         freq = getattr(request, "freq", "day")
-        spec = get_frequency(freq)
-        if spec.is_intraday:
-            from alphapilot.systems.data.data_paths import baostock_qlib_dir
-
-            qlib_dir = str(baostock_qlib_dir(freq))
-        else:
-            qlib_dir = str(context.config.data.qlib_data_dir)
+        get_frequency(freq)  # normalize/validate before resolving the provider
+        qlib_dir = _resolve_factor_qlib_dir(context, request, freq)
         # Prepare the task's factor h5 context (market/spec cache) and publish it via env BEFORE
         # the scenario is built, so the LLM source-data description and factor execution all read
         # this task's data instead of the global shared folder.

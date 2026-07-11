@@ -55,10 +55,49 @@ EXPECTED_COMMANDS = {
     "mine_aff",
     "mine_gp",
     "mine_rl",
+    "live_brokers",
+    "live_plugins",
+    "live_quote_providers",
+    "live_connect",
+    "live_daemon_start",
+    "live_daemon_status",
+    "live_daemon_stop",
+    "live_daemon_halt",
+    "live_daemon_cancel",
+    "live_daemon_order",
+    "live_daemon_resume",
+    "live_daemon_refresh",
+    "live_daemon_reconnect",
+    "live_daemon_strategy_pause",
+    "live_daemon_strategy_resume",
+    "live_daemon_strategy_start",
+    "live_daemon_strategy_status",
+    "live_daemon_strategy_stop",
+    "live_daemon_submit_target",
+    "live_modes",
+    "live_ledger_events",
+    "live_cancel",
+    "live_order",
+    "live_preflight",
+    "live_risk_status",
+    "live_run",
+    "live_state",
+    "live_status",
+    "live_submit_target",
     "modules",
     "notify_commands",
     "portal",
     "portal_restart",
+    "pool_add",
+    "pool_create",
+    "pool_delete",
+    "pool_export",
+    "pool_list",
+    "pool_remove",
+    "pool_rename",
+    "pool_save",
+    "pool_set_description",
+    "pool_show",
     "prepare_data",
     "qlib_yaml_generate",
     "qlib_yaml_validate",
@@ -390,6 +429,155 @@ def test_real_cli_command_smoke(cli_ctx: CliContext) -> None:
         timeout=30,
     )
 
+    live_state = ctx.cwd / "live_state"
+    live_ledger = ctx.cwd / "live_ledger"
+    daemon_state = ctx.cwd / "live_daemon_state"
+    daemon_ledger = ctx.cwd / "live_daemon_ledger"
+    _run_ok(ctx, "live_status")
+    _run_ok(ctx, "live_modes")
+    _run_ok(ctx, "live_brokers")
+    _run_ok(ctx, "live_plugins")
+    _run_ok(ctx, "live_quote_providers")
+    _run_ok(ctx, "live_preflight", "--broker=paper")
+    _run_ok(ctx, "live_state", "--mode=paper", f"--state_dir={live_state}")
+    _run_ok(ctx, "live_risk_status", "--mode=paper", f"--state_dir={live_state}", f"--ledger_dir={live_ledger}")
+    _run_ok(ctx, "live_ledger_events", "--mode=paper", f"--ledger_dir={live_ledger}")
+    _run_ok(
+        ctx,
+        "live_connect",
+        "--mode=paper",
+        "--cash=10000",
+        "--timeout=1",
+        f"--state_dir={live_state}",
+        f"--ledger_dir={live_ledger}",
+    )
+    _run_ok(
+        ctx,
+        "live_run",
+        "--mode=paper",
+        "--symbols=600000",
+        "--cash=10000",
+        "--interval=0.05",
+        "--duration=0.05",
+        "--timeout=1",
+        f"--state_dir={live_state}",
+        f"--ledger_dir={live_ledger}",
+    )
+    _run_ok(
+        ctx,
+        "live_order",
+        "--mode=paper",
+        "--symbol=SH600000",
+        "--side=buy",
+        "--volume=100",
+        "--price=10",
+        "--cash=10000",
+        "--timeout=1",
+    )
+    _run_ok(
+        ctx,
+        "live_cancel",
+        "--mode=paper",
+        "--order_id=paper-missing",
+        "--symbol=SH600000",
+        "--force=True",
+        "--cash=10000",
+        "--timeout=1",
+    )
+    _run_ok(
+        ctx,
+        "live_submit_target",
+        "--mode=paper",
+        "--holdings={\"SH600000\":100}",
+        "--prices={\"SH600000\":10.0}",
+        "--cash=10000",
+        "--route=True",
+        "--timeout=1",
+    )
+    _run_ok(ctx, "live_daemon_status", "--mode=paper", f"--state_dir={daemon_state}")
+    started_daemon = False
+    try:
+        _run_ok(
+            ctx,
+            "live_daemon_start",
+            "--mode=paper",
+            "--symbols=600000",
+            "--cash=10000",
+            "--interval=0.05",
+            "--timeout=1",
+            f"--state_dir={daemon_state}",
+            f"--ledger_dir={daemon_ledger}",
+        )
+        started_daemon = True
+        time.sleep(1)
+        _run_ok(ctx, "live_daemon_strategy_status", "--wait=True", "--timeout=5", f"--state_dir={daemon_state}")
+        _run_ok(
+            ctx,
+            "live_daemon_strategy_start",
+            "--timing_strategy=sma_filter",
+            "--symbols=600000",
+            "--timing_params={\"window\":2,\"target_percent\":0.5}",
+            "--timing_freq=min",
+            "--min_bars=2",
+            "--wait=True",
+            "--timeout=5",
+            f"--state_dir={daemon_state}",
+        )
+        _run_ok(ctx, "live_daemon_strategy_pause", "--wait=True", "--timeout=5", f"--state_dir={daemon_state}")
+        _run_ok(ctx, "live_daemon_strategy_resume", "--wait=True", "--timeout=5", f"--state_dir={daemon_state}")
+        _run_ok(ctx, "live_daemon_strategy_stop", "--wait=True", "--timeout=5", f"--state_dir={daemon_state}")
+        _run_ok(
+            ctx,
+            "live_daemon_halt",
+            "--reason=cli-smoke",
+            "--wait=True",
+            "--timeout=5",
+            f"--state_dir={daemon_state}",
+        )
+        _run_ok(ctx, "live_daemon_resume", "--wait=True", "--timeout=5", f"--state_dir={daemon_state}")
+        _run_ok(ctx, "live_daemon_refresh", "--wait=True", "--timeout=5", f"--state_dir={daemon_state}")
+        _run_ok(ctx, "live_daemon_reconnect", "--wait=True", "--timeout=5", f"--state_dir={daemon_state}")
+        _run_ok(ctx, "live_daemon_resume", "--wait=True", "--timeout=5", f"--state_dir={daemon_state}")
+        _run_ok(
+            ctx,
+            "live_daemon_order",
+            "--symbol=SH600000",
+            "--side=buy",
+            "--volume=100",
+            "--price=10",
+            "--wait=True",
+            "--timeout=5",
+            f"--state_dir={daemon_state}",
+        )
+        _run_ok(
+            ctx,
+            "live_daemon_cancel",
+            "--order_id=paper-missing",
+            "--symbol=SH600000",
+            "--force=True",
+            "--wait=True",
+            "--timeout=5",
+            f"--state_dir={daemon_state}",
+        )
+        _run_ok(
+            ctx,
+            "live_daemon_submit_target",
+            "--holdings={\"SH600000\":200}",
+            "--prices={\"SH600000\":10.0}",
+            "--route=True",
+            "--wait=True",
+            "--timeout=5",
+            f"--state_dir={daemon_state}",
+        )
+    finally:
+        if started_daemon:
+            _run_ok(
+                ctx,
+                "live_daemon_stop",
+                "--timeout=5",
+                f"--state_dir={daemon_state}",
+            )
+
     _run_ok(ctx, "category_list")
     _run_ok(ctx, "category_create", "--name=cli_smoke")
     _run_ok(ctx, "category_rename", "--old_name=cli_smoke", "--new_name=cli_smoke_renamed")
@@ -406,7 +594,26 @@ def test_real_cli_command_smoke(cli_ctx: CliContext) -> None:
     _run_ok(ctx, "factor_category_add", "--factor_names=cli_factor_renamed", "--category=bulk_smoke")
     _run_ok(ctx, "factor_category_remove", "--factor_names=cli_factor_renamed", "--category=bulk_smoke")
     _run_ok(ctx, "factor_list")
+    _run_ok(ctx, "factor_duplicates")
     _run_ok(ctx, "category_delete", "--name=cli_smoke_renamed")
+
+    pool_export = ctx.important / "exports" / "cli_pool.csv"
+    _run_ok(ctx, "pool_list")
+    _run_ok(ctx, "pool_create", "--name=cli_pool", "--symbols=600000.SH,000001.SZ")
+    _run_ok(ctx, "pool_show", "--name=cli_pool")
+    _run_ok(ctx, "pool_add", "--name=cli_pool", "--symbols=600519.SH")
+    _run_ok(ctx, "pool_remove", "--name=cli_pool", "--symbols=000001.SZ")
+    _run_ok(ctx, "pool_set_description", "--name=cli_pool", "--description=CLI smoke pool")
+    _run_ok(ctx, "pool_rename", "--name=cli_pool", "--new_name=cli_pool_renamed")
+    _run_ok(
+        ctx,
+        "pool_export",
+        "--name=cli_pool_renamed",
+        f"--output={pool_export}",
+    )
+    assert pool_export.is_file()
+    _run_ok(ctx, "pool_save", "--name=cli_pool_renamed", "--symbols=600000.SH")
+    _run_ok(ctx, "pool_delete", "--name=cli_pool_renamed")
 
     _run_ok(
         ctx,

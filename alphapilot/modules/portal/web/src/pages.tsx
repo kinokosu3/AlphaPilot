@@ -1,10 +1,13 @@
-import Plot from "react-plotly.js";
-import { Link } from "react-router-dom";
 import { api, Factor, Job, JobProgress, qs, Schedule } from "./api";
-import { Alert, AsyncButton, chartHeight, DataTable, DynamicForm, HybridJsonEditor, InfoDot, JobsPanel, JsonTextArea, PageTitle, PanelHelp, ProgressBar, RefreshButton, Spinner, StatusPill, Tabs, Tooltip, useConfirm } from "./components";
+import { Alert, AsyncButton, DataTable, DynamicForm, HybridJsonEditor, InfoDot, JobsPanel, JsonTextArea, PageTitle, PanelHelp, ProgressBar, RefreshButton, Spinner, StatusPill, Tabs, Tooltip, useConfirm } from "./components";
 import { BacktestDetail, BacktestDetailData, LeaderboardPanel } from "./backtestDetail";
-import { useAsync, useJsonInput, useParamForm } from "./hooks";
+import { useAsync, useJsonInput, useLatestRequest, useParamForm } from "./hooks";
 import { useI18n } from "./i18n";
+import { SessionOverview } from "./pages/dailyTrade/SessionOverview";
+import type { TradeSessionDetail, TradeSessionManifest } from "./pages/dailyTrade/types";
+import { MarketKlineViewer, type KlineMetric, type KlinePayload, type KlineRange } from "./pages/market/kline";
+import { previewColumns, TimingResultPanel } from "./pages/timing/TimingResultPanel";
+import type { TimingDetailPayload, TimingSignalPayload, TimingStrategiesPayload } from "./pages/timing/types";
 import {
   alphaForgeSpecs,
   createStrategyFromFactorsSpecs,
@@ -17,55 +20,12 @@ import {
   sessionRunSpecs,
   strategyBacktestSpecs,
   timingBacktestSpecs,
+  validateParams,
   withStrategyOptions,
   withInstrumentSetOptions,
 } from "./paramSpecs";
-import { computeSessionPnl } from "./sessionPnl";
 import { useAction, useToast } from "./toast";
 import React, { useEffect, useMemo, useState } from "react";
-
-type Status = {
-  metrics: Record<string, string | number>;
-  recent_jobs: Job[];
-  recent_mining: string[];
-  systems: string[];
-  modules: Record<string, string[]>;
-  config: Record<string, unknown>;
-};
-
-type TablePreview = {
-  columns: string[];
-  rows: Array<Record<string, unknown>>;
-  row_count?: number;
-  truncated?: boolean;
-  missing?: boolean;
-};
-
-type TimingStrategySpec = {
-  name: string;
-  description: string;
-  defaults: Record<string, unknown>;
-};
-
-type TimingStrategiesPayload = {
-  strategies: TimingStrategySpec[];
-  names: string[];
-};
-
-type TimingSignalPayload = {
-  strategy_name: string;
-  signals: TablePreview;
-};
-
-type TimingDetailPayload = {
-  job: Job;
-  summary: Record<string, unknown>;
-  artifact_dir: string;
-  signals: TablePreview;
-  trades: TablePreview;
-  equity_curve: TablePreview;
-  positions: TablePreview;
-};
 
 type PortalSettings = {
   settings: { host: string; port: number; timezone: string };
@@ -132,173 +92,10 @@ type NotifyEvent = Record<string, unknown> & {
   error?: string;
 };
 
-type KlineMetric = "amount" | "volume" | "turn" | "pctChg";
-type KlineRange = "1M" | "3M" | "6M" | "1Y" | "ALL";
-
-type KlineRow = {
-  date: string;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume?: number;
-  amount?: number;
-  turn?: number;
-  pctChg?: number;
-};
-
-type KlinePayload = {
-  symbol?: string;
-  label?: string;
-  date_range?: unknown[];
-  rows?: Array<Record<string, unknown>>;
-};
-
-const KLINE_RANGES: KlineRange[] = ["1M", "3M", "6M", "1Y", "ALL"];
-const KLINE_METRICS: KlineMetric[] = ["amount", "volume", "turn", "pctChg"];
-
-function toFiniteNumber(value: unknown): number | undefined {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : undefined;
-}
-
-function normalizeKlineRows(rows: Array<Record<string, unknown>>): KlineRow[] {
-  return rows.flatMap((row) => {
-    const open = toFiniteNumber(row.open);
-    const high = toFiniteNumber(row.high);
-    const low = toFiniteNumber(row.low);
-    const close = toFiniteNumber(row.close);
-    const date = row.date ? String(row.date) : "";
-    if (!date || open === undefined || high === undefined || low === undefined || close === undefined) return [];
-    return [{
-      date,
-      open,
-      high,
-      low,
-      close,
-      volume: toFiniteNumber(row.volume),
-      amount: toFiniteNumber(row.amount),
-      turn: toFiniteNumber(row.turn),
-      pctChg: toFiniteNumber(row.pctChg)
-    }];
-  });
-}
-
-function metricValue(row: KlineRow | undefined, metric: KlineMetric, prev?: KlineRow): number | undefined {
-  if (!row) return undefined;
-  if (metric === "pctChg") {
-    if (row.pctChg !== undefined) return row.pctChg;
-    if (prev?.close) return ((row.close - prev.close) / prev.close) * 100;
-    return undefined;
-  }
-  return row[metric];
-}
-
-function hasMetric(rows: KlineRow[], metric: KlineMetric): boolean {
-  return rows.some((row, index) => metricValue(row, metric, rows[index - 1]) !== undefined);
-}
-
-function resolveKlineMetric(rows: KlineRow[], metric: KlineMetric): KlineMetric {
-  if (hasMetric(rows, metric)) return metric;
-  if (hasMetric(rows, "volume")) return "volume";
-  return metric;
-}
-
-function klineRangeValue(rows: KlineRow[], range: KlineRange): [string, string] | undefined {
-  if (range === "ALL" || rows.length < 2) return undefined;
-  const lastDate = new Date(rows[rows.length - 1].date);
-  if (Number.isNaN(lastDate.getTime())) return undefined;
-  const startDate = new Date(lastDate);
-  if (range === "1M") startDate.setMonth(startDate.getMonth() - 1);
-  if (range === "3M") startDate.setMonth(startDate.getMonth() - 3);
-  if (range === "6M") startDate.setMonth(startDate.getMonth() - 6);
-  if (range === "1Y") startDate.setFullYear(startDate.getFullYear() - 1);
-  return [startDate.toISOString().slice(0, 10), rows[rows.length - 1].date];
-}
-
-// Intraday bars carry a non-midnight time component (e.g. "2026-06-23T09:35:00"); daily bars
-// are date-only / midnight. Used to pick a continuous (category) x-axis for minute K-lines so
-// the lunch break and overnight gaps don't render as empty spans.
-export function klineIsIntraday(rows: KlineRow[]): boolean {
-  return rows.some((row) => {
-    const m = String(row.date).match(/[ T](\d{2}):(\d{2})/);
-    return m ? m[1] !== "00" || m[2] !== "00" : false;
-  });
-}
-
-export function klineAxisType(rows: KlineRow[]): "date" | "category" {
-  return klineIsIntraday(rows) ? "category" : "date";
-}
-
-// On a category x-axis the range is expressed as bar indices, not dates. Translate the
-// selected window (1M/3M/...) into ``[startIndex, lastIndex]`` so the range buttons still work.
-function klineCategoryRange(rows: KlineRow[], range: KlineRange): [number, number] | undefined {
-  const win = klineRangeValue(rows, range);
-  if (!win) return undefined;
-  const startTs = new Date(win[0]).getTime();
-  const startIdx = rows.findIndex((row) => new Date(row.date).getTime() >= startTs);
-  if (startIdx <= 0) return undefined;
-  return [startIdx - 0.5, rows.length - 0.5];
-}
-
-// 24h time-of-day label ("2026-06-23T09:35:00" -> "09:35"); falls back to the date.
-export function klineTimeLabel(date: unknown): string {
-  const m = String(date).match(/[ T](\d{2}:\d{2})/);
-  return m ? m[1] : String(date).slice(0, 10);
-}
-
-// Sparse HH:MM ticks for the intraday category axis: a handful of evenly-spaced bars
-// (always including the first and last of the visible window), labelled time-only so
-// the axis reads like the daily chart instead of cramming every timestamp.
-export function klineCategoryTicks(
-  rows: KlineRow[],
-  range: [number, number] | undefined,
-  maxTicks = 7,
-): { tickvals: number[]; ticktext: string[] } {
-  const lo = range ? Math.max(0, Math.ceil(range[0])) : 0;
-  const hi = range ? Math.min(rows.length - 1, Math.floor(range[1])) : rows.length - 1;
-  const span = hi - lo;
-  if (span < 0) return { tickvals: [], ticktext: [] };
-  const count = Math.min(maxTicks, span + 1);
-  const idxs = count <= 1
-    ? [lo]
-    : Array.from({ length: count }, (_, i) => Math.round(lo + (span * i) / (count - 1)));
-  const tickvals = Array.from(new Set(idxs));
-  return { tickvals, ticktext: tickvals.map((i) => klineTimeLabel(rows[i].date)) };
-}
-
-function formatDateLabel(value: unknown): string {
-  return value ? String(value).slice(0, 10) : "-";
-}
-
 function formatTimestamp(value: unknown): string {
   if (!value) return "—";
   const d = new Date(String(value));
   return Number.isNaN(d.getTime()) ? String(value) : d.toLocaleString();
-}
-
-function formatPrice(value?: number): string {
-  return value === undefined ? "-" : value.toFixed(2);
-}
-
-function formatCompactNumber(value?: number): string {
-  if (value === undefined) return "-";
-  return new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 2 }).format(value);
-}
-
-function formatPercent(value?: number): string {
-  return value === undefined ? "-" : `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
-}
-
-function formatRatioPercent(value: unknown): string {
-  const n = toFiniteNumber(value);
-  return n === undefined ? "-" : `${n >= 0 ? "+" : ""}${(n * 100).toFixed(2)}%`;
-}
-
-function formatMoney(value: unknown): string {
-  const n = toFiniteNumber(value);
-  if (n === undefined) return "-";
-  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(n);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -319,80 +116,9 @@ function mergeTimingAdvanced(base: Record<string, unknown>, advanced: Record<str
   return out;
 }
 
-function previewColumns(table: TablePreview | undefined, fallback: string[] = []): Array<{ key: string; label: string; ellipsis?: boolean; align?: "left" | "right" | "center" }> {
-  const keys = (table?.columns?.length ? table.columns : fallback).slice(0, 10);
-  return keys.map((key) => ({
-    key,
-    label: key,
-    ellipsis: ["datetime", "signal_datetime", "instrument", "reason"].includes(key) ? undefined : true,
-    align: ["signal", "target_percent", "score", "amount", "price", "fee", "equity", "cash"].includes(key) ? "right" : undefined,
-  }));
-}
-
-function timingEquitySeries(rows: Array<Record<string, unknown>>): Array<{ datetime: string; equity: number }> {
-  const byTime = new Map<string, number>();
-  rows.forEach((row) => {
-    const dt = row.datetime ? String(row.datetime) : "";
-    const equity = toFiniteNumber(row.equity);
-    if (dt && equity !== undefined && !byTime.has(dt)) byTime.set(dt, equity);
-  });
-  return [...byTime.entries()]
-    .map(([datetime, equity]) => ({ datetime, equity }))
-    .sort((a, b) => a.datetime.localeCompare(b.datetime));
-}
-
-function cssVar(name: string, fallback: string): string {
-  if (typeof window === "undefined") return fallback;
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
-}
-
-export function HomePage() {
-  const { t } = useI18n();
-  const state = useAsync(() => api.get<Status>("/api/status"), []);
-  const metrics = state.data?.metrics || {};
-  return (
-    <>
-      <PageTitle title="AlphaPilot" subtitle={t("homeSubtitle")} />
-      {state.error ? <Alert tone="error">{state.error}</Alert> : null}
-      <div className="metric-grid">
-        {([
-          [t("symbols"), metrics.symbols, t("tipSymbols")],
-          [t("factors"), metrics.factors, t("tipFactors")],
-          [t("strategies"), metrics.strategies, t("tipStrategies")],
-          [t("backtests"), metrics.backtests, t("tipBacktests")]
-        ] as Array<[string, string | number | undefined, string]>).map(([label, value, tip]) => (
-          <div className="metric" key={label}>
-            <span className="metric-label">{label}<InfoDot tip={tip} /></span>
-            <strong>{state.loading && value === undefined ? "…" : String(value ?? "-")}</strong>
-          </div>
-        ))}
-      </div>
-      <div className="grid two">
-        <section className="panel">
-          <h2>{t("quickActions")}</h2>
-          <div className="action-grid">
-            <Link className="action" to="/mining">{t("actionMine")}</Link>
-            <Link className="action" to="/market">{t("actionMarket")}</Link>
-            <Link className="action" to="/backtest">{t("actionBacktest")}</Link>
-            <Link className="action" to="/library">{t("actionLibrary")}</Link>
-          </div>
-        </section>
-        <section className="panel">
-          <h2>{t("recentMining")}</h2>
-          {(state.data?.recent_mining || []).length ? (
-            <ul className="plain-list">{state.data?.recent_mining.map((name) => <li key={name}>{name}</li>)}</ul>
-          ) : (
-            <div className="empty">{t("empty")}</div>
-          )}
-        </section>
-      </div>
-      <JobsPanel compact />
-    </>
-  );
-}
-
 export function MiningPage() {
   const { t } = useI18n();
+  const toast = useToast();
   const confirm = useConfirm();
   const instrumentSets = useAsync(() => api.get<{ sets: string[] }>("/api/data/instrument-sets"), []);
   const poolNames = instrumentSets.data?.sets || [];
@@ -404,6 +130,8 @@ export function MiningPage() {
   const afForm = useParamForm(afSpecs, afAdvanced.raw);
   const sessions = useAsync(() => api.get<Array<Record<string, unknown>>>("/api/mining/sessions"), []);
   const { busy, run } = useAction();
+  const latestSession = useLatestRequest();
+  const latestSessionFile = useLatestRequest();
   const [sessionDetail, setSessionDetail] = useState<Record<string, unknown> | null>(null);
   const [sessionFile, setSessionFile] = useState<Record<string, unknown> | null>(null);
 
@@ -423,18 +151,35 @@ export function MiningPage() {
     }, t("started"));
   }
 
-  async function openSession(name: string) {
-    setSessionDetail(await api.get(`/api/mining/sessions/${encodeURIComponent(name)}`));
+  function openSession(name: string) {
+    void latestSessionFile(() => Promise.resolve(null));
     setSessionFile(null);
+    void latestSession(() => api.get<Record<string, unknown>>(`/api/mining/sessions/${encodeURIComponent(name)}`))
+      .then((result) => {
+        if (!result.current) return;
+        if (result.error) throw result.error;
+        setSessionDetail(result.data || null);
+        setSessionFile(null);
+      })
+      .catch((error) => toast.error(error instanceof Error ? error.message : String(error)));
   }
 
-  async function openSessionFile(path: string) {
+  function openSessionFile(path: string) {
     if (!sessionDetail?.name) return;
-    setSessionFile(await api.get(`/api/mining/sessions/${encodeURIComponent(String(sessionDetail.name))}/files/${encodeURIComponent(path)}`));
+    const sessionName = String(sessionDetail.name);
+    void latestSessionFile(() => api.get<Record<string, unknown>>(`/api/mining/sessions/${encodeURIComponent(sessionName)}/files/${encodeURIComponent(path)}`))
+      .then((result) => {
+        if (!result.current) return;
+        if (result.error) throw result.error;
+        setSessionFile(result.data || null);
+      })
+      .catch((error) => toast.error(error instanceof Error ? error.message : String(error)));
   }
 
   async function deleteSession(name: string) {
     if (!(await confirm({ message: `${t("delete")} ${name}?`, danger: true }))) return;
+    void latestSession(() => Promise.resolve(null));
+    void latestSessionFile(() => Promise.resolve(null));
     void run(async () => {
       await api.delete(`/api/mining/sessions/${encodeURIComponent(name)}`);
       setSessionDetail(null);
@@ -551,6 +296,7 @@ export function MiningPage() {
 
 export function BacktestPage() {
   const { t } = useI18n();
+  const toast = useToast();
   const confirm = useConfirm();
   const instrumentSets = useAsync(() => api.get<{ sets: string[] }>("/api/data/instrument-sets"), []);
   const poolNames = instrumentSets.data?.sets || [];
@@ -567,6 +313,7 @@ export function BacktestPage() {
   const list = useAsync(() => api.get<Array<Record<string, unknown>>>("/api/backtests"), []);
   const [detail, setDetail] = useState<BacktestDetailData | null>(null);
   const { busy, run } = useAction();
+  const latestBacktest = useLatestRequest();
 
   function startFactorBacktest() {
     void run(async () => {
@@ -582,12 +329,19 @@ export function BacktestPage() {
     }, t("started"));
   }
 
-  async function open(workspaceId: string) {
-    setDetail(await api.get<BacktestDetailData>(`/api/backtests/${encodeURIComponent(workspaceId)}`));
+  function open(workspaceId: string) {
+    void latestBacktest(() => api.get<BacktestDetailData>(`/api/backtests/${encodeURIComponent(workspaceId)}`))
+      .then((result) => {
+        if (!result.current) return;
+        if (result.error) throw result.error;
+        if (result.data) setDetail(result.data);
+      })
+      .catch((error) => toast.error(error instanceof Error ? error.message : String(error)));
   }
 
   async function deleteWorkspace(workspaceId: string) {
     if (!(await confirm({ message: `${t("delete")} ${workspaceId}?`, danger: true }))) return;
+    void latestBacktest(() => Promise.resolve(null));
     void run(async () => {
       await api.delete(`/api/backtests/${encodeURIComponent(workspaceId)}`);
       if (detail?.workspace_id === workspaceId) setDetail(null);
@@ -696,12 +450,12 @@ export function TimingPage() {
     return strategies.data?.strategies.find((item) => item.name === name) || null;
   }, [form.values.strategy_name, strategies.data]);
 
-  const equity = useMemo(() => timingEquitySeries(detail?.equity_curve.rows || []), [detail]);
-
   function parseTimingPayload() {
     const base = form.parse();
     const extra = advanced.parse();
-    return mergeTimingAdvanced(base, extra);
+    const payload = mergeTimingAdvanced(base, extra);
+    validateParams(payload);
+    return payload;
   }
 
   function previewSignals() {
@@ -726,7 +480,9 @@ export function TimingPage() {
     if (!activeJob?.job_id || activeJob.status !== "running") return;
     const jobId = activeJob.job_id;
     let alive = true;
+    let timer: number | undefined;
     async function poll() {
+      let terminal = false;
       try {
         const next = await api.get<JobProgress>(`/api/jobs/${jobId}/progress`);
         if (!alive) return;
@@ -735,6 +491,7 @@ export function TimingPage() {
           const loaded = await api.get<TimingDetailPayload>(`/api/timing/jobs/${jobId}/detail`);
           if (alive) setDetail(loaded);
         }
+        terminal = ["succeeded", "failed", "cancelled", "lost"].includes(String(next.status));
         if (!alive) return;
         setActiveJob((current) => current && current.job_id === jobId
           ? { ...current, status: String(next.status || current.status), progress: next }
@@ -749,25 +506,16 @@ export function TimingPage() {
           message: err instanceof Error ? err.message : String(err),
         });
         setActiveJob((current) => current && current.job_id === jobId ? { ...current, status: "failed" } : current);
+        terminal = true;
       }
+      if (alive && !terminal) timer = window.setTimeout(poll, 3000);
     }
     void poll();
-    const id = window.setInterval(poll, 3000);
     return () => {
       alive = false;
-      window.clearInterval(id);
+      if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [activeJob?.job_id, activeJob?.status]);
-
-  const summary = detail?.summary || {};
-  const metricRows = [
-    [t("timingFinalEquity"), formatMoney(summary.final_equity)],
-    [t("timingTotalReturn"), formatRatioPercent(summary.total_return)],
-    [t("timingAnnualReturn"), formatRatioPercent(summary.annual_return)],
-    [t("timingMaxDrawdown"), formatRatioPercent(summary.max_drawdown)],
-    [t("timingTrades"), String(summary.n_trades ?? "-")],
-    [t("timingTotalFee"), formatMoney(summary.total_fee)],
-  ];
 
   return (
     <>
@@ -841,76 +589,7 @@ export function TimingPage() {
         </section>
       ) : null}
 
-      {detail ? (
-        <>
-          <section className="panel">
-            <div className="panel-head">
-              <h2>{t("timingBacktestResult")}</h2>
-              <span className="muted">{detail.artifact_dir}</span>
-            </div>
-            <div className="metric-grid">
-              {metricRows.map(([label, value]) => (
-                <div className="metric" key={label}>
-                  <span className="metric-label">{label}</span>
-                  <strong>{value}</strong>
-                </div>
-              ))}
-            </div>
-            {equity.length ? (
-              <Plot
-                data={[
-                  {
-                    x: equity.map((row) => row.datetime),
-                    y: equity.map((row) => row.equity),
-                    type: "scatter",
-                    mode: "lines",
-                    name: t("equityCurve"),
-                    line: { color: cssVar("--accent-600", "#2563eb"), width: 2 },
-                  },
-                ]}
-                layout={{
-                  autosize: true,
-                  height: chartHeight(),
-                  margin: { l: 50, r: 20, t: 20, b: 45 },
-                  hovermode: "x unified",
-                  paper_bgcolor: "rgba(0,0,0,0)",
-                  plot_bgcolor: "rgba(0,0,0,0)",
-                }}
-                config={{ responsive: true, displayModeBar: false }}
-                style={{ width: "100%" }}
-              />
-            ) : (
-              <div className="empty">{t("empty")}</div>
-            )}
-          </section>
-          <section className="panel">
-            <h2>{t("timingTrades")}</h2>
-            <DataTable
-              rows={detail.trades.rows}
-              empty={t("empty")}
-              columns={previewColumns(detail.trades, ["datetime", "instrument", "side", "amount", "price", "fee", "reason"])}
-            />
-          </section>
-          <div className="grid two">
-            <section className="panel">
-              <h2>{t("timingPositions")}</h2>
-              <DataTable
-                rows={detail.positions.rows}
-                empty={t("empty")}
-                columns={previewColumns(detail.positions, ["datetime", "instrument", "amount", "market_value"])}
-              />
-            </section>
-            <section className="panel">
-              <h2>{t("timingSignals")}</h2>
-              <DataTable
-                rows={detail.signals.rows}
-                empty={t("empty")}
-                columns={previewColumns(detail.signals, ["datetime", "instrument", "signal", "target_percent", "score", "reason"])}
-              />
-            </section>
-          </div>
-        </>
-      ) : null}
+      {detail ? <TimingResultPanel detail={detail} /> : null}
       <JobsPanel compact />
     </>
   );
@@ -1409,19 +1088,23 @@ function SymbolPicker({ onAdd, selectedText }: { onAdd: (symbols: string[]) => v
   const [source, setSource] = useState("baostock_cn");
   const [symbols, setSymbols] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [checked, setChecked] = useState<Set<string>>(new Set());
+  const latestSymbols = useLatestRequest();
 
   async function load(src = source) {
     setLoading(true);
-    try {
-      const result = await api.get<Record<string, string[]>>(`/api/data/symbols${qs({ source: src })}`);
-      setSymbols(Array.from(new Set(Object.values(result).flat())).sort());
-    } catch {
+    setError("");
+    const result = await latestSymbols(() => api.get<Record<string, string[]>>(`/api/data/symbols${qs({ source: src })}`));
+    if (!result.current) return;
+    setLoading(false);
+    if (result.error) {
       setSymbols([]);
-    } finally {
-      setLoading(false);
+      setError(result.error instanceof Error ? result.error.message : String(result.error));
+      return;
     }
+    setSymbols(Array.from(new Set(Object.values(result.data || {}).flat())).sort());
   }
   useEffect(() => {
     void load();
@@ -1465,6 +1148,8 @@ function SymbolPicker({ onAdd, selectedText }: { onAdd: (symbols: string[]) => v
       </div>
       {loading ? (
         <div className="empty loading-row"><Spinner /> {t("loading")}</div>
+      ) : error ? (
+        <div className="empty"><Alert tone="error">{error}</Alert></div>
       ) : symbols.length === 0 ? (
         <div className="empty">{t("spNoDownloaded")}</div>
       ) : (
@@ -1500,18 +1185,24 @@ function StockPoolManager() {
   const [csv, setCsv] = useState("");
   const [addText, setAddText] = useState("");
   const [renameTo, setRenameTo] = useState("");
+  const latestPoolDetail = useLatestRequest();
 
   async function loadDetail(poolName: string) {
     setSelected(poolName);
+    const result = await latestPoolDetail(() => poolName
+      ? callPool<PoolDetail>("pool_show", { name: poolName })
+      : Promise.resolve(null));
+    if (!result.current) return;
     if (!poolName) {
       setDetail(null);
       return;
     }
-    try {
-      setDetail(await callPool<PoolDetail>("pool_show", { name: poolName }));
-    } catch {
+    if (result.error) {
       setDetail(null);
+      toast.error(result.error instanceof Error ? result.error.message : String(result.error));
+      return;
     }
+    setDetail(result.data || null);
   }
 
   function reportExtra(r: PoolReport): string {
@@ -1575,8 +1266,7 @@ function StockPoolManager() {
     void run(async () => {
       await callPool("pool_delete", { name: poolName });
       if (selected === poolName) {
-        setSelected("");
-        setDetail(null);
+        await loadDetail("");
       }
       await pools.refresh();
     }, t("spDeleted"));
@@ -1690,34 +1380,46 @@ export function MarketPage() {
   const [dropDates, setDropDates] = useState("");
   const [applyTarget, setApplyTarget] = useState("forward");
   const { busy, run } = useAction();
+  const latestMarketSymbols = useLatestRequest();
+  const latestManageSymbols = useLatestRequest();
 
   React.useEffect(() => {
     if (!activeDataJob?.job_id) return;
     let alive = true;
+    let timer: number | undefined;
     const poll = async () => {
+      let terminal = false;
       try {
         const progress = await api.get<JobProgress>(`/api/jobs/${activeDataJob.job_id}/progress`);
         if (!alive) return;
         setDataProgress(progress);
         if (progress.status && ["succeeded", "failed", "cancelled", "lost"].includes(progress.status)) {
+          terminal = true;
           await dataJobs.refresh();
+          if (alive) setActiveDataJob(null);
         }
       } catch (err) {
         if (alive) setDataMessage(err instanceof Error ? err.message : String(err));
       }
+      if (alive && !terminal) timer = window.setTimeout(poll, 2000);
     };
     void poll();
-    const id = window.setInterval(poll, 2000);
     return () => {
       alive = false;
-      window.clearInterval(id);
+      if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [activeDataJob?.job_id]);
 
-  async function loadSymbols(path: string) {
+  function loadSymbols(path: string) {
     setDataDir(path);
     setKline(null);
-    setSymbols(await api.get<string[]>(`/api/market/symbols${qs({ data_dir: path })}`));
+    void latestMarketSymbols(() => api.get<string[]>(`/api/market/symbols${qs({ data_dir: path })}`))
+      .then((result) => {
+        if (!result.current) return;
+        if (result.error) throw result.error;
+        setSymbols(result.data || []);
+      })
+      .catch((error) => setDataMessage(error instanceof Error ? error.message : String(error)));
   }
 
   function loadKline() {
@@ -1746,11 +1448,18 @@ export function MarketPage() {
     });
   }
 
-  async function loadManageSymbols(source = manageSource) {
-    const result = await api.get<Record<string, string[]>>(`/api/data/symbols${qs({ source })}`);
-    const all = Array.from(new Set(Object.values(result).flat())).sort();
+  async function loadManageSymbolsImpl(source = manageSource) {
+    const result = await latestManageSymbols(() => api.get<Record<string, string[]>>(`/api/data/symbols${qs({ source })}`));
+    if (!result.current) return;
+    if (result.error) throw result.error;
+    if (!result.data) return;
+    const all = Array.from(new Set(Object.values(result.data).flat())).sort();
     setManageSymbols(all);
     if (!all.includes(manageSymbol)) setManageSymbol(all[0] || "");
+  }
+
+  function loadManageSymbols(source = manageSource) {
+    void loadManageSymbolsImpl(source).catch((error) => setDataMessage(error instanceof Error ? error.message : String(error)));
   }
 
   function symbolAction(path: string, options: Record<string, unknown>) {
@@ -1758,66 +1467,11 @@ export function MarketPage() {
     void run(async () => {
       const result = await api.post(path, { symbol: manageSymbol, options: { source: manageSource, ...options } });
       setDataMessage(JSON.stringify(result, null, 2));
-      await loadManageSymbols();
+      await loadManageSymbolsImpl();
     });
   }
 
   const klinePayload = kline as KlinePayload | null;
-  const rows = useMemo(() => normalizeKlineRows(klinePayload?.rows || []), [klinePayload]);
-  const chartMetric = resolveKlineMetric(rows, klineSubMetric);
-  const latestRow = rows[rows.length - 1];
-  const previousRow = rows[rows.length - 2];
-  const latestPct = latestRow ? metricValue(latestRow, "pctChg", previousRow) : undefined;
-  const subMetricValues = rows.map((row, index) => metricValue(row, chartMetric, rows[index - 1]) ?? null);
-  const volumeColors = rows.map((row) => (row.close >= row.open ? "rgba(239, 83, 80, 0.72)" : "rgba(38, 166, 154, 0.72)"));
-  const klineLabel = String(klinePayload?.label || klinePayload?.symbol || symbol || t("kline"));
-  const klineDateRange = Array.isArray(klinePayload?.date_range)
-    ? `${formatDateLabel(klinePayload?.date_range[0])} - ${formatDateLabel(klinePayload?.date_range[1])}`
-    : rows.length
-      ? `${formatDateLabel(rows[0].date)} - ${formatDateLabel(rows[rows.length - 1].date)}`
-      : "-";
-  const metricLabels: Record<KlineMetric, string> = {
-    amount: t("klineMetricAmount"),
-    volume: t("klineMetricVolume"),
-    turn: t("klineMetricTurn"),
-    pctChg: t("klineMetricPct")
-  };
-  // Minute K-lines use a category x-axis (continuous bars, no lunch/overnight gaps); daily keeps
-  // the proportional date axis. The range window maps to bar indices in the intraday case.
-  const klineXAxisType = klineAxisType(rows);
-  const chartRange = klineXAxisType === "category"
-    ? klineCategoryRange(rows, klineRange)
-    : klineRangeValue(rows, klineRange);
-  // Intraday: replace the crammed per-bar timestamps with a few time-only ticks.
-  const intradayTickProps = klineXAxisType === "category"
-    ? (() => {
-        const { tickvals, ticktext } = klineCategoryTicks(rows, chartRange as [number, number] | undefined);
-        return { tickmode: "array" as const, tickvals, ticktext };
-      })()
-    : {};
-  const chartColors = {
-    surface: cssVar("--surface", "#ffffff"),
-    surface2: cssVar("--surface-2", "#f7f8fc"),
-    border: cssVar("--border", "#e3e6ef"),
-    text: cssVar("--text", "#1a2233"),
-    muted: cssVar("--text-muted", "#667085"),
-    up: "#ef5350",
-    down: "#26a69a"
-  };
-  const klineHoverText = rows.map((row, index) => {
-    const pct = metricValue(row, "pctChg", rows[index - 1]);
-    return [
-      `<b>${formatDateLabel(row.date)}</b>`,
-      `${t("klineOpen")}: ${formatPrice(row.open)}`,
-      `${t("klineHigh")}: ${formatPrice(row.high)}`,
-      `${t("klineLow")}: ${formatPrice(row.low)}`,
-      `${t("klineClose")}: ${formatPrice(row.close)}`,
-      `${t("klineMetricPct")}: ${formatPercent(pct)}`,
-      `${t("klineMetricAmount")}: ${formatCompactNumber(row.amount)}`,
-      `${t("klineMetricVolume")}: ${formatCompactNumber(row.volume)}`,
-      `${t("klineMetricTurn")}: ${formatPercent(row.turn)}`
-    ].join("<br>");
-  });
   const recentDataJobs = (dataJobs.data || []).filter((job) => job.kind === "data").slice(0, 5);
   return (
     <>
@@ -1964,184 +1618,17 @@ export function MarketPage() {
           <button className="button" disabled={busy || !dataDir || !symbol} onClick={() => loadKline()}>{busy ? <Spinner /> : null}{t("refresh")}</button>
         </div>
       </section>
-      {rows.length ? (
-        <section className="panel kline-panel">
-          <div className="kline-chart-head">
-            <div>
-              <h2>{klineLabel}</h2>
-              <p>{klineDateRange}</p>
-            </div>
-            <div className="kline-controls">
-              <div className="kline-range-buttons" aria-label={t("klineRange")}>
-                {KLINE_RANGES.map((range) => (
-                  <button
-                    key={range}
-                    className={range === klineRange ? "active" : ""}
-                    onClick={() => setKlineRange(range)}
-                    type="button"
-                  >
-                    {range === "ALL" ? t("klineRangeAll") : range}
-                  </button>
-                ))}
-              </div>
-              <select value={klineSubMetric} onChange={(e) => setKlineSubMetric(e.target.value as KlineMetric)} aria-label={t("klineSubMetric")}>
-                {KLINE_METRICS.map((metric) => <option key={metric} value={metric}>{metricLabels[metric]}</option>)}
-              </select>
-            </div>
-          </div>
-          <div className="kline-stats">
-            <div>
-              <span>{t("klineClose")}</span>
-              <strong>{formatPrice(latestRow?.close)}</strong>
-            </div>
-            <div className={latestPct !== undefined && latestPct >= 0 ? "up" : "down"}>
-              <span>{t("klineMetricPct")}</span>
-              <strong>{formatPercent(latestPct)}</strong>
-            </div>
-            <div>
-              <span>{t("klineHigh")}</span>
-              <strong>{formatPrice(latestRow?.high)}</strong>
-            </div>
-            <div>
-              <span>{t("klineLow")}</span>
-              <strong>{formatPrice(latestRow?.low)}</strong>
-            </div>
-            <div>
-              <span>{metricLabels[chartMetric]}</span>
-              <strong>{chartMetric === "pctChg" || chartMetric === "turn" ? formatPercent(metricValue(latestRow, chartMetric, previousRow)) : formatCompactNumber(metricValue(latestRow, chartMetric, previousRow))}</strong>
-            </div>
-          </div>
-          {chartMetric !== klineSubMetric ? <p className="kline-note">{t("klineMetricFallback")}</p> : null}
-          <Plot
-            data={[
-              {
-                x: rows.map((row) => row.date),
-                open: rows.map((row) => row.open),
-                high: rows.map((row) => row.high),
-                low: rows.map((row) => row.low),
-                close: rows.map((row) => row.close),
-                type: "candlestick",
-                name: klineLabel,
-                text: klineHoverText,
-                hovertemplate: "%{text}<extra></extra>",
-                increasing: { line: { color: chartColors.up, width: 1.1 }, fillcolor: chartColors.up },
-                decreasing: { line: { color: chartColors.down, width: 1.1 }, fillcolor: chartColors.down },
-                xaxis: "x",
-                yaxis: "y"
-              },
-              {
-                x: rows.map((row) => row.date),
-                y: subMetricValues,
-                type: "bar",
-                name: metricLabels[chartMetric],
-                marker: { color: chartMetric === "pctChg" ? volumeColors : volumeColors },
-                hovertemplate: `<b>%{x}</b><br>${metricLabels[chartMetric]}: %{y:.2f}<extra></extra>`,
-                xaxis: "x2",
-                yaxis: "y2"
-              }
-            ]}
-            layout={{
-              autosize: true,
-              height: Math.max(560, Math.min(780, chartHeight() + 180)),
-              margin: { l: 18, r: 64, t: 10, b: 34 },
-              paper_bgcolor: chartColors.surface,
-              plot_bgcolor: chartColors.surface,
-              font: { color: chartColors.text, size: 12 },
-              dragmode: "pan",
-              hovermode: "x unified",
-              showlegend: false,
-              bargap: 0,
-              xaxis: {
-                domain: [0, 1],
-                anchor: "y",
-                type: klineXAxisType,
-                range: chartRange,
-                rangeslider: { visible: false },
-                showgrid: true,
-                gridcolor: chartColors.border,
-                showline: true,
-                linecolor: chartColors.border,
-                tickfont: { color: chartColors.muted },
-                showspikes: true,
-                spikemode: "across",
-                spikesnap: "cursor",
-                spikecolor: chartColors.muted,
-                spikethickness: 1,
-                ...intradayTickProps
-              },
-              xaxis2: {
-                domain: [0, 1],
-                anchor: "y2",
-                matches: "x",
-                type: klineXAxisType,
-                showgrid: true,
-                gridcolor: chartColors.border,
-                showline: true,
-                linecolor: chartColors.border,
-                tickfont: { color: chartColors.muted },
-                showspikes: true,
-                spikemode: "across",
-                spikesnap: "cursor",
-                spikecolor: chartColors.muted,
-                spikethickness: 1,
-                ...intradayTickProps
-              },
-              yaxis: {
-                domain: [0.28, 1],
-                side: "right",
-                fixedrange: false,
-                showgrid: true,
-                gridcolor: chartColors.border,
-                zeroline: false,
-                tickfont: { color: chartColors.muted }
-              },
-              yaxis2: {
-                domain: [0, 0.22],
-                side: "right",
-                fixedrange: false,
-                showgrid: true,
-                gridcolor: chartColors.border,
-                zeroline: false,
-                title: { text: metricLabels[chartMetric], font: { color: chartColors.muted, size: 11 } },
-                tickfont: { color: chartColors.muted }
-              },
-              hoverlabel: {
-                bgcolor: chartColors.surface2,
-                bordercolor: chartColors.border,
-                font: { color: chartColors.text }
-              }
-            }}
-            config={{
-              responsive: true,
-              displaylogo: false,
-              modeBarButtonsToRemove: ["select2d", "lasso2d", "autoScale2d"]
-            }}
-            useResizeHandler
-            style={{ width: "100%" }}
-          />
-        </section>
-      ) : <div className="empty">{t("empty")}</div>}
+      <MarketKlineViewer
+        payload={klinePayload}
+        symbol={symbol}
+        range={klineRange}
+        onRangeChange={setKlineRange}
+        subMetric={klineSubMetric}
+        onSubMetricChange={setKlineSubMetric}
+      />
     </>
   );
 }
-
-type TradeSessionManifest = {
-  name: string;
-  source_strategy?: string;
-  current_date?: string | null;
-  status?: string;
-  init_cash?: number | null;
-  market?: string | null;
-  n_factors?: number;
-};
-type SessionLogRow = { date: string; n_buy?: number; n_sell?: number; cash?: number; n_positions?: number; nav?: number; ret?: number; cost?: number; turnover?: number };
-type CashflowRow = { ts?: string; date?: string; delta?: number; balance_after?: number; note?: string };
-type TradeSessionDetail = {
-  manifest: TradeSessionManifest;
-  state?: { date?: string; cash?: number; positions?: Record<string, number> } | null;
-  history?: SessionLogRow[];
-  cashflows?: CashflowRow[];
-};
 
 function fmtNum(v: unknown): string {
   if (v === null || v === undefined || v === "") return "—";
@@ -2160,82 +1647,6 @@ function cashflowColumns(t: (k: string) => string) {
     { key: "balance_after", label: t("balance"), render: (r: Record<string, unknown>) => <>{fmtNum(r.balance_after)}</> },
     { key: "note", label: t("note") },
   ];
-}
-
-function Metric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="metric">
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
-}
-
-const PNL_MARGIN = { l: 56, r: 48, t: 28, b: 40 };
-const fmtMoney = (v: number | null): string => (v === null ? "—" : (v > 0 ? "+" : "") + Math.round(v).toLocaleString());
-const fmtPts = (v: number): string => (v > 0 ? "+" : "") + v.toFixed(2);
-
-/** "概览" tab: KPI strip + P&L charts (NAV curve, cumulative return, turnover & fee) for a session. */
-function SessionOverview({ detail }: { detail: TradeSessionDetail }) {
-  const { t } = useI18n();
-  const pnl = useMemo(
-    () => computeSessionPnl(detail.history || [], detail.manifest?.init_cash ?? 0, detail.cashflows || []),
-    [detail],
-  );
-  const nPositions = detail.state?.positions ? Object.keys(detail.state.positions).length : 0;
-  if (!pnl.hasData) return <p className="empty">{t("pnlNoData")}</p>;
-  return (
-    <>
-      <div className="metric-grid compact">
-        <Metric label={t("pnlMoney")} value={fmtMoney(pnl.totals.pnlMoney)} />
-        <Metric label={t("cumReturnPts")} value={fmtPts(pnl.totals.cumReturnPts)} />
-        <Metric label={t("totalFees")} value={fmtNum(Math.round(pnl.totals.totalFees))} />
-        <Metric label={t("navLabel")} value={fmtNum(pnl.totals.latestNav)} />
-        <Metric label={t("currentCash")} value={fmtNum(detail.state?.cash)} />
-        <Metric label={t("positions")} value={String(nPositions)} />
-      </div>
-      <h4 className="muted compact">{t("equityCurve")}</h4>
-      <Plot
-        data={[
-          { x: pnl.dates, y: pnl.nav, type: "scatter", mode: "lines", name: t("navLabel"), line: { color: "#2563eb", width: 2 } },
-          { x: pnl.dates, y: pnl.cash, type: "scatter", mode: "lines", name: t("currentCash"), line: { color: "#94a3b8", width: 1.5 } },
-        ]}
-        layout={{ autosize: true, height: chartHeight(), margin: PNL_MARGIN, hovermode: "x unified", legend: { orientation: "h" } }}
-        useResizeHandler
-        style={{ width: "100%" }}
-      />
-      <h4 className="muted compact">{t("cumReturnChart")}</h4>
-      <Plot
-        data={[{ x: pnl.dates, y: pnl.cumReturnPct, type: "scatter", mode: "lines", name: t("cumReturnPts"), line: { color: "#16a34a", width: 2 } }]}
-        layout={{
-          autosize: true,
-          height: 320,
-          margin: PNL_MARGIN,
-          hovermode: "x unified",
-          shapes: [{ type: "line", xref: "paper", x0: 0, x1: 1, y0: 0, y1: 0, line: { dash: "dot", color: "#94a3b8" } }],
-        }}
-        useResizeHandler
-        style={{ width: "100%" }}
-      />
-      <h4 className="muted compact">{t("turnoverFee")}</h4>
-      <Plot
-        data={[
-          { x: pnl.dates, y: pnl.turnover, type: "bar", name: t("turnoverLabel"), marker: { color: "#60a5fa" }, opacity: 0.7 },
-          { x: pnl.dates, y: pnl.feeMoney, type: "scatter", mode: "lines", name: t("feeMoney"), line: { color: "#ef4444", width: 1.5 }, yaxis: "y2" },
-        ]}
-        layout={{
-          autosize: true,
-          height: 320,
-          margin: PNL_MARGIN,
-          hovermode: "x unified",
-          yaxis: { title: t("turnoverLabel") },
-          yaxis2: { title: t("feeMoney"), overlaying: "y", side: "right" },
-        }}
-        useResizeHandler
-        style={{ width: "100%" }}
-      />
-    </>
-  );
 }
 
 export function DailyTradePage() {
@@ -2263,12 +1674,20 @@ export function DailyTradePage() {
   const [cashAmount, setCashAmount] = useState("");
   const [cashNote, setCashNote] = useState("");
   const { busy, run } = useAction();
+  const latestRunSession = useLatestRequest();
+  const latestSessionDetail = useLatestRequest();
 
   async function refreshRunSession(name: string) {
-    if (!name) { setRunSession(null); return; }
-    try {
-      setRunSession(await api.get<TradeSessionDetail>(`/api/trade-sessions/${encodeURIComponent(name)}`));
-    } catch { setRunSession(null); }
+    const result = await latestRunSession(() => name
+      ? api.get<TradeSessionDetail>(`/api/trade-sessions/${encodeURIComponent(name)}`)
+      : Promise.resolve(null as unknown as TradeSessionDetail));
+    if (!result.current) return;
+    if (result.error || !name) {
+      setRunSession(null);
+      if (result.error) setMessage(result.error instanceof Error ? result.error.message : String(result.error));
+      return;
+    }
+    setRunSession(result.data || null);
   }
   function selectRunSession(name: string) {
     setRunSessionName(name);
@@ -2306,14 +1725,19 @@ export function DailyTradePage() {
   }
 
   function viewSession(name: string) {
-    void run(async () => {
-      setDetail(await api.get<TradeSessionDetail>(`/api/trade-sessions/${encodeURIComponent(name)}`));
-      setDetailTab("overview");
-    });
+    void latestSessionDetail(() => api.get<TradeSessionDetail>(`/api/trade-sessions/${encodeURIComponent(name)}`))
+      .then((result) => {
+        if (!result.current) return;
+        if (result.error) throw result.error;
+        setDetail(result.data || null);
+        setDetailTab("overview");
+      })
+      .catch((error) => setMessage(error instanceof Error ? error.message : String(error)));
   }
 
   async function removeSession(name: string) {
     if (!(await confirm({ message: `${t("delete")} ${name}?`, danger: true }))) return;
+    void latestSessionDetail(() => Promise.resolve(null));
     void run(async () => {
       await api.delete(`/api/trade-sessions/${encodeURIComponent(name)}`);
       if (detail?.manifest?.name === name) setDetail(null);
@@ -2329,16 +1753,21 @@ export function DailyTradePage() {
   // the MarketPage data-job pattern so the page shows a run-status card instead of nothing.
   useEffect(() => {
     if (!activeJob?.job_id) return;
+    const jobId = activeJob.job_id;
+    const sessionName = runSessionName;
     let alive = true;
+    let timer: number | undefined;
     const poll = async () => {
+      let terminal = false;
       try {
-        const p = await api.get<JobProgress>(`/api/jobs/${activeJob.job_id}/progress`);
+        const p = await api.get<JobProgress>(`/api/jobs/${jobId}/progress`);
         if (!alive) return;
         setProgress(p);
         if (p.status && ["succeeded", "failed", "cancelled", "lost"].includes(p.status)) {
+          terminal = true;
           if (p.status === "succeeded") {
-            try { setResult(await api.get(`/api/jobs/${activeJob.job_id}/result`)); } catch { /* result may be empty */ }
-            if (runSessionName) void refreshRunSession(runSessionName);
+            try { setResult(await api.get(`/api/jobs/${jobId}/result`)); } catch { /* result may be empty */ }
+            if (sessionName) void refreshRunSession(sessionName);
             void sessions.refresh();
           }
           setActiveJob(null);
@@ -2346,10 +1775,13 @@ export function DailyTradePage() {
       } catch (err) {
         if (alive) setMessage(err instanceof Error ? err.message : String(err));
       }
+      if (alive && !terminal) timer = window.setTimeout(poll, 2000);
     };
     void poll();
-    const id = window.setInterval(poll, 2000);
-    return () => { alive = false; window.clearInterval(id); };
+    return () => {
+      alive = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
   }, [activeJob?.job_id]);
 
   function runDailyTrade() {
@@ -3486,3 +2918,7 @@ export function AdvancedPage() {
     </>
   );
 }
+
+export { HomePage } from "./pages/home/HomePage";
+export { LivePage } from "./pages/live/LivePage";
+export { klineAxisType, klineCategoryTicks, klineIsIntraday, klineTimeLabel } from "./pages/market/kline";

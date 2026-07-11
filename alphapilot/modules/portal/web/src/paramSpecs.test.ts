@@ -81,6 +81,28 @@ describe("buildParams", () => {
   it("rejects advanced JSON that is not an object", () => {
     expect(() => buildParams(specs, { name: "hi", mode: "a" }, "[1,2,3]")).toThrow(/object/i);
   });
+
+  it.each([
+    [{ start_date: "2026-02-01", end_date: "2026-01-01" }, "start_date"],
+    [{ cash: 0 }, "cash"],
+    [{ target_percent: 1.2 }, "target_percent"],
+    [{ trade_unit: 1.5 }, "trade_unit"],
+    [{ strategy_params: { short_window: 20, long_window: 5 } }, "short_window"],
+    [{ strategy_params: { low: 80, high: 20 } }, "strategy_params.low"],
+    [{ yaml_params: { topk: 5, n_drop: 6 } }, "n_drop"],
+  ])("rejects contradictory advanced parameters %#", (advanced, message) => {
+    expect(() => buildParams([], {}, JSON.stringify(advanced))).toThrow(String(message));
+  });
+
+  it("accepts zero lot size as the documented way to disable lot rounding", () => {
+    expect(buildParams([], {}, JSON.stringify({ trade_unit: 0 }))).toEqual({ trade_unit: 0 });
+  });
+
+  it("accepts zero daily drops and rejects non-numeric advanced values", () => {
+    expect(buildParams([], {}, JSON.stringify({ yaml_params: { topk: 5, n_drop: 0 } })))
+      .toEqual({ yaml_params: { topk: 5, n_drop: 0 } });
+    expect(() => buildParams([], {}, JSON.stringify({ cash: "not-a-number" }))).toThrow(/finite number/);
+  });
 });
 
 describe("real spec catalogs", () => {

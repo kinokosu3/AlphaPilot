@@ -40,7 +40,9 @@ from alphapilot.log import logger
 
 # Bump when the h5 generation logic changes so existing caches are considered stale.
 # v1: per-instrument $return (fixed groupby) + debug sliced from the full frame.
-GENERATOR_VERSION = 1
+# v2: fingerprint includes Qlib calendar/feature metadata, so updated source bars
+#     cannot silently reuse an H5 generated from older market data.
+GENERATOR_VERSION = 2
 
 DEFAULT_START = "2015-01-01"
 DEFAULT_FIELDS: tuple[str, ...] = ("$open", "$close", "$high", "$low", "$volume")
@@ -56,6 +58,9 @@ ENV_MARKET = "ALPHAPILOT_FACTOR_DATA_MARKET"
 
 def factor_h5_cache_root() -> Path:
     """Cache root, kept under the repo ``git_ignore_folder`` so Docker mounts can see it."""
+    configured = os.getenv("ALPHAPILOT_FACTOR_H5_CACHE_ROOT")
+    if configured:
+        return Path(configured).expanduser()
     return Path("git_ignore_folder") / "factor_h5_cache"
 
 
@@ -79,6 +84,50 @@ def _instruments_hash(qlib_dir: Path, market: str) -> str:
     return "no-instruments-file"
 
 
+def _source_data_hash(
+    qlib_dir: Path,
+    market: str,
+    fields: tuple[str, ...],
+    freq: str,
+) -> str:
+    """Fingerprint the Qlib inputs used to generate the factor H5.
+
+    Instrument/calendar contents are small and hashed directly. Feature binaries
+    are represented by path, size, and nanosecond mtime so the check remains fast
+    for large universes while still invalidating normal converter/download writes.
+    """
+    root = Path(qlib_dir).expanduser().resolve()
+    digest = hashlib.md5()
+    instruments = root / "instruments" / f"{market}.txt"
+    calendar = root / "calendars" / f"{freq}.txt"
+    for path in (instruments, calendar):
+        digest.update(path.relative_to(root).as_posix().encode())
+        digest.update(path.read_bytes() if path.is_file() else b"<missing>")
+
+    symbols: list[str] = []
+    if instruments.is_file():
+        symbols = sorted(
+            {
+                line.split("\t", 1)[0].strip().lower()
+                for line in instruments.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            }
+        )
+    feature_names = sorted({field.lstrip("$").lower() for field in fields})
+    for symbol in symbols:
+        for feature in feature_names:
+            path = root / "features" / symbol / f"{feature}.{freq}.bin"
+            relative = path.relative_to(root).as_posix()
+            digest.update(relative.encode())
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                digest.update(b"<missing>")
+            else:
+                digest.update(f"{stat.st_size}:{stat.st_mtime_ns}".encode())
+    return digest.hexdigest()
+
+
 @dataclass(frozen=True)
 class FactorDataSpec:
     """Inputs that fully determine a ``daily_pv.h5`` build."""
@@ -91,6 +140,7 @@ class FactorDataSpec:
     freq: str = "day"
 
     def fingerprint(self) -> str:
+        source_hash = _source_data_hash(self.qlib_dir, self.market, self.fields, self.freq)
         payload = {
             "qlib_dir": str(Path(self.qlib_dir).expanduser().resolve()),
             "market": self.market,
@@ -98,6 +148,7 @@ class FactorDataSpec:
             "fields": list(self.fields),
             "debug_stock_count": self.debug_stock_count,
             "instruments_hash": _instruments_hash(self.qlib_dir, self.market),
+            "source_data_hash": source_hash,
             "generator_version": GENERATOR_VERSION,
         }
         # Only fold ``freq`` into the hash for intraday data so existing daily cache
@@ -190,6 +241,7 @@ def _write_manifest(cache_dir: Path, spec: FactorDataSpec) -> None:
         "debug_stock_count": spec.debug_stock_count,
         "freq": spec.freq,
         "instruments_hash": _instruments_hash(spec.qlib_dir, spec.market),
+        "source_data_hash": _source_data_hash(spec.qlib_dir, spec.market, spec.fields, spec.freq),
         "generator_version": GENERATOR_VERSION,
         "daily_pv_size": st.st_size,
         "daily_pv_mtime_ns": st.st_mtime_ns,

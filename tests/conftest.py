@@ -65,6 +65,37 @@ EXPECTED_CLI_COMMANDS: frozenset[str] = frozenset(
         "list_mine_logs",
         "list_runs",
         "list_stocks",
+        "live_brokers",
+        "live_connect",
+        "live_daemon_start",
+        "live_daemon_status",
+        "live_daemon_stop",
+        "live_daemon_halt",
+        "live_daemon_order",
+        "live_daemon_resume",
+        "live_daemon_refresh",
+        "live_daemon_reconnect",
+        "live_daemon_cancel",
+        "live_daemon_strategy_pause",
+        "live_daemon_strategy_resume",
+        "live_daemon_strategy_start",
+        "live_daemon_strategy_status",
+        "live_daemon_strategy_stop",
+        "live_daemon_submit_target",
+        "live_market_bars",
+        "live_market_snapshot",
+        "live_modes",
+        "live_ledger_events",
+        "live_cancel",
+        "live_order",
+        "live_preflight",
+        "live_quote_providers",
+        "live_plugins",
+        "live_risk_status",
+        "live_run",
+        "live_state",
+        "live_status",
+        "live_submit_target",
         "mine",
         "mine_aff",
         "mine_gp",
@@ -107,7 +138,7 @@ EXPECTED_CLI_COMMANDS: frozenset[str] = frozenset(
 )
 
 EXPECTED_SYSTEMS: frozenset[str] = frozenset(
-    {"data", "factor", "strategy", "backtest", "timing", "notify"}
+    {"data", "factor", "strategy", "backtest", "timing", "notify", "live"}
 )
 EXPECTED_MODULES: frozenset[str] = frozenset(
     {
@@ -118,6 +149,7 @@ EXPECTED_MODULES: frozenset[str] = frozenset(
         "daily_trade",
         "data_viz",
         "factor",
+        "live",
         "platform",
         "portal",
         "qlib_yaml",
@@ -181,6 +213,7 @@ class AlphaEnv:
     raw_data: Path
     qlib_dir: Path
     factor_dir: Path
+    factor_h5_cache: Path
     log_dir: Path
     workspace_root: Path
     runs_dir: Path
@@ -201,6 +234,7 @@ def isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AlphaEnv:
     raw_data = tmp_path / "raw_data_back_adjust"
     qlib_dir = tmp_path / "qlib"
     factor_dir = tmp_path / "adjust_factors"
+    factor_h5_cache = tmp_path / "factor_h5_cache"
     log_dir = tmp_path / "log"
     workspace_root = tmp_path / "workspaces"
     runs_dir = tmp_path / "runs"
@@ -217,6 +251,7 @@ def isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AlphaEnv:
         raw_data,
         qlib_dir,
         factor_dir,
+        factor_h5_cache,
         log_dir,
         workspace_root,
         runs_dir,
@@ -234,6 +269,7 @@ def isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AlphaEnv:
         "ALPHAPILOT_RAW_DATA_DIR": str(raw_data),
         "ALPHAPILOT_QLIB_DATA_DIR": str(qlib_dir),
         "ALPHAPILOT_ADJUST_FACTOR_DIR": str(factor_dir),
+        "ALPHAPILOT_FACTOR_H5_CACHE_ROOT": str(factor_h5_cache),
         "ALPHAPILOT_LOG_DIR": str(log_dir),
         "ALPHAPILOT_WORKSPACE_ROOT": str(workspace_root),
         "ALPHAPILOT_RUNS_DIR": str(runs_dir),
@@ -246,6 +282,11 @@ def isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AlphaEnv:
         "ALPHAPILOT_PORTAL_SETTINGS_PATH": str(tmp_path / "portal_settings.json"),
         "ALPHAPILOT_NOTIFY_CREDENTIALS_PATH": str(notify_credentials),
         "ALPHAPILOT_NOTIFY_COMMAND_ROOT": str(notify_command_root),
+        "ALPHAPILOT_LIVE_MODE": "dry_run",
+        "ALPHAPILOT_LIVE_BROKER": "paper",
+        "ALPHAPILOT_LIVE_LEDGER_DIR": str(tmp_path / "live_ledger"),
+        "ALPHAPILOT_LIVE_STATE_DIR": str(tmp_path / "live_state"),
+        "ALPHAPILOT_LIVE_MARKET_DATA_DIR": str(tmp_path / "live_market_data"),
         "ALPHAPILOT_TIMEZONE": "Asia/Shanghai",
         "USE_LOCAL": "True",
     }
@@ -260,6 +301,7 @@ def isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AlphaEnv:
         raw_data=raw_data,
         qlib_dir=qlib_dir,
         factor_dir=factor_dir,
+        factor_h5_cache=factor_h5_cache,
         log_dir=log_dir,
         workspace_root=workspace_root,
         runs_dir=runs_dir,
@@ -320,3 +362,18 @@ def captured_notify(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
         "alphapilot.systems.notify.service._build_channels", _fake_build_channels
     )
     return sink
+@pytest.fixture(autouse=True)
+def installed_live_test_plugins():
+    """Model the EMT/XTP wheels as installed for the existing live tests."""
+    from alphapilot.systems.live.brokers import registry
+    from alphapilot_broker_emt.plugin import get_plugin_spec as emt_plugin
+    from alphapilot_broker_xtp.plugin import get_plugin_spec as xtp_plugin
+
+    registry.reset_plugin_registry_for_tests()
+    installed = {spec.name for spec in registry.list_brokers()}
+    if "emt" not in installed:
+        registry.register_plugin_spec(emt_plugin(), distribution="alphapilot-broker-emt", version="test")
+    if "xtp" not in installed:
+        registry.register_plugin_spec(xtp_plugin(), distribution="alphapilot-broker-xtp", version="test")
+    yield
+    registry.reset_plugin_registry_for_tests()

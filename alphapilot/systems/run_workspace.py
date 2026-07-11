@@ -275,12 +275,15 @@ def list_run_backtests() -> list[dict[str, Any]]:
 def resolve_run_workspace(workspace_id: str) -> Path | None:
     """Find a backtest-result workspace (``ret.pkl``) by its dir name across runs."""
     root = runs_root().resolve()
+    candidate = Path(str(workspace_id)).expanduser()
+    if candidate.is_absolute() or len(candidate.parts) != 1 or candidate.name in {"", ".", ".."}:
+        raise ValueError("Invalid workspace id")
     if not root.exists():
         return None
     for run_dir in root.iterdir():
         if not run_dir.is_dir():
             continue
-        ws = run_dir / "workspaces" / workspace_id
+        ws = ensure_child_path(root, (run_dir / "workspaces" / candidate.name).resolve())
         if ws.is_dir() and (ws / "ret.pkl").exists():
             return ws
     return None

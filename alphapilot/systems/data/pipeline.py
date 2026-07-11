@@ -72,6 +72,12 @@ def dispatch_prepare_action(
         kwargs.update(options)
         if stock_csv:
             kwargs["stock_csv"] = stock_csv
+        if market:
+            kwargs["market"] = market
+        if qlib_dir:
+            kwargs["qlib_dir"] = qlib_dir
+        if output_dir:
+            kwargs["data_dir"] = output_dir
         return pipeline_handler(**kwargs)
 
     if action == "download":
@@ -88,12 +94,20 @@ def dispatch_prepare_action(
         return download_handler(**kwargs)
 
     if action == "convert":
-        kwargs = {"adjust_mode": adjust_mode}
+        kwargs = {
+            "adjust_mode": adjust_mode,
+            "start_date": start_date,
+            "end_date": end_date,
+        }
         kwargs.update(options)
         if stock_csv:
             kwargs["stock_csv"] = stock_csv
+        if market:
+            kwargs["market"] = market
         if qlib_dir:
             kwargs["qlib_dir"] = qlib_dir
+        if output_dir and "data_path" not in kwargs:
+            kwargs["data_path"] = output_dir
         return convert_handler(**kwargs)
 
     if action in {"refresh_factors", "apply_adjust", "dump", "calendar"}:
@@ -108,20 +122,20 @@ def dispatch_prepare_action(
         # / dump / ...) operate on default/configured dirs and don't accept it. Drop it so a stray
         # value (e.g. from the portal form or a saved schedule) can't raise a TypeError.
         kwargs.pop("source", None)
-        if stock_csv:
+        if action == "refresh_factors" and stock_csv:
             kwargs["stock_csv"] = stock_csv
-        if market:
-            kwargs["market"] = market
         if qlib_dir:
             kwargs["qlib_dir"] = qlib_dir
         if output_dir:
             kwargs["output_dir"] = output_dir
-        if action in {"apply_adjust", "download", "convert", "pipeline"}:
+        if action == "apply_adjust":
             kwargs["adjust_mode"] = adjust_mode
-        if action in {"download", "pipeline"}:
+        if action == "calendar":
             kwargs["start_date"] = start_date
             if end_date:
                 kwargs["end_date"] = end_date
+        elif action == "refresh_factors" and end_date:
+            kwargs["end_date"] = end_date
         return getattr(cli, action)(**kwargs)
 
     raise ValueError(f"Unsupported prepare_data action: {action!r}")

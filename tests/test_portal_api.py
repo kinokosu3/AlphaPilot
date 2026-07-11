@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import pytest
 from fastapi.testclient import TestClient
 
 from alphapilot.modules.portal import jobs
@@ -60,6 +61,11 @@ class FakeFactorDb:
 
     def list_categories(self) -> list[str]:
         return self.categories
+
+    def save(self, output_path: str) -> None:
+        target = Path(output_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("factor_name,factor_expression\n", encoding="utf-8")
 
     def create_category(self, name: str) -> bool:
         self.categories.append(name)
@@ -223,14 +229,20 @@ class FakeEngine:
     def get_system(self, name: str) -> Any:
         return self.systems[name]
 
+    def get_module(self, name: str) -> Any:
+        return self.modules[name]
+
 
 def client(tmp_path: Path, monkeypatch) -> TestClient:  # noqa: ANN001
+    monkeypatch.setenv("ALPHAPILOT_IMPORTANT_DATA_DIR", str(tmp_path / "important_data"))
     monkeypatch.setenv("ALPHAPILOT_PORTAL_JOB_ROOT", str(tmp_path / "jobs"))
     monkeypatch.setenv("ALPHAPILOT_PORTAL_SCHEDULE_ROOT", str(tmp_path / "schedules"))
     monkeypatch.setenv("ALPHAPILOT_PORTAL_ENV_PATH", str(tmp_path / "portal-env.json"))
     monkeypatch.setenv("ALPHAPILOT_NOTIFY_CREDENTIALS_PATH", str(tmp_path / "notify.json"))
     monkeypatch.setenv("ALPHAPILOT_NOTIFY_COMMAND_ROOT", str(tmp_path / "notify-commands"))
-    return TestClient(create_app(engine=FakeEngine()))
+    engine = FakeEngine()
+    engine.config.log_dir = tmp_path / "log"
+    return TestClient(create_app(engine=engine))
 
 
 def test_status_and_factor_crud(tmp_path, monkeypatch) -> None:  # noqa: ANN001
@@ -340,6 +352,54 @@ def test_log_cleanup_api_previews_and_deletes(tmp_path, monkeypatch) -> None:  #
     assert deleted.json()["removed"] == 1
     assert not empty.exists()
     assert keep.exists()
+
+
+def test_portal_file_roots_reject_unconfigured_paths(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    c = client(tmp_path, monkeypatch)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.csv").write_text("date,close\n2026-01-01,1\n", encoding="utf-8")
+
+    assert c.post("/api/logs/cleanup", json={"log_dir": str(outside), "execute": True}).status_code == 400
+    assert c.get("/api/market/symbols", params={"data_dir": str(outside)}).status_code == 400
+    assert c.get(
+        "/api/market/kline", params={"data_dir": str(outside), "symbol": "secret"}
+    ).status_code == 400
+    assert c.get("/api/backtests", params={"workspace_root": str(outside)}).status_code == 400
+    assert c.get("/api/backtests/leaderboards", params={"workspace_root": str(outside)}).status_code == 400
+    assert c.get(
+        "/api/backtests/leaderboard",
+        params={"workspace_root": str(outside), "file": "secret_leaderboard.csv"},
+    ).status_code == 400
+
+
+def test_backtest_workspace_traversal_never_reaches_legacy_delete(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    c = client(tmp_path, monkeypatch)
+    called = False
+
+    def unsafe_delete(_workspace_id: str) -> bool:
+        nonlocal called
+        called = True
+        return True
+
+    c.app.state.engine.systems["backtest"].delete_workspace = unsafe_delete
+    response = c.delete("/api/backtests/%2E%2E")
+    assert response.status_code == 400
+    assert called is False
+
+
+def test_schedule_id_path_traversal_is_rejected(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    from alphapilot.modules.portal import schedules
+
+    root = tmp_path / "schedules"
+    root.mkdir()
+    outside = tmp_path / "secret.json"
+    outside.write_text('{"secret": true}', encoding="utf-8")
+    for schedule_id in ("..", "../secret", str(outside)):
+        with pytest.raises(ValueError, match="Invalid schedule id"):
+            schedules.get_schedule(schedule_id, schedule_root=root)
+        with pytest.raises(ValueError, match="Invalid schedule id"):
+            schedules.delete_schedule(schedule_id, schedule_root=root)
 
 
 def test_job_routes_are_json_wrappers(tmp_path, monkeypatch) -> None:  # noqa: ANN001
@@ -501,13 +561,75 @@ def test_strategy_import_export_routes(tmp_path, monkeypatch) -> None:  # noqa: 
     c = client(tmp_path, monkeypatch)
     c.post("/api/strategies", json={"strategy_name": "s1", "params": {"a": 1}})
 
-    out = tmp_path / "strategy.json"
+    out = tmp_path / "important_data" / "strategy_zoo" / "strategy.json"
     exported = c.post("/api/strategies/export", json={"strategy_name": "s1", "output_path": str(out)})
     assert exported.json()["saved"] is True
     assert out.exists()
 
-    imported = c.post("/api/strategies/import", json={"kind": "pdf", "source": "paper.pdf"})
+    source = tmp_path / "important_data" / "imports" / "paper.pdf"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"pdf")
+    imported = c.post("/api/strategies/import", json={"kind": "pdf", "source": str(source)})
     assert imported.json()["strategy_name"] == "imported"
+
+
+def test_portal_asset_import_export_rejects_paths_outside_important_data(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    c = client(tmp_path, monkeypatch)
+    c.post("/api/strategies", json={"strategy_name": "s1", "params": {"a": 1}})
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"secret": true}', encoding="utf-8")
+
+    exported = c.post(
+        "/api/strategies/export",
+        json={"strategy_name": "s1", "output_path": str(outside)},
+    )
+    imported = c.post(
+        "/api/factors/import",
+        json={"kind": "json", "source": str(outside)},
+    )
+
+    assert exported.status_code == 400
+    assert imported.status_code == 400
+    assert outside.read_text(encoding="utf-8") == '{"secret": true}'
+
+
+def test_portal_asset_repo_relative_path_follows_relocated_important_data(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    c = client(tmp_path, monkeypatch)
+    response = c.post("/api/factors/export", json={"output_path": "important_data/factor_zoo/export.csv"})
+    expected = tmp_path / "important_data" / "factor_zoo" / "export.csv"
+
+    assert response.status_code == 200
+    assert Path(response.json()["output_path"]) == expected
+
+
+def test_generic_module_run_cannot_bypass_live_or_destructive_api_guards(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    c = client(tmp_path, monkeypatch)
+    calls: list[dict[str, Any]] = []
+
+    class LiveModule:
+        def commands(self) -> dict[str, Any]:
+            return {
+                "live_order": lambda **kwargs: calls.append(kwargs),
+                "live_preflight": lambda **kwargs: calls.append(kwargs),
+            }
+
+    c.app.state.engine.modules["live"] = LiveModule()
+    order = c.post(
+        "/api/modules/run",
+        json={
+            "module": "live",
+            "command": "live_order",
+            "kwargs": {"mode": "live", "confirm_live": True, "symbol": "SH600000"},
+        },
+    )
+    network = c.post(
+        "/api/modules/run",
+        json={"module": "live", "command": "live_preflight", "kwargs": {"network": True}},
+    )
+
+    assert order.status_code == 400
+    assert network.status_code == 400
+    assert calls == []
 
 
 def test_timing_routes_start_jobs_and_preview_artifacts(tmp_path, monkeypatch) -> None:  # noqa: ANN001
@@ -575,3 +697,22 @@ def test_timing_routes_start_jobs_and_preview_artifacts(tmp_path, monkeypatch) -
     assert data["summary"]["strategy"] == "dual_ma"
     assert data["equity_curve"]["row_count"] == 1
     assert data["trades"]["rows"][0]["side"] == "buy"
+
+
+def test_mining_session_routes_reject_percent_encoded_parent_escape(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    c = client(tmp_path, monkeypatch)
+    log_root = tmp_path / "log"
+    session = log_root / "safe-session"
+    session.mkdir(parents=True)
+    (session / "run.log").write_text("safe", encoding="utf-8")
+    (tmp_path / "secret.txt").write_text("must-not-leak", encoding="utf-8")
+
+    detail = c.get("/api/mining/sessions/%2E%2E")
+    file_read = c.get("/api/mining/sessions/%2E%2E/files/secret.txt")
+    valid = c.get("/api/mining/sessions/safe-session/files/run.log")
+
+    assert detail.status_code == 400
+    assert file_read.status_code == 400
+    assert "must-not-leak" not in detail.text + file_read.text
+    assert valid.status_code == 200
+    assert valid.json()["content"] == "safe"

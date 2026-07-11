@@ -6,9 +6,24 @@ public
 release-notes.md
 Working_AlphaPilot.md
 important_data/stock_pools/
+secrets.txt
+lshw.txt
+/alphapilot_emt/
+/alphapilot_xtpx/
+/plugins/alphapilot_broker_emt/
+/plugins/alphapilot_broker_xtp/
+
+# Broker SDKs / upstream trading dependencies
+#
+# Raw vendor SDK folders should not be committed. The gateway packages already
+# carry the headers/libs they need; keep originals local unless their license
+# explicitly allows redistribution.
 /emt_api/
+/XTP_API*/
+
+# Large upstream working copies are ignored by default. If you decide to vendor
+# them, remove these rules or add them as proper git submodules/private forks.
 /vnpy/
-/vnpy_emt/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -18,6 +33,8 @@ __pycache__/
 
 # C extensions
 *.so
+!alphapilot_xtpx/alphapilot_xtpx/api/*.so
+!alphapilot_emt/alphapilot_emt/api/*.so
 
 # Distribution / packaging
 .Python
@@ -120,6 +137,9 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
+!.env.example
+!.env.docker.example
 .venv
 ^env/
 venv/

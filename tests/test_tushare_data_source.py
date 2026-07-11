@@ -135,7 +135,7 @@ def test_tushare_download_writes_normalized_price_factor_and_state(tmp_path):
     assert price_df.loc[0, "date"] == "2026-06-12"
     assert price_df.loc[0, "code"] == "sz000001"
     assert price_df.loc[0, "preclose"] == 10.1
-    assert price_df.loc[0, "volume"] == 12345
+    assert price_df.loc[0, "volume"] == 1_234_500
     assert price_df.loc[0, "pctChg"] == 3.96
 
     factor_df = pd.read_csv(factor_dir / "sz000001.csv")

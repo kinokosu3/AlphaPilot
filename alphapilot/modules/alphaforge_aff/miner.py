@@ -208,9 +208,9 @@ class AFFMiner:
         from alphagen.rl.env.wrapper import SIZE_ACTION
         from alphagen.utils.random import reseed_everything
         from gan.dataset import Collector
-        from gan.network.generater import NetG_DCGAN, train_network_generator
+        from gan.network.generater import NetG_CNN, NetG_DCGAN, train_network_generator
         from gan.network.masker import NetM
-        from gan.network.predictor import NetP
+        from gan.network.predictor import NetP, NetP_CNN
         from gan.utils import Builders, filter_valid_blds
         from alphapilot.modules.alphaforge.data_adapter import default_target, get_data_splits
 
@@ -226,10 +226,35 @@ class AFFMiner:
         data = splits.train
         target = default_target()
 
-        netG = NetG_DCGAN(n_chars=SIZE_ACTION, latent_size=cfg.potential_size,
-                          seq_len=cfg.max_len, hidden=cfg.g_hidden).to(cfg.device)
+        # AlphaForge's original DCGAN and predictor have a fixed length-20
+        # convolution layout.  The vendored package also provides equivalent
+        # length-agnostic CNN variants; use those for bounded smoke/QA searches
+        # and any caller-selected max_len other than 20.
+        if cfg.max_len == 20:
+            netG = NetG_DCGAN(
+                n_chars=SIZE_ACTION,
+                latent_size=cfg.potential_size,
+                seq_len=cfg.max_len,
+                hidden=cfg.g_hidden,
+            ).to(cfg.device)
+            netP = NetP(
+                n_chars=SIZE_ACTION,
+                seq_len=cfg.max_len,
+                hidden=cfg.p_hidden,
+            ).to(cfg.device)
+        else:
+            netG = NetG_CNN(
+                n_chars=SIZE_ACTION,
+                latent_size=cfg.potential_size,
+                seq_len=cfg.max_len,
+                hidden=cfg.g_hidden,
+            ).to(cfg.device)
+            netP = NetP_CNN(
+                n_chars=SIZE_ACTION,
+                seq_len=cfg.max_len,
+                hidden=cfg.p_hidden,
+            ).to(cfg.device)
         netM = NetM(max_len=cfg.max_len, size_action=SIZE_ACTION).to(cfg.device)
-        netP = NetP(n_chars=SIZE_ACTION, seq_len=cfg.max_len, hidden=cfg.p_hidden).to(cfg.device)
 
         z = torch.zeros([cfg.batch_size, cfg.potential_size], device=cfg.device).normal_()
 

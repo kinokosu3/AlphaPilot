@@ -62,6 +62,30 @@ def _portfolio_artifact_names() -> tuple[str, ...]:
 _PORTFOLIO_ARTIFACT_NAMES = _portfolio_artifact_names()
 
 
+def _backtest_cacheable(exp: Any) -> bool:
+    """A cached qrun is reusable only while its material artifacts still exist.
+
+    Pickled experiment objects outlive the ephemeral RD-Agent workspace fairly
+    often.  Treating those objects as cache hits returns metrics but no model,
+    prediction, portfolio or chart files — a particularly dangerous false
+    success for strategy retraining.
+    """
+    if getattr(exp, "result", None) is None:
+        return False
+    workspace = getattr(getattr(exp, "experiment_workspace", None), "workspace_path", None)
+    if workspace is None:
+        return False
+    path = Path(workspace)
+    return path.is_dir() and (path / "qlib_res.csv").is_file() and (
+        (path / "ret.pkl").is_file() or any(path.glob("report_normal_*.pkl"))
+    )
+
+
+def _assign_factor_cached_result(runner: Any, exp: Any, *, cached_res: Any) -> Any:
+    """Dispatch cache restoration through the concrete runner override."""
+    return runner.assign_cached_result(exp, cached_res)
+
+
 def _coerce_yaml_params(yaml_params: Any) -> Any:
     """Return a ``QlibYamlParams`` from an instance or plain dict.
 
@@ -157,7 +181,11 @@ class QlibFactorRunner(CachedRunner[Any]):
             )
         return exp
 
-    @cache_with_pickle(CachedRunner.get_cache_key, CachedRunner.assign_cached_result)
+    @cache_with_pickle(
+        CachedRunner.get_cache_key,
+        _assign_factor_cached_result,
+        cache_if=_backtest_cacheable,
+    )
     def develop(
         self,
         exp: Union[FactorBacktestCapable, Any],
