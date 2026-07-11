@@ -8,6 +8,10 @@ Working_AlphaPilot.md
 important_data/stock_pools/
 secrets.txt
 lshw.txt
+/alphapilot_emt/
+/alphapilot_xtpx/
+/plugins/alphapilot_emt/
+/plugins/alphapilot_xtpx/
 
 # Broker SDKs / upstream trading dependencies
 #
