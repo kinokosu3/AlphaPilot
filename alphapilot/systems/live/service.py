@@ -11,6 +11,7 @@ load only inside a concrete gateway when ``mode == LIVE``.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from alphapilot.kernel.base import BaseSystem
@@ -60,12 +61,13 @@ class LiveSystem(BaseSystem):
                 self.config.trade_broker or self.config.broker,
                 self.config.quote_provider or self.config.trade_broker or self.config.broker,
             )
+        calendar = is_trading_day_fn or self._trading_day_predicate()
         return LiveEngine(
             self.config,
             selected_broker or self.make_broker(),
             quote_gateway=quote_gateway,
             now_fn=now_fn,
-            is_trading_day_fn=is_trading_day_fn,
+            is_trading_day_fn=calendar,
             risk=RiskGate(self.config.risk),
         )
 
@@ -122,8 +124,34 @@ class LiveSystem(BaseSystem):
         return LiveRuntime.create(
             cfg,
             now_fn=now_fn,
-            is_trading_day_fn=is_trading_day_fn,
+            is_trading_day_fn=is_trading_day_fn or self._trading_day_predicate(mode=cfg.mode),
         )
+
+    def _trading_day_predicate(self, *, mode: str | None = None):
+        """Use the local Qlib exchange calendar; LIVE fails closed if absent."""
+        selected_mode = mode or self.config.mode
+        data_config = getattr(self.context.config, "data", None)
+        qlib_root = Path(getattr(data_config, "qlib_data_dir", "") or "").expanduser()
+        candidates = [
+            qlib_root / "calendars" / "day_future.txt",
+            qlib_root / "calendars" / "day.txt",
+        ]
+        days: set[str] = set()
+        for path in candidates:
+            if not path.is_file():
+                continue
+            try:
+                days.update(
+                    line.strip()[:10] for line in path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                )
+            except OSError:
+                continue
+        if days:
+            return lambda dt: dt.date().isoformat() in days
+        if selected_mode == RunMode.LIVE:
+            return lambda _dt: False
+        return lambda dt: dt.weekday() < 5
 
     # ---- introspection (used by CLI / portal) ---------------------------- #
     def modes(self) -> list[str]:
@@ -154,5 +182,6 @@ class LiveSystem(BaseSystem):
                 "price_guard_pct": cfg.risk.price_guard_pct,
                 "max_orders_per_day": cfg.risk.max_orders_per_day,
                 "lot_size": cfg.risk.lot_size,
+                "max_quote_age_seconds": cfg.risk.max_quote_age_seconds,
             },
         }

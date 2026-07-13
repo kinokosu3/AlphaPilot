@@ -138,7 +138,7 @@ EXPECTED_CLI_COMMANDS: frozenset[str] = frozenset(
 )
 
 EXPECTED_SYSTEMS: frozenset[str] = frozenset(
-    {"data", "factor", "strategy", "backtest", "timing", "notify", "live"}
+    {"data", "factor", "strategy", "backtest", "timing", "notify", "live", "trading"}
 )
 EXPECTED_MODULES: frozenset[str] = frozenset(
     {

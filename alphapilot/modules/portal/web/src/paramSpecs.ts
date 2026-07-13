@@ -443,10 +443,6 @@ function timingStrategyOptions(names: string[] = []): FieldOption[] {
   return names.map((name) => ({ label: known.get(name) || name, value: name }));
 }
 
-function timingStrategyIs(...names: string[]) {
-  return (values: Record<string, FieldValue>) => names.includes(String(values.strategy_name || "boll_mean_reversion"));
-}
-
 const parseSymbolList = (value: FieldValue): string[] | undefined => {
   const symbols = String(value || "")
     .replace(/，/g, ",")
@@ -456,7 +452,59 @@ const parseSymbolList = (value: FieldValue): string[] | undefined => {
   return symbols.length ? symbols : undefined;
 };
 
-function timingBaseSpecs(strategyNames: string[] = []): FieldSpec[] {
+type TimingSchemaSpec = {
+  name: string;
+  parameter_schema?: {
+    properties?: Record<string, {
+      type?: "integer" | "number" | "boolean" | "string";
+      default?: unknown;
+      minimum?: number;
+      maximum?: number;
+      description?: string;
+    }>;
+    required?: string[];
+  };
+};
+
+// Compatibility fallback for callers/tests that only provide strategy names.
+// The Portal normally receives the authoritative schema from the backend.
+const legacyTimingSchemas: TimingSchemaSpec[] = [
+  { name: "boll_mean_reversion", parameter_schema: { properties: { window: { type: "integer", default: 20 }, num_std: { type: "number", default: 2 } } } },
+  { name: "sma_filter", parameter_schema: { properties: { window: { type: "integer", default: 20 } } } },
+  { name: "dual_ma", parameter_schema: { properties: { short_window: { type: "integer", default: 5 }, long_window: { type: "integer", default: 20 } } } },
+  { name: "rsi_reversion", parameter_schema: { properties: { window: { type: "integer", default: 14 }, low: { type: "number", default: 30 }, high: { type: "number", default: 70 } } } },
+  { name: "kdj_cross", parameter_schema: { properties: { window: { type: "integer", default: 9 } } } },
+  { name: "aroon_trend", parameter_schema: { properties: { window: { type: "integer", default: 25 }, up_threshold: { type: "number", default: 70 } } } },
+  { name: "stoch_rsi_reversion", parameter_schema: { properties: { rsi_window: { type: "integer", default: 14 }, stoch_window: { type: "integer", default: 14 }, low: { type: "number", default: 0.2 }, high: { type: "number", default: 0.8 } } } },
+  { name: "arbr_reversion", parameter_schema: { properties: { window: { type: "integer", default: 26 }, low: { type: "number", default: 70 }, high: { type: "number", default: 150 } } } },
+];
+
+function timingSchemaFields(strategies: TimingSchemaSpec[] = []): FieldSpec[] {
+  const byKey = new Map<string, { names: string[]; schema: Record<string, unknown> }>();
+  for (const strategy of strategies) {
+    for (const [key, raw] of Object.entries(strategy.parameter_schema?.properties || {})) {
+      if (key === "target_percent") continue;
+      const current = byKey.get(key);
+      if (current) current.names.push(strategy.name);
+      else byKey.set(key, { names: [strategy.name], schema: raw as Record<string, unknown> });
+    }
+  }
+  return [...byKey.entries()].map(([key, entry]) => {
+    const type = String(entry.schema.type || "string");
+    const bounds = [entry.schema.minimum !== undefined ? `min=${entry.schema.minimum}` : "", entry.schema.maximum !== undefined ? `max=${entry.schema.maximum}` : ""].filter(Boolean).join(", ");
+    return {
+      key: `strategy_params.${key}`,
+      label: key,
+      type: type === "boolean" ? "checkbox" : ["integer", "number"].includes(type) ? "number" : "text",
+      placeholder: entry.schema.default === undefined ? "" : String(entry.schema.default),
+      helpText: String(entry.schema.description || bounds || "由策略参数 Schema 提供"),
+      visibleWhen: (values) => entry.names.includes(String(values.strategy_name || "boll_mean_reversion")),
+    } as FieldSpec;
+  });
+}
+
+function timingBaseSpecs(strategyNames: string[] = [], strategySpecs: TimingSchemaSpec[] = []): FieldSpec[] {
+  const schemas = strategySpecs.length ? strategySpecs : legacyTimingSchemas.filter((item) => !strategyNames.length || strategyNames.includes(item.name));
   return [
     {
       key: "strategy_name",
@@ -485,16 +533,9 @@ function timingBaseSpecs(strategyNames: string[] = []): FieldSpec[] {
     { key: "end_date", label: "结束日期 End Date", type: "date" },
     freqField({ helpText: "日频读取复权 CSV；分钟级读取 baostock 分钟 CSV（5/15/30/60min）。" }),
     { key: "adjust_mode", label: "复权模式 Adjust Mode", type: "select", defaultValue: "backward", options: adjustModeOptions },
+    { key: "execution_adjust_mode", label: "成交价格复权 Execution Prices", type: "select", defaultValue: "none", options: adjustModeOptions, helpText: "实盘一致性建议使用 none；策略指标仍使用上方复权模式。" },
     { key: "target_percent", label: "目标仓位 Target %", type: "number", defaultValue: 1, helpText: "1=满仓，0.5=半仓；v1 只做多/空仓。" },
-    { key: "strategy_params.window", label: "窗口 Window", type: "number", placeholder: "默认按策略", visibleWhen: timingStrategyIs("boll_mean_reversion", "sma_filter", "rsi_reversion", "kdj_cross", "aroon_trend", "arbr_reversion") },
-    { key: "strategy_params.num_std", label: "BOLL 标准差倍数", type: "number", placeholder: "2", visibleWhen: timingStrategyIs("boll_mean_reversion") },
-    { key: "strategy_params.short_window", label: "短均线窗口", type: "number", placeholder: "5", visibleWhen: timingStrategyIs("dual_ma") },
-    { key: "strategy_params.long_window", label: "长均线窗口", type: "number", placeholder: "20", visibleWhen: timingStrategyIs("dual_ma") },
-    { key: "strategy_params.rsi_window", label: "RSI 窗口", type: "number", placeholder: "14", visibleWhen: timingStrategyIs("stoch_rsi_reversion") },
-    { key: "strategy_params.stoch_window", label: "Stoch 窗口", type: "number", placeholder: "14", visibleWhen: timingStrategyIs("stoch_rsi_reversion") },
-    { key: "strategy_params.low", label: "低阈值 Low", type: "number", placeholder: "RSI=30 / StochRSI=0.2 / ARBR=70", visibleWhen: timingStrategyIs("rsi_reversion", "stoch_rsi_reversion", "arbr_reversion") },
-    { key: "strategy_params.high", label: "高阈值 High", type: "number", placeholder: "RSI=70 / StochRSI=0.8 / ARBR=150", visibleWhen: timingStrategyIs("rsi_reversion", "stoch_rsi_reversion", "arbr_reversion") },
-    { key: "strategy_params.up_threshold", label: "Aroon Up 阈值", type: "number", placeholder: "70", visibleWhen: timingStrategyIs("aroon_trend") },
+    ...timingSchemaFields(schemas),
     {
       key: "_show_timing_advanced",
       label: "显示高级数据 / 成本参数",
@@ -507,13 +548,13 @@ function timingBaseSpecs(strategyNames: string[] = []): FieldSpec[] {
   ];
 }
 
-export function timingSignalSpecs(strategyNames: string[] = []): FieldSpec[] {
-  return timingBaseSpecs(strategyNames);
+export function timingSignalSpecs(strategyNames: string[] = [], strategySpecs: TimingSchemaSpec[] = []): FieldSpec[] {
+  return timingBaseSpecs(strategyNames, strategySpecs);
 }
 
-export function timingBacktestSpecs(strategyNames: string[] = []): FieldSpec[] {
+export function timingBacktestSpecs(strategyNames: string[] = [], strategySpecs: TimingSchemaSpec[] = []): FieldSpec[] {
   return [
-    ...timingBaseSpecs(strategyNames),
+    ...timingBaseSpecs(strategyNames, strategySpecs),
     { key: "cash", label: "初始资金 Cash", type: "number", defaultValue: 100000 },
     { key: "trade_unit", label: "每手股数 Trade Unit", type: "number", defaultValue: 100, helpText: "A 股默认 100；填 0 关闭整手约束。" },
     { key: "open_cost", label: "买入费率 Open Cost", type: "number", defaultValue: 0.0002, visibleWhen: (v) => Boolean(v._show_timing_advanced) },

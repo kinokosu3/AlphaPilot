@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +78,11 @@ class LiveRuntime:
         self.state_path = Path(config.state_dir).expanduser() / "runtime_state.json"
         self.recovery: dict[str, Any] | None = None
         self.market_data = None
+        from alphapilot.systems.trading.store import StrategyRuntimeStore
+
+        self.strategy_store = StrategyRuntimeStore(
+            Path(config.state_dir).expanduser() / "strategy_runtime.sqlite3"
+        )
 
     # ---- construction ----------------------------------------------------- #
     @classmethod
@@ -397,31 +403,168 @@ class LiveRuntime:
 
     def plan_target(self, target: TargetPortfolio) -> list[OrderRequest]:
         """Diff target holdings against real OMS positions into order requests."""
-        return reconcile(target, self.engine.oms, lot_size=self.config.risk.lot_size)
+        return reconcile(
+            target,
+            self.engine.oms,
+            lot_size=self.config.risk.lot_size,
+            max_order_value=self.config.risk.max_order_value,
+        )
 
     def submit_target(self, target: TargetPortfolio, *, route: bool = False) -> dict[str, Any]:
         """Plan and optionally route all orders for a target portfolio."""
-        requests = self.plan_target(target)
+        from alphapilot.systems.live.planner import ExecutionPlanner
+
+        plan = ExecutionPlanner(
+            lot_size=self.config.risk.lot_size,
+            max_order_value=self.config.risk.max_order_value,
+        ).plan(target, self.engine.oms)
+        self._preflight_target(target, plan)
+        requests = plan.requests
+        target_payload = target_to_dict(target)
+        self.strategy_store.record_decision(
+            plan.decision_id, target.instance_id or "legacy", target.config_hash, target_payload
+        )
+        self.strategy_store.record_plan(
+            plan.plan_id, plan.decision_id, target.instance_id or "legacy",
+            {"target": target_payload, "requests": [order_request_to_dict(req) for req in requests]},
+            "planned" if plan.ok else "blocked",
+        )
         routed: list[str] = []
         unrouted_requests: list[dict[str, Any]] = []
-        if route:
+        if route and plan.ok:
             for req in requests:
+                inserted = self.strategy_store.record_child_order(
+                    req.reference, plan.plan_id, order_request_to_dict(req), status="routing"
+                )
+                if not inserted:
+                    unrouted_requests.append({
+                        **order_request_to_dict(req),
+                        "routing_rule": "duplicate_reference",
+                        "routing_reason": "child order reference already journaled",
+                    })
+                    continue
                 order_id = self.engine.submit(req)
                 if order_id:
                     routed.append(order_id)
+                    self.strategy_store.update_child_order(
+                        req.reference, status="submitted", order_id=str(order_id)
+                    )
                 else:
                     unrouted_requests.append(order_request_to_dict(req))
+                    self.strategy_store.update_child_order(req.reference, status="rejected")
         return {
-            "target": target_to_dict(target),
+            "target": target_payload,
+            "plan_id": plan.plan_id,
+            "decision_id": plan.decision_id,
+            "preflight_ok": plan.ok,
+            "issues": [issue.__dict__ for issue in plan.issues],
             "planned": len(requests),
             "requests": [order_request_to_dict(req) for req in requests],
             "routed": routed,
             "submitted": len(routed),
             "unrouted": len(unrouted_requests),
             "unrouted_requests": unrouted_requests,
-            "fully_routed": (not route) or not unrouted_requests,
+            "fully_routed": ((not route) or not unrouted_requests) and plan.ok,
             "state": self.write_state(),
         }
+
+    def _preflight_target(self, target: TargetPortfolio, plan: Any) -> None:
+        """Whole-book checks that cannot be expressed as independent order rules."""
+        from alphapilot.systems.live.planner import PlanIssue
+
+        oms = self.engine.oms
+        account = oms.account
+        if account is None or account.balance <= 0:
+            plan.issues.append(PlanIssue("account_not_ready", "positive account balance is required"))
+            return
+        if self.engine.runmode.halted:
+            plan.issues.append(PlanIssue("kill_switch", self.engine.runmode.halt_reason or "runtime halted"))
+        now_value = (
+            self.engine.session._now_fn()
+            if hasattr(self.engine.session, "_now_fn")
+            else datetime.now(timezone.utc)
+        )
+        if target.valid_until:
+            try:
+                expiry = datetime.fromisoformat(str(target.valid_until))
+                comparable_now = now_value
+                if expiry.tzinfo is not None and comparable_now.tzinfo is None:
+                    comparable_now = comparable_now.replace(tzinfo=expiry.tzinfo)
+                elif expiry.tzinfo is None and comparable_now.tzinfo is not None:
+                    expiry = expiry.replace(tzinfo=comparable_now.tzinfo)
+                if comparable_now > expiry:
+                    plan.issues.append(PlanIssue("expired_target", "target validity window has expired"))
+            except ValueError:
+                plan.issues.append(PlanIssue("invalid_validity", "valid_until must be ISO-8601"))
+        if self.config.mode == RunMode.LIVE and target.effective_session:
+            try:
+                effective_day = datetime.fromisoformat(str(target.effective_session)[:10]).date()
+                if effective_day != now_value.date():
+                    plan.issues.append(PlanIssue(
+                        "effective_session",
+                        f"target is for {effective_day}, current session is {now_value.date()}",
+                    ))
+            except ValueError:
+                plan.issues.append(PlanIssue("effective_session", "effective_session must start with ISO date"))
+        total_weight = sum(max(float(value), 0.0) for value in target.target_weights.values())
+        if total_weight > 1.0 + 1e-9:
+            plan.issues.append(PlanIssue("total_weight", f"target weights sum to {total_weight:.2%} > 100%"))
+        risk_state = self.engine.risk.snapshot() if hasattr(self.engine.risk, "snapshot") else {}
+        planned_turnover = sum(
+            float(request.volume) * float(request.price)
+            for request in plan.requests if float(request.price) > 0
+        )
+        daily_limit = float(self.config.risk.max_daily_value)
+        if daily_limit > 0 and float(risk_state.get("value_today") or 0.0) + planned_turnover > daily_limit:
+            plan.issues.append(PlanIssue(
+                "max_daily_value",
+                f"planned turnover exceeds remaining daily cap {daily_limit:.0f}",
+            ))
+        order_limit = int(self.config.risk.max_orders_per_day)
+        if order_limit > 0 and int(risk_state.get("orders_today") or 0) + len(plan.requests) > order_limit:
+            plan.issues.append(PlanIssue(
+                "max_orders_per_day",
+                f"plan would exceed daily order cap {order_limit}",
+            ))
+        limit = float(self.config.risk.max_position_pct)
+        for raw_symbol, shares in target.holdings.items():
+            code, exchange = normalize_symbol(raw_symbol)
+            key = f"{code}.{exchange.value}"
+            price = float(target.prices.get(raw_symbol) or target.prices.get(key) or 0.0)
+            tick = oms.get_tick(key)
+            if price <= 0 and tick is not None:
+                price = float(tick.last_price)
+            weight = (float(shares) * price) / float(account.balance) if price > 0 else 0.0
+            if limit > 0 and weight > limit + 1e-9:
+                plan.issues.append(PlanIssue(
+                    "max_position_pct",
+                    f"target weight {weight:.1%} > cap {limit:.1%}", key,
+                ))
+            if self.config.mode != RunMode.LIVE:
+                continue
+            if oms.get_contract(key) is None:
+                plan.issues.append(PlanIssue("unknown_contract", "LIVE contract metadata is required", key))
+            if tick is None or tick.last_price <= 0:
+                plan.issues.append(PlanIssue("missing_quote", "LIVE quote is required", key))
+                continue
+            timestamp = tick.received_at or tick.datetime
+            if timestamp is None:
+                plan.issues.append(PlanIssue("stale_quote", "quote timestamp is required", key))
+                continue
+            now = (
+                self.engine.session._now_fn()
+                if hasattr(self.engine.session, "_now_fn")
+                else datetime.now(timestamp.tzinfo or timezone.utc)
+            )
+            if timestamp.tzinfo is not None and now.tzinfo is None:
+                now = now.replace(tzinfo=timestamp.tzinfo)
+            elif timestamp.tzinfo is None and now.tzinfo is not None:
+                timestamp = timestamp.replace(tzinfo=now.tzinfo)
+            age = max((now - timestamp).total_seconds(), 0.0)
+            if age > float(self.config.market_data.stale_after_seconds):
+                plan.issues.append(PlanIssue(
+                    "stale_quote", f"quote age {age:.1f}s exceeds limit", key
+                ))
 
     def run_loop(
         self,
@@ -652,6 +795,16 @@ def target_to_dict(target: TargetPortfolio) -> dict[str, Any]:
         "cash": target.cash,
         "source": target.source,
         "market": target.market,
+        "decision_id": target.decision_id,
+        "instance_id": target.instance_id,
+        "as_of": target.as_of,
+        "effective_session": target.effective_session,
+        "valid_until": target.valid_until,
+        "config_hash": target.config_hash,
+        "data_version": target.data_version,
+        "model_version": target.model_version,
+        "target_weights": dict(target.target_weights),
+        "price_source": target.price_source,
         "positions": [
             {
                 "symbol": item.symbol,

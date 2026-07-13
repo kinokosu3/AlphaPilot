@@ -24,6 +24,7 @@ call :meth:`reset_day` at the session roll.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from alphapilot.systems.live.config import RiskLimits
@@ -91,13 +92,31 @@ class RiskGate:
             return RiskVerdict.reject("volume", "order volume must be positive")
 
         contract = oms.get_contract(req.key) if hasattr(oms, "get_contract") else None
+        live_mode = getattr(runmode, "mode", None) == RunMode.LIVE
         if (
-            getattr(runmode, "mode", None) == RunMode.LIVE
+            live_mode
             and getattr(contract, "product", None) == Product.FUTURES
         ):
             return RiskVerdict.reject("unsupported_product", "futures live routing is not enabled")
-        if getattr(runmode, "mode", None) == RunMode.LIVE and contract is None:
+        if live_mode and contract is None:
             return RiskVerdict.reject("unknown_contract", f"{req.key} contract metadata is required in LIVE mode")
+        if live_mode:
+            tick = oms.get_tick(req.key) if hasattr(oms, "get_tick") else None
+            if tick is None or float(getattr(tick, "last_price", 0.0) or 0.0) <= 0:
+                return RiskVerdict.reject("missing_quote", f"{req.key} fresh quote is required in LIVE mode")
+            timestamp = getattr(tick, "received_at", None) or getattr(tick, "datetime", None)
+            if timestamp is None:
+                return RiskVerdict.reject("stale_quote", f"{req.key} quote timestamp is required")
+            now = session._now_fn() if session is not None and hasattr(session, "_now_fn") else datetime.now(timestamp.tzinfo or timezone.utc)
+            if timestamp.tzinfo is not None and now.tzinfo is None:
+                now = now.replace(tzinfo=timestamp.tzinfo)
+            elif timestamp.tzinfo is None and now.tzinfo is not None:
+                timestamp = timestamp.replace(tzinfo=now.tzinfo)
+            age = max((now - timestamp).total_seconds(), 0.0)
+            if lim.max_quote_age_seconds > 0 and age > lim.max_quote_age_seconds:
+                return RiskVerdict.reject(
+                    "stale_quote", f"{req.key} quote age {age:.1f}s > {lim.max_quote_age_seconds:.1f}s"
+                )
 
         lot_size = int(getattr(contract, "lot_size", 0) or lim.lot_size)
         if lot_size > 0 and abs(req.volume) % lot_size != 0:

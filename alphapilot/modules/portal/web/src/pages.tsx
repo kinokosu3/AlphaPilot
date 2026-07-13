@@ -436,7 +436,10 @@ export function BacktestPage() {
 export function TimingPage() {
   const { t } = useI18n();
   const strategies = useAsync(() => api.get<TimingStrategiesPayload>("/api/timing/strategies"), []);
-  const specs = useMemo(() => timingBacktestSpecs(strategies.data?.names || []), [strategies.data]);
+  const specs = useMemo(
+    () => timingBacktestSpecs(strategies.data?.names || [], strategies.data?.strategies || []),
+    [strategies.data],
+  );
   const advanced = useJsonInput("{}");
   const form = useParamForm(specs);
   const { busy, run } = useAction();
@@ -444,6 +447,11 @@ export function TimingPage() {
   const [activeJob, setActiveJob] = useState<Job | null>(null);
   const [progress, setProgress] = useState<JobProgress | null>(null);
   const [detail, setDetail] = useState<TimingDetailPayload | null>(null);
+  const instances = useAsync(
+    () => api.get<{ instances: Array<{ instance_id: string; strategy_id: string; lifecycle: string; deployment_level: string; config_hash: string }> }>("/api/trading/strategy-instances"),
+    [],
+  );
+  const [newInstanceId, setNewInstanceId] = useState("");
 
   const selectedStrategy = useMemo(() => {
     const name = String(form.values.strategy_name || "boll_mean_reversion");
@@ -474,6 +482,35 @@ export function TimingPage() {
       setProgress(job.progress || null);
       setDetail(null);
     }, t("started"));
+  }
+
+  function createStrategyInstance() {
+    void run(async () => {
+      if (!newInstanceId.trim()) throw new Error("instance_id is required");
+      const payload = parseTimingPayload();
+      const strategyParams = { ...((payload.strategy_params || {}) as Record<string, unknown>) };
+      if (payload.target_percent !== undefined) strategyParams.target_percent = payload.target_percent;
+      await api.post("/api/trading/strategy-instances", {
+        instance_id: newInstanceId.trim(),
+        strategy_id: payload.strategy_name,
+        params: strategyParams,
+        universe: payload.symbols || [],
+        frequency: payload.freq || "day",
+        data_policy: {
+          adjust_mode: payload.adjust_mode,
+          execution_adjust_mode: payload.execution_adjust_mode,
+        },
+      });
+      setNewInstanceId("");
+      await instances.refresh();
+    }, "策略实例已保存");
+  }
+
+  function validateStrategyInstance(instanceId: string) {
+    void run(async () => {
+      await api.post(`/api/trading/strategy-instances/${instanceId}/validate`, {});
+      await instances.refresh();
+    }, "策略实例校验完成");
   }
 
   useEffect(() => {
@@ -571,6 +608,28 @@ export function TimingPage() {
           ) : null}
         </aside>
       </div>
+
+      <section className="panel">
+        <div className="panel-head compact">
+          <div><h2>策略实例与部署</h2><span className="muted">同一个策略定义可以保存多组参数；实盘权限绑定实例和配置哈希。</span></div>
+        </div>
+        <div className="row-actions">
+          <input value={newInstanceId} onChange={(event) => setNewInstanceId(event.target.value)} placeholder="实例 ID，例如 ma_5_20" />
+          <button className="button" disabled={busy} onClick={createStrategyInstance}>保存当前参数为实例</button>
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>实例</th><th>策略</th><th>生命周期</th><th>部署级别</th><th>配置哈希</th><th>操作</th></tr></thead>
+            <tbody>{(instances.data?.instances || []).map((item) => (
+              <tr key={item.instance_id}>
+                <td>{item.instance_id}</td><td>{item.strategy_id}</td><td>{item.lifecycle}</td><td>{item.deployment_level}</td>
+                <td><code>{item.config_hash.slice(0, 12)}</code></td>
+                <td><button className="button small" disabled={busy} onClick={() => validateStrategyInstance(item.instance_id)}>校验</button></td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+      </section>
 
       {signalPreview ? (
         <section className="panel">

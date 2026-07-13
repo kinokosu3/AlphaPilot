@@ -75,6 +75,10 @@ class RiskLimits:
     max_orders_per_day: int = field(default_factory=lambda: _env_int("ALPHAPILOT_LIVE_MAX_ORDERS_PER_DAY", 1000))
     #: Board-lot size (A-shares = 100; 0 disables lot rounding).
     lot_size: int = field(default_factory=lambda: _env_int("ALPHAPILOT_LIVE_LOT_SIZE", 100))
+    #: LIVE orders require a quote no older than this many seconds.
+    max_quote_age_seconds: float = field(
+        default_factory=lambda: _env_float("ALPHAPILOT_LIVE_MAX_QUOTE_AGE", 3.0)
+    )
 
 
 @dataclass

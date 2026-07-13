@@ -6,6 +6,7 @@ from alphapilot.systems.live.oms import OMS
 from alphapilot.systems.live.position import PositionBook
 from alphapilot.systems.live.types import (
     Account,
+    Contract,
     Direction,
     Exchange,
     Order,
@@ -125,4 +126,13 @@ def test_oms_roll_new_day() -> None:
     oms.on_trade(_buy_trade("t1", volume=300, price=10.0))
     assert oms.available_shares(KEY) == 0                 # bought today
     oms.roll_new_day()
+    assert oms.available_shares(KEY) == 300
+
+
+def test_contract_metadata_can_enable_t_plus_zero_settlement() -> None:
+    oms = OMS()
+    oms.on_contract(Contract("600000", Exchange.SSE, settlement_days=0))
+
+    oms.on_trade(_buy_trade("t0", volume=300, price=10.0))
+
     assert oms.available_shares(KEY) == 300

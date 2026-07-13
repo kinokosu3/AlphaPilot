@@ -125,7 +125,7 @@ def test_live_module_daemon_start_status_stop(engine, tmp_path) -> None:
         state_dir=str(state_dir),
         ledger_dir=str(ledger_dir),
         timing_strategy="sma_filter",
-        timing_params=json.dumps({"window": 2, "target_percent": 0.5}),
+        timing_params=json.dumps({"window": 2, "target_percent": 0.2}),
         timing_freq="min",
         min_bars=2,
     )
@@ -164,7 +164,7 @@ def test_live_module_daemon_start_status_stop(engine, tmp_path) -> None:
         restarted_strategy = live.live_daemon_strategy_start(
             "sma_filter",
             symbols="600000",
-            timing_params=json.dumps({"window": 2, "target_percent": 0.5}),
+            timing_params=json.dumps({"window": 2, "target_percent": 0.2}),
             timing_freq="min",
             min_bars=2,
             state_dir=str(state_dir),
@@ -389,6 +389,38 @@ def test_live_module_submit_inline_target_plans_only(engine) -> None:
     assert result["planned"] == 1
     assert result["routed"] == []
     assert result["requests"][0]["code"] == "600000"
+
+
+def test_model_target_is_planned_from_ready_oms_without_persisting_paper_state(
+    engine, monkeypatch
+) -> None:
+    import pandas as pd
+
+    from alphapilot.systems.backtest.live.types import DailyTradeResult, PortfolioState
+
+    captured = {}
+
+    def fake_generate(context, request, *, seed_state=None, persist_state=True):
+        captured["seed"] = seed_state
+        captured["persist_state"] = persist_state
+        holdings = pd.DataFrame([{"instrument": "SH600000", "amount": 100, "price": 10.0}])
+        return DailyTradeResult(
+            date="2026-07-12", trades=pd.DataFrame(), holdings=holdings, scores=[],
+            new_state=PortfolioState("2026-07-12", seed_state.cash - 1000, {"SH600000": 100}),
+            info={"strategy": "lgb-demo"},
+        )
+
+    monkeypatch.setattr(
+        "alphapilot.systems.backtest.live.generate_daily_signal", fake_generate
+    )
+    result = engine.get_module("live").live_submit_target(
+        strategy_name="lgb-demo", mode="paper", cash=12_345.0, route=False, timeout=1.0,
+    )
+
+    assert captured["seed"].cash == 12_345.0
+    assert captured["seed"].metadata["source"] == "live_oms"
+    assert captured["persist_state"] is False
+    assert result["planned"] == 1
 
 
 def test_live_system_create_engine_paper(engine) -> None:

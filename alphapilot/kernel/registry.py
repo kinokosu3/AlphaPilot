@@ -92,6 +92,7 @@ def _register_builtin_defaults() -> None:
     register_system("timing", "alphapilot.systems.timing.service.TimingSystem")
     register_system("notify", "alphapilot.systems.notify.service.NotificationSystem")
     register_system("live", "alphapilot.systems.live.service.LiveSystem")
+    register_system("trading", "alphapilot.systems.trading.service.TradingStrategySystem")
     register_module(
         "alpha_mining",
         "alphapilot.modules.alpha_mining.module.AlphaMiningModule",

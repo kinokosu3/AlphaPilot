@@ -58,13 +58,13 @@ export function LiveStrategyCard(props: Props) {
       </div>
       <div className="live-runner-summary">
         <span><small>{t("liveRunnerState")}</small><StatusPill status={runnerState} /></span>
-        <span><small>{t("liveRunnerPending")}</small><strong>{runner?.pending_requests ?? 0}</strong></span>
+        <span><small>{t("liveRunnerPending")}</small><strong>{(runner?.pending_requests ?? 0) + (runner?.pending_intents ?? 0)}</strong></span>
         <span><small>{t("liveRunnerAlgo")}</small><StatusPill status={runner?.algo_armed ? "armed" : "idle"} /></span>
       </div>
-      <details className="live-advanced">
+      {props.simulated ? <details className="live-advanced">
         <summary>{t("liveAdvancedParams")}</summary>
         <label className="field"><span>{t("liveTimingParams")}</span><textarea rows={5} value={props.params.raw} onChange={(event) => props.params.setRaw(event.target.value)} spellCheck={false} /></label>
-      </details>
+      </details> : null}
       <div className="row-actions live-primary-actions">
         {!props.daemon?.alive ? <AsyncButton onClick={props.onStartDaemon} disabled={!props.canStartDaemon}>{t("liveDaemonStart")}</AsyncButton> : null}
         <AsyncButton onClick={props.onStrategyStart} disabled={!props.daemon?.running || !props.strategy.trim() || Boolean(runner?.active)}>{t("liveStrategyStart")}</AsyncButton>

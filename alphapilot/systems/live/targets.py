@@ -11,6 +11,7 @@ must diff against real positions from the OMS, never against a simulated roll.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Iterable
 
 from alphapilot.systems.live.types import Direction
@@ -47,6 +48,16 @@ class TargetPortfolio:
     source: str = ""
     market: str | None = None
     positions: list[TargetPosition] = field(default_factory=list)
+    decision_id: str = ""
+    instance_id: str = "legacy"
+    as_of: str | None = None
+    effective_session: str | None = None
+    valid_until: str | None = None
+    config_hash: str = ""
+    data_version: str = ""
+    model_version: str = ""
+    target_weights: dict[str, float] = field(default_factory=dict)
+    price_source: str = ""
 
     @classmethod
     def from_holdings(
@@ -75,6 +86,41 @@ class TargetPortfolio:
                 except (TypeError, ValueError):
                     pass
         return cls(date=date, holdings=holdings, prices=prices, source=source, market=market)
+
+
+@dataclass(frozen=True)
+class AccountSnapshot:
+    """Immutable account truth used by sizing and target planning."""
+
+    account_id: str
+    as_of: str
+    balance: float
+    available: float
+    positions: dict[str, float] = field(default_factory=dict)
+    sellable: dict[str, float] = field(default_factory=dict)
+    active_order_deltas: dict[str, float] = field(default_factory=dict)
+
+    @classmethod
+    def from_oms(cls, oms: Any, *, as_of: str | None = None) -> "AccountSnapshot":
+        account = oms.account
+        if account is None:
+            raise RuntimeError("OMS account snapshot is not ready")
+        positions = {p.key: float(p.volume) for p in oms.get_positions() if float(p.volume)}
+        sellable = {p.key: float(oms.available_shares(p.key)) for p in oms.get_positions()}
+        active: dict[str, float] = {}
+        for order in oms.get_active_orders():
+            remaining = float(order.remaining)
+            sign = 1.0 if order.direction == Direction.LONG else -1.0
+            active[order.key] = active.get(order.key, 0.0) + sign * remaining
+        return cls(
+            account_id=str(account.account_id),
+            as_of=str(as_of or datetime.now().isoformat(timespec="seconds")),
+            balance=float(account.balance),
+            available=float(account.available),
+            positions=positions,
+            sellable=sellable,
+            active_order_deltas=active,
+        )
 
 
 def parse_target_positions(raw: Any) -> list[TargetPosition]:

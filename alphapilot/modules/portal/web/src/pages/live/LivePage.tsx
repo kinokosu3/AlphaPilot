@@ -61,6 +61,10 @@ export function LivePage() {
   const quoteProviderCatalog = useAsync(() => api.get<LiveQuoteProviderSpec[]>("/api/live/quote-providers"), []);
   const pluginDiagnostics = useAsync(() => api.get<LivePluginDiagnostics>("/api/live/plugins"), []);
   const timingStrategies = useAsync(() => api.get<{ names: string[] }>("/api/timing/strategies"), []);
+  const strategyInstances = useAsync(
+    () => api.get<{ instances: Array<{ instance_id: string; deployment_level: string; lifecycle: string }> }>("/api/trading/strategy-instances"),
+    [],
+  );
 
   const [workspace, setWorkspaceState] = useState<Workspace>(initialWorkspace);
   const [simulationMode, setSimulationMode] = useState<SimulationMode>("paper");
@@ -115,7 +119,7 @@ export function LivePage() {
   const [daemonSymbols, setDaemonSymbols] = useState("600000");
   const [daemonTimingStrategy, setDaemonTimingStrategy] = useState("");
   const [daemonTimingFreq, setDaemonTimingFreq] = useState("day");
-  const daemonTimingParams = useJsonInput("{}");
+  const daemonTimingParams = useJsonInput('{"target_percent":0.2}');
   const [initialCash, setInitialCash] = useState("1000000");
   const [ticket, setTicket] = useState<Ticket>("order");
   const [orderCode, setOrderCode] = useState("");
@@ -209,7 +213,7 @@ export function LivePage() {
       if (workspace === "paper" && (!Number.isFinite(Number(initialCash)) || Number(initialCash) <= 0)) {
         throw new Error("initial cash must be greater than 0");
       }
-      const timingParams = daemonTimingStrategy.trim() ? daemonTimingParams.parse() : undefined;
+      const timingParams = workspace === "paper" && daemonTimingStrategy.trim() ? daemonTimingParams.parse() : undefined;
       await api.post("/api/live/daemon/start", {
         ...query,
         cash: workspace === "paper" ? Number(initialCash) || undefined : undefined,
@@ -217,7 +221,7 @@ export function LivePage() {
         interval: 1,
         record_market_data: true,
         timeout: 30,
-        timing_strategy: daemonTimingStrategy.trim() || undefined,
+        timing_strategy: workspace === "paper" ? daemonTimingStrategy.trim() || undefined : undefined,
         timing_params: timingParams,
         timing_freq: daemonTimingFreq,
       });
@@ -258,9 +262,10 @@ export function LivePage() {
   const strategyStart = async () => {
     if (workspace === "live" && !(await confirm({ message: t("liveStrategyStartConfirm"), danger: true }))) return;
     await command("/api/live/daemon/strategy/start", t("liveStrategyStarted"), {
-      timing_strategy: daemonTimingStrategy.trim(),
+      timing_strategy: workspace === "paper" ? daemonTimingStrategy.trim() : undefined,
+      instance_id: workspace === "live" ? daemonTimingStrategy.trim() : undefined,
       symbols: daemonSymbols,
-      timing_params: daemonTimingParams.parse(),
+      timing_params: workspace === "paper" ? daemonTimingParams.parse() : undefined,
       timing_freq: daemonTimingFreq,
       confirm_live: workspace === "live",
     });
@@ -338,7 +343,11 @@ export function LivePage() {
           setSymbols={setDaemonSymbols}
           strategy={daemonTimingStrategy}
           setStrategy={setDaemonTimingStrategy}
-          strategyNames={timingStrategies.data?.names || []}
+          strategyNames={workspace === "live"
+            ? (strategyInstances.data?.instances || [])
+              .filter((item) => item.deployment_level === "live")
+              .map((item) => item.instance_id)
+            : timingStrategies.data?.names || []}
           freq={daemonTimingFreq}
           setFreq={setDaemonTimingFreq}
           params={daemonTimingParams}

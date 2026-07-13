@@ -40,6 +40,7 @@ alphapilot = "alphapilot.app.cli:app"
 data = "alphapilot.systems.data.service:QlibDataSystem"
 factor = "alphapilot.systems.factor.service:FactorSystem"
 strategy = "alphapilot.systems.strategy.service:StrategySystem"
+trading = "alphapilot.systems.trading.service:TradingStrategySystem"
 backtest = "alphapilot.systems.backtest.service:QlibBacktestSystem"
 notify = "alphapilot.systems.notify.service:NotificationSystem"
 

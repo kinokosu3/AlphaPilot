@@ -110,6 +110,20 @@ def test_live_mode_rejects_futures_contracts_until_supported() -> None:
     assert verdict.rule == "unsupported_product"
 
 
+def test_live_mode_requires_fresh_timestamped_quote() -> None:
+    gate = RiskGate(_permissive(), enforce_session=False)
+    session = SessionClock(now_fn=lambda: datetime(2026, 7, 1, 10, 0, 10))
+    live_mode = RunModeMachine(RunMode.LIVE)
+    oms = _oms(
+        ticks={"600000": {"last_price": 10.0, "datetime": datetime(2026, 7, 1, 10, 0, 0)}},
+        contracts={"600000": {"lot_size": 100, "price_tick": 0.01}},
+    )
+
+    verdict = gate.check(OrderRequest.buy("600000", Exchange.SSE, 100, 10.0), oms, session, live_mode)
+
+    assert not verdict.ok and verdict.rule == "stale_quote"
+
+
 def test_insufficient_cash_rejected() -> None:
     gate = RiskGate(_permissive(), enforce_session=False)
     oms = _oms(cash=5_000.0, ticks={"600000": 10.0})

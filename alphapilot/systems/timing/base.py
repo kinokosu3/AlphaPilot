@@ -86,6 +86,7 @@ class TimingBacktestRequest:
     freq: str = "day"
     data_dir: str | Path | None = None
     adjust_mode: str = "backward"
+    execution_adjust_mode: str | None = None
     cash: float = 100000.0
     target_percent: float = 1.0
     open_cost: float = 0.0002

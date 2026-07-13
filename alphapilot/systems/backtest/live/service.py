@@ -12,6 +12,7 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -25,7 +26,6 @@ from alphapilot.systems.backtest.live.portfolio_state import (
 from alphapilot.systems.backtest.live.predict import (
     _coerce_params,
     latest_factor_date,
-    predict_scores,
 )
 from alphapilot.systems.backtest.live.rebalance import run_one_day
 from alphapilot.systems.backtest.live.types import (
@@ -164,6 +164,7 @@ def generate_daily_signal(
     request: DailySignalRequest,
     *,
     seed_state: PortfolioState | None = None,
+    persist_state: bool = True,
 ) -> DailyTradeResult:
     """Compute today's trade plan.
 
@@ -297,16 +298,16 @@ def generate_daily_signal(
             prev_state = init_state(seed_cash, date="", metadata={"seeded": True})
             logger.info(f"[daily_trade] no prior state at {state_path}; seeded cash={seed_cash}")
 
-    scores = predict_scores(
-        date,
-        resolved.model_pickle_path,
-        resolved.factor_csv,
+    from alphapilot.systems.trading.model import QlibModelSignalProvider
+
+    scores = QlibModelSignalProvider(
+        model_path=resolved.model_pickle_path,
+        factor_csv=resolved.factor_csv,
         yaml_params=resolved.yaml_params,
         qlib_template_dir=request.qlib_template_dir,
         use_local=use_local,
         provider_uri=provider_uri,
-        start_date=prev_day,
-    )
+    ).predict(date, start_date=prev_day)
 
     try:
         out = run_one_day(
@@ -326,7 +327,8 @@ def generate_daily_signal(
 
     new_state = out["new_state"]
     new_state.metadata = {"strategy": resolved.key, "prev_date": prev_state.date, "signal_day": prev_day}
-    save_state(new_state, state_path)
+    if persist_state:
+        save_state(new_state, state_path)
 
     return DailyTradeResult(
         date=date,
@@ -338,12 +340,14 @@ def generate_daily_signal(
         info={
             "strategy": resolved.key,
             "state_path": str(state_path),
+            "state_persisted": bool(persist_state),
             "signal_day": prev_day,
             "factor_data_through": factor_day,
             "factor_data_spec": factor_data_spec,
             "prev_cash": prev_state.cash,
             "new_cash": new_state.cash,
             "n_scored": int(len(scores)),
+            "model_version": _file_sha256(resolved.model_pickle_path),
         },
     )
 
@@ -364,8 +368,30 @@ def to_target_portfolio(result: DailyTradeResult, *, source: str | None = None):
         if holdings is not None and not getattr(holdings, "empty", True)
         else []
     )
-    return TargetPortfolio.from_holdings(
+    target = TargetPortfolio.from_holdings(
         result.date,
         records,
         source=source or (result.info or {}).get("strategy", "daily_trade"),
     )
+    target.decision_id = hashlib.sha256(
+        f"{target.source}:{result.date}:{(result.info or {}).get('signal_day', '')}:"
+        f"{(result.info or {}).get('model_version', '')}".encode("utf-8")
+    ).hexdigest()[:24]
+    target.instance_id = str((result.info or {}).get("instance_id") or target.source or "daily_trade")
+    target.as_of = str((result.info or {}).get("signal_day") or result.date)
+    target.effective_session = str(result.date)
+    target.data_version = str((result.info or {}).get("factor_data_spec") or "")
+    target.model_version = str((result.info or {}).get("model_version") or "")
+    target.price_source = "qlib_raw_execution"
+    return target
+
+
+def _file_sha256(path: str | Path) -> str:
+    candidate = Path(path).expanduser()
+    if not candidate.is_file():
+        return ""
+    digest = hashlib.sha256()
+    with candidate.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()

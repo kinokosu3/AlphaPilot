@@ -32,6 +32,7 @@ class PositionBook:
         self._holdings: dict[str, Position] = {}
         # active working sell orders, kept to recompute per-symbol frozen shares.
         self._active_sells: dict[str, Order] = {}
+        self._settlement_days: dict[str, int] = {}
 
     # ---- access ---------------------------------------------------------- #
     def get(self, key: str) -> Position | None:
@@ -64,6 +65,8 @@ class PositionBook:
         pos.price = position.price or pos.price
         pos.pnl = position.pnl
         pos.gateway = position.gateway or pos.gateway
+        pos.settlement_days = int(position.settlement_days)
+        self._settlement_days[pos.key] = pos.settlement_days
         self._recompute_frozen(pos.key)
         pos.frozen = max(pos.frozen, position.frozen)
 
@@ -95,13 +98,20 @@ class PositionBook:
             if new_vol > 0:
                 pos.price = (pos.price * pos.volume + trade.price * trade.volume) / new_vol
             pos.volume = new_vol
-            # today's buy is NOT added to yd_volume (T+1): stays non-sellable today.
+            if self._settlement_days.get(pos.key, pos.settlement_days) <= 0:
+                pos.yd_volume += trade.volume
         else:                                       # sell
             pos.volume = max(pos.volume - trade.volume, 0.0)
             pos.yd_volume = max(pos.yd_volume - trade.volume, 0.0)
             if pos.volume <= 1e-9:
                 pos.volume = 0.0
                 pos.price = 0.0
+
+    def set_settlement_days(self, key: str, days: int) -> None:
+        self._settlement_days[key] = max(int(days), 0)
+        pos = self._holdings.get(key)
+        if pos is not None:
+            pos.settlement_days = self._settlement_days[key]
 
     # ---- day roll -------------------------------------------------------- #
     def roll_new_day(self) -> None:

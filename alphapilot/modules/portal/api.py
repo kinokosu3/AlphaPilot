@@ -435,6 +435,7 @@ def _timing_request_from_payload(payload: dict[str, Any]) -> Any:
         "freq",
         "data_dir",
         "adjust_mode",
+        "execution_adjust_mode",
         "cash",
         "target_percent",
         "open_cost",
@@ -450,7 +451,10 @@ def _timing_request_from_payload(payload: dict[str, Any]) -> Any:
     data["strategy_params"] = _parse_timing_strategy_params(data.get("strategy_params"))
     if not data.get("strategy_name"):
         raise ValueError("strategy_name is required")
-    for key in ("stock_csv", "code_column", "start_date", "end_date", "data_dir", "output_dir"):
+    for key in (
+        "stock_csv", "code_column", "start_date", "end_date", "data_dir", "output_dir",
+        "execution_adjust_mode",
+    ):
         if data.get(key) == "":
             data[key] = None
     return TimingBacktestRequest(**data)
@@ -954,7 +958,12 @@ def create_app(
     def timing_strategies() -> dict[str, Any]:
         try:
             strategies = _engine(app).get_system("timing").list_strategies()
-            return _jsonable({"strategies": strategies, "names": [row.get("name") for row in strategies]})
+            return _jsonable({
+                "strategies": strategies,
+                "names": [row.get("name") for row in strategies],
+                "deprecated": True,
+                "replacement": "/api/trading/strategy-definitions",
+            })
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
@@ -967,6 +976,8 @@ def create_app(
                 {
                     "strategy_name": req.strategy_name,
                     "signals": _dataframe_preview(signals, max_rows=max_rows),
+                    "deprecated": True,
+                    "replacement": "/api/trading/strategy-instances",
                 }
             )
         except Exception as exc:  # noqa: BLE001
@@ -975,7 +986,79 @@ def create_app(
     @app.post("/api/timing/backtest")
     def timing_backtest(payload: dict[str, Any]) -> dict[str, Any]:
         try:
-            return _jsonable(jobs.start_job("timing_backtest", dict(payload)))
+            return _jsonable({
+                **jobs.start_job("timing_backtest", dict(payload)),
+                "deprecated": True,
+                "replacement": "/api/trading/strategy-instances/{id}/backtest",
+            })
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.get("/api/trading/strategy-definitions")
+    def trading_strategy_definitions() -> dict[str, Any]:
+        try:
+            return _jsonable(_engine(app).get_system("trading").list_definitions())
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.get("/api/trading/strategy-instances")
+    def trading_strategy_instances() -> dict[str, Any]:
+        try:
+            return _jsonable({"instances": _engine(app).get_system("trading").list_instances()})
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/trading/strategy-instances")
+    def trading_strategy_instance_create(payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _jsonable(_engine(app).get_system("trading").create_instance(payload))
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.patch("/api/trading/strategy-instances/{instance_id}")
+    def trading_strategy_instance_update(instance_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _jsonable(_engine(app).get_system("trading").update_instance(instance_id, payload))
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/trading/strategy-instances/{instance_id}/validate")
+    def trading_strategy_instance_validate(instance_id: str) -> dict[str, Any]:
+        try:
+            return _jsonable(_engine(app).get_system("trading").validate_instance(instance_id))
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/trading/strategy-instances/{instance_id}/backtest")
+    def trading_strategy_instance_backtest(instance_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            result = _engine(app).get_system("trading").backtest_instance(instance_id, payload)
+            return _jsonable({
+                "instance_id": instance_id,
+                "summary": result.summary,
+                "artifact_dir": str(result.artifact_dir),
+            })
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.get("/api/trading/deployments/{instance_id}")
+    def trading_deployment(instance_id: str) -> dict[str, Any]:
+        try:
+            return _jsonable(_engine(app).get_system("trading").deployment(instance_id))
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/trading/deployments/{instance_id}/promote")
+    def trading_deployment_promote(instance_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _jsonable(_engine(app).get_system("trading").promote(instance_id, payload))
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/trading/deployments/{instance_id}/{action}")
+    def trading_deployment_action(instance_id: str, action: str) -> dict[str, Any]:
+        try:
+            return _jsonable(_engine(app).get_system("trading").lifecycle_action(instance_id, action))
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
@@ -1932,6 +2015,7 @@ def create_app(
             return _jsonable(
                 _live_module().live_daemon_strategy_start(
                     timing_strategy=str(payload.get("timing_strategy") or payload.get("strategy") or ""),
+                    instance_id=str(payload.get("instance_id") or "") or None,
                     symbols=payload.get("symbols"),
                     timing_params=payload.get("timing_params") or payload.get("params"),
                     timing_freq=str(payload.get("timing_freq") or payload.get("freq") or "day"),

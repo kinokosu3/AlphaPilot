@@ -529,6 +529,16 @@ def _apply_command(
                 source=str(payload.get("source") or "daemon"),
                 market=payload.get("market"),
                 positions=parse_target_positions(payload.get("positions")),
+                decision_id=str(payload.get("decision_id") or ""),
+                instance_id=str(payload.get("instance_id") or "legacy"),
+                as_of=payload.get("as_of"),
+                effective_session=payload.get("effective_session"),
+                valid_until=payload.get("valid_until"),
+                config_hash=str(payload.get("config_hash") or ""),
+                data_version=str(payload.get("data_version") or ""),
+                model_version=str(payload.get("model_version") or ""),
+                target_weights={str(k): float(v) for k, v in (payload.get("target_weights") or {}).items()},
+                price_source=str(payload.get("price_source") or ""),
             )
             routed = runtime.submit_target(target, route=route)
             fully_routed = bool(routed.get("fully_routed", True))
@@ -547,6 +557,64 @@ def _apply_command(
                 "requests": routed.get("requests"),
             })
             if route and not fully_routed:
+                result["ok"] = False
+        elif action == "model_target":
+            route = bool(payload.get("route", False))
+            if route:
+                require_live_confirmation(runtime.config, confirm_live=bool(payload.get("confirm_live", False)))
+            kernel_engine = None if runner_holder is None else runner_holder.get("kernel_engine")
+            if kernel_engine is None:
+                raise RuntimeError("kernel context is required for model target planning")
+            from alphapilot.modules.daily_trade.module import _parse_yaml_params
+            from alphapilot.systems.backtest.live import DailySignalRequest, generate_daily_signal
+            from alphapilot.systems.backtest.live.service import to_target_portfolio
+            from alphapilot.systems.backtest.live.types import PortfolioState
+            if payload.get("model_pickle_path"):
+                from alphapilot.systems.trading.security import verify_trusted_model
+
+                verify_trusted_model(payload["model_pickle_path"], extra_roots=[runtime.config.state_dir])
+
+            account = runtime.engine.oms.account
+            if account is None:
+                raise RuntimeError("account snapshot is required before model target planning")
+            seed = PortfolioState(
+                date=str(payload.get("date") or ""),
+                cash=float(account.available),
+                positions={
+                    position.key: float(position.volume)
+                    for position in runtime.engine.oms.get_positions() if position.volume > 0
+                },
+                metadata={"source": "live_daemon_oms", "account_id": str(account.account_id)},
+            )
+            daily = generate_daily_signal(
+                kernel_engine.context,
+                DailySignalRequest(
+                    strategy_name=payload.get("strategy_name"),
+                    session=payload.get("session"),
+                    factor_path=payload.get("factor_path"),
+                    model_pickle_path=payload.get("model_pickle_path"),
+                    yaml_params=_parse_yaml_params(payload.get("yaml_params")),
+                    date=payload.get("date"),
+                    refresh_data=bool(payload.get("refresh_data", False)),
+                    use_local=kernel_engine.context.config.backtest.use_local,
+                ),
+                seed_state=seed,
+                persist_state=False,
+            )
+            target = to_target_portfolio(daily, source=payload.get("source"))
+            routed = runtime.submit_target(target, route=route)
+            result.update({
+                "message": "model_target_submitted" if route else "model_target_planned",
+                "target": routed.get("target"),
+                "planned": routed.get("planned"),
+                "routed": routed.get("routed"),
+                "submitted": routed.get("submitted"),
+                "unrouted": routed.get("unrouted"),
+                "fully_routed": routed.get("fully_routed"),
+                "issues": routed.get("issues"),
+                "requests": routed.get("requests"),
+            })
+            if route and not routed.get("fully_routed", False):
                 result["ok"] = False
         elif action == "snapshot":
             result["message"] = "snapshotted"
@@ -572,9 +640,10 @@ def _apply_command(
             current = None if runner_holder is None else runner_holder.get("runner")
             if current is not None and current.status().get("active"):
                 raise ValueError("strategy runner is already active")
+            strategy_instance_id = str(payload.get("instance_id") or "").strip() or None
             strategy_name = str(payload.get("timing_strategy") or payload.get("strategy") or "").strip()
-            if not strategy_name:
-                raise ValueError("timing_strategy is required")
+            if not strategy_name and not strategy_instance_id:
+                raise ValueError("timing_strategy or instance_id is required")
             symbols = _normalize_symbols(
                 _split_symbols_payload(payload.get("symbols")) or list(default_symbols or [])
             )
@@ -601,6 +670,10 @@ def _apply_command(
                 bar_seconds=bar_seconds,
                 min_bars=min_bars,
                 window=window,
+                kernel_engine=None if runner_holder is None else runner_holder.get("kernel_engine"),
+                state_dir=runtime.config.state_dir,
+                strategy_instance_id=strategy_instance_id,
+                bar_source=None if runner_holder is None else runner_holder.get("bar_source"),
             )
             if runner_holder is not None:
                 runner_holder["runner"] = runner
@@ -611,6 +684,7 @@ def _apply_command(
                     bar_seconds=bar_seconds,
                     min_bars=min_bars,
                     window=window,
+                    instance_id=strategy_instance_id,
                 )
             result["message"] = "strategy_started"
             result["runner_status"] = runner.status() if runner is not None else None
@@ -682,6 +756,7 @@ def _runner_config(
     bar_seconds: int,
     min_bars: int,
     window: int,
+    instance_id: str | None = None,
 ) -> dict[str, Any]:
     return {
         "enabled": bool(timing_strategy),
@@ -691,6 +766,7 @@ def _runner_config(
         "bar_seconds": int(bar_seconds),
         "min_bars": int(min_bars),
         "window": int(window),
+        "instance_id": instance_id,
     }
 
 
@@ -704,17 +780,87 @@ def _build_timing_runner(
     bar_seconds: int,
     min_bars: int,
     window: int,
+    kernel_engine: Any | None = None,
+    state_dir: str | Path | None = None,
+    strategy_instance_id: str | None = None,
+    bar_source: Any | None = None,
 ) -> Any | None:
-    if not timing_strategy:
+    if not timing_strategy and not strategy_instance_id:
         return None
-    if not symbols:
-        raise ValueError("symbols are required when timing_strategy is enabled")
     from alphapilot.systems.live.strategy_runner import LiveTimingRunner
     from alphapilot.systems.timing.live_adapter import BatchStrategyAdapter
-    from alphapilot.systems.timing.strategies import create_strategy
+    from alphapilot.systems.trading.domain import StrategyInstanceConfig
 
-    strategy = create_strategy(timing_strategy, timing_params or {})
-    adapter = BatchStrategyAdapter(strategy, min_bars=min_bars, window=window)
+    definition = None
+    stored_instance = None
+    if strategy_instance_id:
+        if kernel_engine is None or not kernel_engine.has_system("trading"):
+            raise RuntimeError("trading strategy system is required for instance deployment")
+        trading = kernel_engine.get_system("trading")
+        stored_instance = trading.store.get_instance(strategy_instance_id)
+        validation = trading.validate_instance(strategy_instance_id)
+        if not validation.get("ok"):
+            raise ValueError("; ".join(validation.get("errors") or []))
+        if engine.config.mode == "live" and stored_instance["deployment_level"] != "live":
+            raise ValueError("strategy instance must be promoted to LIVE before routing")
+        config = stored_instance["config"]
+        timing_strategy = str(config["strategy_id"])
+        timing_params = dict(config.get("params") or {})
+        timing_freq = str(config.get("frequency") or timing_freq)
+        symbols = list(config.get("universe") or symbols)
+        definition = trading.registry.get(timing_strategy)
+        strategy = trading.registry.create(timing_strategy, timing_params)
+    elif kernel_engine is not None and kernel_engine.has_system("trading"):
+        if engine.config.mode == "live":
+            raise ValueError("legacy strategy_name routing is disabled in LIVE; use a promoted instance_id")
+        trading = kernel_engine.get_system("trading")
+        definition = trading.registry.get(timing_strategy)
+        strategy = trading.registry.create(timing_strategy, timing_params or {})
+    else:
+        from alphapilot.systems.timing.strategies import create_strategy
+
+        strategy = create_strategy(timing_strategy, timing_params or {})
+    required_history = int(getattr(definition, "required_history", 0) or min_bars or 1)
+    instance = (
+        StrategyInstanceConfig.from_dict(stored_instance["config"])
+        if stored_instance is not None
+        else StrategyInstanceConfig(
+            instance_id=f"legacy-{timing_strategy}-{timing_freq}",
+            strategy_id=str(timing_strategy),
+            strategy_version=str(getattr(definition, "version", "legacy")),
+            params=dict(timing_params or {}),
+            universe=tuple(symbols),
+            frequency=timing_freq,
+        )
+    )
+    target_pct = float(instance.params.get("target_percent", 1.0) or 0.0)
+    if target_pct > float(engine.config.risk.max_position_pct) + 1e-9:
+        raise ValueError(
+            f"target_percent {target_pct:.1%} exceeds automated max_position_pct "
+            f"{engine.config.risk.max_position_pct:.1%}"
+        )
+    if not symbols:
+        raise ValueError("symbols are required when timing strategy is enabled")
+    adapter = BatchStrategyAdapter(strategy, min_bars=required_history, window=max(window, required_history))
+    checkpoint = (
+        Path(state_dir).expanduser() / "strategy_instances" / instance.instance_id / "runner.json"
+        if state_dir is not None else None
+    )
+    restored = False
+    if checkpoint is not None and checkpoint.is_file():
+        try:
+            import json
+
+            checkpoint_state = json.loads(checkpoint.read_text(encoding="utf-8"))
+            if checkpoint_state.get("config_hash") == instance.config_hash:
+                restored = True
+        except (OSError, ValueError, TypeError):
+            checkpoint_state = None
+    if not restored:
+        _warm_timing_adapter(
+            kernel_engine, adapter, symbols, freq=timing_freq,
+            bar_seconds=bar_seconds, window=max(window, required_history), engine=engine,
+        )
     runner = LiveTimingRunner(
         engine,
         adapter,
@@ -722,9 +868,70 @@ def _build_timing_runner(
         freq=timing_freq,
         bar_seconds=bar_seconds,
         lot_size=engine.config.risk.lot_size,
+        instance_id=instance.instance_id,
+        config_hash=instance.config_hash,
+        state_path=checkpoint,
+        bar_source=bar_source,
     )
+    if restored and checkpoint_state is not None:
+        runner.restore(checkpoint_state, require_reconcile=engine.config.mode == "live")
     runner.start()
     return runner
+
+
+def _warm_timing_adapter(
+    kernel_engine: Any | None,
+    adapter: Any,
+    symbols: list[str],
+    *,
+    freq: str,
+    bar_seconds: int,
+    window: int,
+    engine: Any,
+) -> None:
+    """Best-effort preload from the canonical local history stores."""
+    try:
+        import pandas as pd
+
+        live_daily = None
+        if freq == "day":
+            from alphapilot.systems.live.bars import DAY_INTERVAL
+            from alphapilot.systems.live.market_data import load_market_bars
+
+            rows: list[dict[str, Any]] = []
+            provider = engine.config.quote_provider or engine.config.trade_broker or "quote"
+            for symbol in symbols:
+                rows.extend(load_market_bars(
+                    engine.config.market_data.data_dir, provider, symbol, DAY_INTERVAL, limit=window
+                ))
+            if rows:
+                live_daily = pd.DataFrame(rows).rename(columns={"date": "datetime"})
+        if freq == "day" and kernel_engine is not None:
+            bars = kernel_engine.get_system("timing").load_bars(
+                symbols=symbols, freq="day", adjust_mode="backward"
+            )
+            if live_daily is not None:
+                bars = pd.concat([bars, live_daily], ignore_index=True)
+                bars = bars.drop_duplicates(["datetime", "instrument"], keep="last")
+            adapter.warm_up(bars.groupby("instrument", group_keys=False).tail(window))
+            return
+        if freq == "day" and live_daily is not None:
+            adapter.warm_up(live_daily)
+            return
+        if freq == "min" and int(bar_seconds) in (60, 300):
+            from alphapilot.systems.live.market_data import load_market_bars
+
+            rows: list[dict[str, Any]] = []
+            provider = engine.config.quote_provider or engine.config.trade_broker or "quote"
+            for symbol in symbols:
+                rows.extend(load_market_bars(
+                    engine.config.market_data.data_dir, provider, symbol, int(bar_seconds), limit=window
+                ))
+            if rows:
+                frame = pd.DataFrame(rows).rename(columns={"date": "datetime"})
+                adapter.warm_up(frame)
+    except Exception:  # noqa: BLE001 - not ready is represented as WARMING_UP
+        return
 
 
 def run_daemon(
@@ -833,12 +1040,18 @@ def run_daemon(
             bar_seconds=bar_seconds,
             min_bars=min_bars,
             window=window,
+            kernel_engine=engine,
+            state_dir=cfg.state_dir,
+            strategy_instance_id=None,
+            bar_source=runtime.market_data,
         )
         if symbols and runner is None:
             runtime.engine.subscribe_market_data(symbols)
         runner_holder = {
             "runner": runner,
             "config": meta["runner"],
+            "kernel_engine": engine,
+            "bar_source": runtime.market_data,
         }
         _write_status(
             status="running",

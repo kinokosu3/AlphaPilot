@@ -12,6 +12,20 @@ export type TimingStrategySpec = {
   name: string;
   description: string;
   defaults: Record<string, unknown>;
+  parameter_schema?: {
+    properties?: Record<string, {
+      type?: "integer" | "number" | "boolean" | "string";
+      default?: unknown;
+      minimum?: number;
+      maximum?: number;
+      description?: string;
+    }>;
+    required?: string[];
+  };
+  required_history?: number;
+  version?: string;
+  source?: string;
+  code_hash?: string;
 };
 
 export type TimingStrategiesPayload = {

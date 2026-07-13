@@ -69,6 +69,23 @@ def test_runtime_connect_plan_route_and_persist(tmp_path: Path) -> None:
     runtime.close()
 
 
+def test_target_preflight_blocks_concentration_before_any_route(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    runtime.connect(paper_cash=100_000.0)
+    target = TargetPortfolio(
+        date="2026-07-01", holdings={"SH600000": 10_000},
+        prices={"SH600000": 10.0}, source="unsafe-full-position",
+    )
+
+    result = runtime.submit_target(target, route=True)
+
+    assert result["preflight_ok"] is False
+    assert any(issue["rule"] == "max_position_pct" for issue in result["issues"])
+    assert result["submitted"] == 0
+    assert runtime.engine.oms.get_position("600000.SSE") is None
+    runtime.close()
+
+
 def test_runtime_reconnect_keeps_halted_until_manual_resume(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
     runtime.connect(paper_cash=100_000.0)

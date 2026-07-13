@@ -516,7 +516,7 @@ def test_real_cli_command_smoke(cli_ctx: CliContext) -> None:
             "live_daemon_strategy_start",
             "--timing_strategy=sma_filter",
             "--symbols=600000",
-            "--timing_params={\"window\":2,\"target_percent\":0.5}",
+            "--timing_params={\"window\":2,\"target_percent\":0.2}",
             "--timing_freq=min",
             "--min_bars=2",
             "--wait=True",

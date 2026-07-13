@@ -206,6 +206,7 @@ class Contract:
     lot_size: int = 100          # A-share board lot
     margin_rate: float = 0.0
     gateway: str = ""
+    settlement_days: int = 1   # 0 for T+0 instruments, 1 for A-share T+1
 
     @property
     def key(self) -> str:
@@ -355,6 +356,7 @@ class Position:
     margin: float = 0.0
     pnl: float = 0.0
     gateway: str = ""
+    settlement_days: int = 1
 
     @property
     def key(self) -> str:

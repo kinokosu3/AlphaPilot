@@ -42,6 +42,8 @@ class BatchStrategyAdapter:
         self.window = int(window)
         self._history: dict[str, deque[dict]] = {}
         self._last_signal: dict[str, int] = {}
+        self._initialized = False
+        self._stopped = False
 
     @property
     def name(self) -> str:
@@ -49,6 +51,8 @@ class BatchStrategyAdapter:
 
     def on_bar(self, bar: Bar) -> list[OrderIntent]:
         """Feed one completed bar; return intents when the signal flips."""
+        if self._stopped:
+            return []
         history = self._history.setdefault(bar.instrument, deque(maxlen=self.window))
         history.append(bar.as_row())
         if len(history) < self.min_bars:
@@ -65,10 +69,6 @@ class BatchStrategyAdapter:
         self._last_signal[bar.instrument] = signal
         if previous is not None and signal == previous:
             return []
-        if previous is None and signal == 0:
-            # Nothing held, nothing signalled: don't emit a redundant flat intent.
-            return []
-
         target = float(latest["target_percent"]) if signal else 0.0
         return [
             OrderIntent(
@@ -95,3 +95,55 @@ class BatchStrategyAdapter:
                 signals = self.strategy.generate_signals(pd.DataFrame(history), self.context)
                 if not signals.empty:
                     self._last_signal[instrument] = int(signals.iloc[-1]["signal"])
+
+    def initialize(self, context: TimingContext | None = None) -> None:
+        if context is not None:
+            self.context = context
+        self._initialized = True
+        self._stopped = False
+
+    def warmup(self, history: pd.DataFrame) -> None:
+        self.warm_up(history)
+
+    def on_bars(self, completed_bars: list[Bar] | pd.DataFrame) -> list[OrderIntent]:
+        bars = (
+            [Bar(**{key: row[key] for key in (
+                "datetime", "instrument", "open", "high", "low", "close", "volume", "amount"
+            ) if key in row}) for row in completed_bars.to_dict("records")]
+            if isinstance(completed_bars, pd.DataFrame)
+            else list(completed_bars)
+        )
+        intents: list[OrderIntent] = []
+        for bar in bars:
+            intents.extend(self.on_bar(bar))
+        return intents
+
+    def stop(self, reason: str = "") -> None:
+        self._stopped = True
+
+    def synchronize_positions(self, held_instruments: set[str]) -> None:
+        """Force the next bar to emit when warmed signal and OMS truth disagree."""
+        for instrument, signal in list(self._last_signal.items()):
+            is_held = instrument in held_instruments
+            if bool(signal) != is_held:
+                self._last_signal.pop(instrument, None)
+
+    def snapshot(self) -> dict:
+        return {
+            "version": 1,
+            "history": {key: list(rows) for key, rows in self._history.items()},
+            "last_signal": dict(self._last_signal),
+        }
+
+    def restore(self, state: dict | None) -> None:
+        if not state:
+            return
+        if int(state.get("version") or 0) != 1:
+            raise ValueError("unsupported BatchStrategyAdapter state version")
+        self._history = {
+            str(key): deque(list(rows), maxlen=self.window)
+            for key, rows in (state.get("history") or {}).items()
+        }
+        self._last_signal = {
+            str(key): int(value) for key, value in (state.get("last_signal") or {}).items()
+        }

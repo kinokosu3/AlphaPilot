@@ -47,18 +47,22 @@ class TimingBacktestEngine:
         last_prices: dict[str, float] = {}
 
         for dt, group in merged.sort_values("datetime").groupby("datetime", sort=True):
+            self._roll_trading_day(state, pd.Timestamp(dt))
+            open_prices = dict(last_prices)
             for _, row in group.iterrows():
-                if pd.isna(row.get("exec_target_percent")):
-                    continue
-                self._rebalance_one(
-                    state=state,
-                    execution_row=row,
-                    trades=trades,
-                    request=request,
-                )
+                price = self._finite_positive(self._trade_value(row, "open"))
+                if price is not None:
+                    open_prices[str(row["instrument"])] = price
+            self._rebalance_batch(
+                state=state,
+                execution_rows=group,
+                valuation_prices=open_prices,
+                trades=trades,
+                request=request,
+            )
 
             for _, row in group.iterrows():
-                last_prices[str(row["instrument"])] = float(row["close"])
+                last_prices[str(row["instrument"])] = float(self._trade_value(row, "close"))
 
             equity = state.cash + sum(
                 float(amount) * float(last_prices.get(inst, 0.0))
@@ -66,7 +70,7 @@ class TimingBacktestEngine:
             )
             for _, row in group.iterrows():
                 instrument = str(row["instrument"])
-                close_price = float(row["close"])
+                close_price = float(self._trade_value(row, "close"))
                 amount = float(state.positions.get(instrument, 0.0))
                 equity_rows.append(
                     {
@@ -111,6 +115,52 @@ class TimingBacktestEngine:
             artifact_dir=artifact_dir,
         )
 
+    def _rebalance_batch(
+        self,
+        *,
+        state: PortfolioState,
+        execution_rows: pd.DataFrame,
+        valuation_prices: dict[str, float],
+        trades: list[dict[str, Any]],
+        request: TimingBacktestRequest,
+    ) -> None:
+        """Rebalance one account-level target book without symbol-order bias.
+
+        Equity is frozen before any order at this timestamp and includes every
+        holding, including instruments without a row in the current batch.  All
+        sells execute before buys so released cash is available consistently.
+        """
+        rows: list[tuple[pd.Series, float]] = []
+        for _, row in execution_rows.sort_values("instrument").iterrows():
+            if pd.isna(row.get("exec_target_percent")):
+                continue
+            price = self._finite_positive(self._trade_value(row, "open"))
+            if price is None or not self._row_tradable(row):
+                continue
+            rows.append((row, max(float(row["exec_target_percent"]), 0.0)))
+        if not rows:
+            return
+
+        total_weight = sum(weight for _, weight in rows)
+        scale = 1.0 / total_weight if total_weight > 1.0 else 1.0
+        equity = state.cash + sum(
+            float(amount) * float(valuation_prices.get(instrument, 0.0))
+            for instrument, amount in state.positions.items()
+        )
+        targets = [(row, weight * scale) for row, weight in rows]
+
+        for side in ("sell", "buy"):
+            for row, target_percent in targets:
+                self._rebalance_one(
+                    state=state,
+                    execution_row=row,
+                    trades=trades,
+                    request=request,
+                    account_equity=equity,
+                    target_percent=target_percent,
+                    only_side=side,
+                )
+
     def _rebalance_one(
         self,
         *,
@@ -118,23 +168,34 @@ class TimingBacktestEngine:
         execution_row: pd.Series,
         trades: list[dict[str, Any]],
         request: TimingBacktestRequest,
+        account_equity: float | None = None,
+        target_percent: float | None = None,
+        only_side: str | None = None,
     ) -> None:
         instrument = str(execution_row["instrument"])
-        target_percent = float(execution_row["exec_target_percent"])
-        open_price = float(execution_row["open"])
+        target_percent = (
+            float(execution_row["exec_target_percent"])
+            if target_percent is None
+            else float(target_percent)
+        )
+        open_price = float(self._trade_value(execution_row, "open"))
         if not math.isfinite(open_price) or open_price <= 0:
             return
         current_amount = float(state.positions.get(instrument, 0.0))
         current_value = current_amount * open_price
-        equity = state.cash + current_value
+        equity = float(account_equity) if account_equity is not None else state.cash + current_value
         target_value = equity * target_percent
         delta_value = target_value - current_value
         unit = max(0, int(request.trade_unit or 0))
+        fill_ratio = min(max(float(execution_row.get("fill_ratio", 1.0) or 0.0), 0.0), 1.0)
 
-        if delta_value > open_price:
+        if delta_value > open_price and only_side in (None, "buy"):
+            if self._at_locked_limit(execution_row, side="buy"):
+                return
             fill_price = open_price * (1 + float(request.slippage))
             raw_amount = delta_value / fill_price
             amount = self._floor_unit(raw_amount, unit)
+            amount = self._floor_unit(amount * fill_ratio, unit)
             if amount <= 0:
                 return
             amount = self._affordable_amount(amount, fill_price, state.cash, request)
@@ -147,28 +208,77 @@ class TimingBacktestEngine:
             state.positions[instrument] = new_amount
             old_cost = state.cost_basis.get(instrument, 0.0) * current_amount
             state.cost_basis[instrument] = (old_cost + amount * fill_price) / new_amount
+            today_buys = state.metadata.setdefault("today_buys", {})
+            today_buys[instrument] = float(today_buys.get(instrument, 0.0)) + amount
             self._record_trade(trades, execution_row, instrument, "buy", amount, fill_price, fee, request)
             return
 
-        if delta_value < -open_price and current_amount > 0:
+        if delta_value < -open_price and current_amount > 0 and only_side in (None, "sell"):
+            if self._at_locked_limit(execution_row, side="sell"):
+                return
             fill_price = open_price * (1 - float(request.slippage))
-            desired = min(current_amount, abs(delta_value) / fill_price)
+            today_buys = state.metadata.setdefault("today_buys", {})
+            sellable = max(current_amount - float(today_buys.get(instrument, 0.0)), 0.0)
+            desired = min(sellable, abs(delta_value) / fill_price)
             amount = self._floor_unit(desired, unit)
             if amount <= 0 and target_percent == 0:
-                amount = self._floor_unit(current_amount, unit) if unit else current_amount
-            amount = min(amount, current_amount)
+                amount = self._floor_unit(sellable, unit) if unit else sellable
+            amount = self._floor_unit(amount * fill_ratio, unit)
+            amount = min(amount, sellable)
             if amount <= 0:
                 return
             fee = self._fee(amount * fill_price, request.close_cost, request.min_cost)
             state.cash += amount * fill_price - fee
+            cost_basis = state.cost_basis.get(instrument, fill_price)
             remaining = current_amount - amount
             if remaining <= 1e-9:
                 state.positions.pop(instrument, None)
                 state.cost_basis.pop(instrument, None)
             else:
                 state.positions[instrument] = remaining
-            state.realized_pnl += (fill_price - state.cost_basis.get(instrument, fill_price)) * amount - fee
+            state.realized_pnl += (fill_price - cost_basis) * amount - fee
             self._record_trade(trades, execution_row, instrument, "sell", amount, fill_price, fee, request)
+
+    @staticmethod
+    def _finite_positive(value: Any) -> float | None:
+        try:
+            result = float(value)
+        except (TypeError, ValueError):
+            return None
+        return result if math.isfinite(result) and result > 0 else None
+
+    @staticmethod
+    def _trade_value(row: pd.Series, field: str) -> Any:
+        value = row.get(f"trade_{field}")
+        return row.get(field) if value is None or pd.isna(value) else value
+
+    @staticmethod
+    def _row_tradable(row: pd.Series) -> bool:
+        if "tradable" in row and not bool(row.get("tradable")):
+            return False
+        if "suspended" in row and bool(row.get("suspended")):
+            return False
+        volume = row.get("volume")
+        return not (volume is not None and not pd.isna(volume) and float(volume) <= 0)
+
+    @staticmethod
+    def _at_locked_limit(row: pd.Series, *, side: str) -> bool:
+        price = TimingBacktestEngine._finite_positive(TimingBacktestEngine._trade_value(row, "open"))
+        if price is None:
+            return True
+        if side == "buy":
+            limit = TimingBacktestEngine._finite_positive(row.get("limit_up"))
+            return limit is not None and price >= limit - 1e-9
+        limit = TimingBacktestEngine._finite_positive(row.get("limit_down"))
+        return limit is not None and price <= limit + 1e-9
+
+    @staticmethod
+    def _roll_trading_day(state: PortfolioState, timestamp: pd.Timestamp) -> None:
+        day = timestamp.date().isoformat()
+        if state.metadata.get("trading_day") == day:
+            return
+        state.metadata["trading_day"] = day
+        state.metadata["today_buys"] = {}
 
     @staticmethod
     def _floor_unit(amount: float, unit: int) -> float:
@@ -219,6 +329,10 @@ class TimingBacktestEngine:
                 "price": float(price),
                 "value": float(amount * price),
                 "fee": float(fee),
+                "fill_ratio": min(max(float(execution_row.get("fill_ratio", 1.0) or 0.0), 0.0), 1.0),
+                "fill_status": (
+                    "partial" if float(execution_row.get("fill_ratio", 1.0) or 0.0) < 1.0 else "filled"
+                ),
                 "reason": execution_row.get("exec_reason", ""),
                 "strategy": request.strategy_name,
             }

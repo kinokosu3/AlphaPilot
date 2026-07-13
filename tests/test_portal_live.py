@@ -303,7 +303,7 @@ def test_live_daemon_control_endpoints(engine, isolated_env) -> None:
                 "state_dir": str(state_dir),
                 "timing_strategy": "sma_filter",
                 "symbols": ["600000"],
-                "timing_params": {"window": 2, "target_percent": 0.5},
+                "timing_params": {"window": 2, "target_percent": 0.2},
                 "timing_freq": "min",
                 "min_bars": 2,
                 "wait": True,

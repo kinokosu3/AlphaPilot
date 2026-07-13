@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from alphapilot.systems.live.bars import Bar, BarAggregator
+from alphapilot.systems.live.bars import Bar, BarAggregator, DAY_INTERVAL
 from alphapilot.systems.live.config import MarketDataConfig
 from alphapilot.systems.live.state_io import atomic_write_json
 from alphapilot.systems.live.types import Exchange, TickData, normalize_symbol
@@ -349,8 +349,9 @@ class LiveMarketDataService:
         self._latest: dict[str, TickData] = {}
         self._bars = {
             interval: BarAggregator(interval, on_bar=lambda bar, i=interval: self._on_bar(i, bar))
-            for interval in BAR_INTERVALS
+            for interval in (*BAR_INTERVALS, DAY_INTERVAL)
         }
+        self._bar_listeners: dict[int, list[Callable[[Bar], None]]] = {}
         self._engine: Any = None
         self._last_session: str | None = None
 
@@ -371,6 +372,16 @@ class LiveMarketDataService:
             self.recorder.record_tick(tick)
         except Exception as exc:  # noqa: BLE001 - observability cannot break trading
             self.recorder._mark_error(f"market projection error: {type(exc).__name__}: {exc}")
+
+    def add_bar_listener(self, interval: int, listener: Callable[[Bar], None]) -> None:
+        if int(interval) not in self._bars:
+            raise ValueError(f"unsupported live bar interval {interval}")
+        self._bar_listeners.setdefault(int(interval), []).append(listener)
+
+    def remove_bar_listener(self, interval: int, listener: Callable[[Bar], None]) -> None:
+        listeners = self._bar_listeners.get(int(interval), [])
+        if listener in listeners:
+            listeners.remove(listener)
 
     def step(self, session: Any) -> None:
         value = str(getattr(session, "value", session))
@@ -427,6 +438,8 @@ class LiveMarketDataService:
 
     def _on_bar(self, interval: int, bar: Bar) -> None:
         self.recorder.record_bar(bar, interval, complete=True)
+        for listener in list(self._bar_listeners.get(interval, [])):
+            listener(bar)
 
 
 def load_market_bars(
@@ -439,8 +452,8 @@ def load_market_bars(
     current: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Read recent persisted bars and merge a daemon's current partial bar."""
-    if int(interval) not in BAR_INTERVALS:
-        raise ValueError(f"interval must be one of {BAR_INTERVALS}")
+    if int(interval) not in (*BAR_INTERVALS, DAY_INTERVAL):
+        raise ValueError(f"interval must be one of {(*BAR_INTERVALS, DAY_INTERVAL)}")
     code, exchange = normalize_symbol(symbol)
     key = f"{code}.{exchange.value}"
     provider_slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(provider)).strip("._") or "quote"

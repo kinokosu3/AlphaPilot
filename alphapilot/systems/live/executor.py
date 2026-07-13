@@ -10,6 +10,7 @@ to an execution algo for timed placement (call auction / TWAP).
 from __future__ import annotations
 
 import math
+import hashlib
 from typing import Any, Iterable
 
 from alphapilot.systems.live.targets import TargetPortfolio
@@ -22,48 +23,35 @@ def _floor_lot(volume: float, lot: int) -> float:
     return float(math.floor(volume)) if volume > 0 else 0.0
 
 
-def reconcile(target: TargetPortfolio, oms, *, lot_size: int = 100) -> list[OrderRequest]:
+def reconcile(
+    target: TargetPortfolio,
+    oms,
+    *,
+    lot_size: int = 100,
+    max_order_value: float = 0.0,
+) -> list[OrderRequest]:
     """Diff target shares vs real OMS positions -> buy/sell requests (lot-rounded).
 
     Sells are capped at the sellable (T+1, non-frozen) quantity from the OMS.
     Instruments held but absent from the target are fully liquidated (target 0).
     """
-    tgt: dict[str, float] = {}
-    meta: dict[str, tuple[str, Any, float]] = {}
-    for code, shares in target.holdings.items():
-        c, ex = normalize_symbol(code)
-        key = symbol_key(c, ex)
-        tgt[key] = float(shares)
-        meta[key] = (c, ex, float(target.prices.get(code, 0.0)))
+    from alphapilot.systems.live.planner import ExecutionPlanner
 
-    current = {p.key: p for p in oms.get_positions()}
-    reqs: list[OrderRequest] = []
-    for key in sorted(set(tgt) | set(current)):
-        target_shares = tgt.get(key, 0.0)
-        pos = current.get(key)
-        cur = pos.volume if pos else 0.0
-        delta = target_shares - cur
-        if abs(delta) < max(lot_size, 1):
-            continue
-        if key in meta:
-            code, exchange, price = meta[key]
-        else:
-            code, exchange, price = pos.code, pos.exchange, 0.0
-
-        if delta > 0:
-            vol = _floor_lot(delta, lot_size)
-            if vol > 0:
-                reqs.append(OrderRequest.buy(code, exchange, vol, price, reference=f"{target.date}:{key}:B"))
-        else:
-            sellable = oms.available_shares(key)
-            vol = _floor_lot(min(abs(delta), sellable), lot_size)
-            if vol > 0:
-                reqs.append(OrderRequest.sell(code, exchange, vol, price, reference=f"{target.date}:{key}:S"))
-    return reqs
+    return ExecutionPlanner(
+        lot_size=lot_size,
+        max_order_value=max_order_value,
+    ).plan(target, oms).requests
 
 
 def orders_from_intents(
-    intents: Iterable[Any], oms, prices: dict[str, float], *, lot_size: int = 100
+    intents: Iterable[Any],
+    oms,
+    prices: dict[str, float],
+    *,
+    lot_size: int = 100,
+    instance_id: str = "legacy",
+    config_hash: str = "",
+    decision_id: str = "",
 ) -> list[OrderRequest]:
     """Translate timing :class:`OrderIntent` objects into concrete requests.
 
@@ -72,35 +60,43 @@ def orders_from_intents(
     OMS equity / current holding).
     """
     reqs: list[OrderRequest] = []
-    for intent in intents:
+    for index, intent in enumerate(intents):
         code, exchange = normalize_symbol(intent.instrument)
         key = symbol_key(code, exchange)
         price = float(prices.get(intent.instrument) or prices.get(key) or 0.0)
         pos = oms.get_position(key)
         current = pos.volume if pos else 0.0
+        for active in oms.get_active_orders():
+            if active.key != key:
+                continue
+            current += active.remaining if active.direction.value == "long" else -active.remaining
         action = intent.action
+        ref = _intent_reference(
+            intent, index=index, key=key, instance_id=instance_id,
+            config_hash=config_hash, decision_id=decision_id,
+        )
 
         if action == "buy" and intent.quantity:
             vol = _floor_lot(intent.quantity, lot_size)
             if vol > 0:
-                reqs.append(OrderRequest.buy(code, exchange, vol, price))
+                reqs.append(OrderRequest.buy(code, exchange, vol, price, reference=ref))
         elif action == "sell" and intent.quantity:
             vol = _floor_lot(min(intent.quantity, oms.available_shares(key)), lot_size)
             if vol > 0:
-                reqs.append(OrderRequest.sell(code, exchange, vol, price))
+                reqs.append(OrderRequest.sell(code, exchange, vol, price, reference=ref))
         elif action == "close":
             vol = _floor_lot(oms.available_shares(key), lot_size)
             if vol > 0:
-                reqs.append(OrderRequest.sell(code, exchange, vol, price))
+                reqs.append(OrderRequest.sell(code, exchange, vol, price, reference=ref))
         elif action in ("target_percent", "target_shares"):
             target_shares = _target_shares(intent, oms, price, lot_size)
             delta = target_shares - current
             if delta >= lot_size:
-                reqs.append(OrderRequest.buy(code, exchange, _floor_lot(delta, lot_size), price))
+                reqs.append(OrderRequest.buy(code, exchange, _floor_lot(delta, lot_size), price, reference=ref))
             elif -delta >= lot_size:
                 vol = _floor_lot(min(-delta, oms.available_shares(key)), lot_size)
                 if vol > 0:
-                    reqs.append(OrderRequest.sell(code, exchange, vol, price))
+                    reqs.append(OrderRequest.sell(code, exchange, vol, price, reference=ref))
     return reqs
 
 
@@ -112,3 +108,21 @@ def _target_shares(intent: Any, oms, price: float, lot_size: int) -> float:
     if price <= 0 or equity <= 0:
         return 0.0
     return _floor_lot((pct * equity) / price, lot_size)
+
+
+def _intent_reference(
+    intent: Any,
+    *,
+    index: int,
+    key: str,
+    instance_id: str,
+    config_hash: str,
+    decision_id: str,
+) -> str:
+    decision = decision_id or hashlib.sha256(
+        f"{getattr(intent, 'datetime', '')}:{key}:{getattr(intent, 'action', '')}".encode("utf-8")
+    ).hexdigest()[:24]
+    action = getattr(intent, "action", "")
+    target = getattr(intent, "target_percent", None) if action == "target_percent" else getattr(intent, "quantity", None)
+    side = "B" if action == "buy" or (action in {"target_percent", "target_shares"} and float(target or 0) > 0) else "S"
+    return f"{instance_id}:{config_hash or '-'}:{decision}:{key}:{side}:{index}"

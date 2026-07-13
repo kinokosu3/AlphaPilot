@@ -83,6 +83,7 @@ class OMS:
 
     def on_contract(self, contract: Contract) -> None:
         self.contracts[contract.key] = contract
+        self.positions.set_settlement_days(contract.key, contract.settlement_days)
 
     def on_tick(self, tick: TickData) -> None:
         self.ticks[tick.key] = tick

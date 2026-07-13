@@ -90,6 +90,17 @@ def test_adapter_warm_up_suppresses_spurious_first_intent() -> None:
     assert adapter.on_bar(make_bar(6, 11.0)) == []           # still long: silence
 
 
+def test_adapter_reconciles_first_flat_signal_with_real_holding() -> None:
+    adapter = BatchStrategyAdapter(MomentumToy(), min_bars=2)
+    history = pd.DataFrame([make_bar(1, 10.5).as_row(), make_bar(2, 10.0).as_row()])
+    adapter.warm_up(history)                                  # signal is flat
+    adapter.synchronize_positions({KEY})                      # OMS is actually long
+
+    intents = adapter.on_bar(make_bar(3, 9.5))
+
+    assert len(intents) == 1 and intents[0].target_percent == 0.0
+
+
 # --------------------------------------------------------------------------- #
 # runner: day mode (close signal -> next-morning call auction)
 # --------------------------------------------------------------------------- #
@@ -213,6 +224,34 @@ def test_runner_pause_resume_stop_lifecycle(tmp_path: Path) -> None:
     stopped = runner.stop()
     assert stopped["stopped"] is True
     assert runner.step()["session"] is None
+
+
+def test_runner_checkpoint_requires_reconcile_before_resume(tmp_path: Path) -> None:
+    clock = SimulatedClock(datetime(2026, 7, 6, 9, 31))
+    engine = make_engine(tmp_path, clock)
+    state_path = tmp_path / "runner.json"
+    first_adapter = BatchStrategyAdapter(MomentumToy(), min_bars=2)
+    first_adapter.warm_up(pd.DataFrame([make_bar(1, 10.0).as_row(), make_bar(2, 10.2).as_row()]))
+    first = LiveTimingRunner(
+        engine, first_adapter, ["600000"], freq="day",
+        instance_id="ma", config_hash="hash", state_path=state_path,
+    )
+    first.start()
+    assert state_path.is_file()
+
+    second = LiveTimingRunner(
+        engine, BatchStrategyAdapter(MomentumToy(), min_bars=2), ["600000"], freq="day",
+        instance_id="ma", config_hash="hash", state_path=state_path,
+    )
+    import json
+    second.restore(json.loads(state_path.read_text(encoding="utf-8")))
+    second.start()
+
+    assert second.status()["lifecycle"] == "paused_pending_reconcile"
+    with pytest.raises(RuntimeError, match="reconciled"):
+        second.resume()
+    second.mark_reconciled({"warnings": []})
+    assert second.resume()["active"] is True
 
 
 def test_runner_rejects_unknown_freq(tmp_path: Path) -> None:

@@ -617,7 +617,8 @@ class LiveModule(BaseModule):
 
     def live_daemon_strategy_start(
         self,
-        timing_strategy: str,
+        timing_strategy: str = "",
+        instance_id: str | None = None,
         symbols: str | list[str] | None = None,
         timing_params: str | dict | None = None,
         timing_freq: str = "day",
@@ -638,6 +639,7 @@ class LiveModule(BaseModule):
             "strategy_start",
             payload={
                 "timing_strategy": timing_strategy,
+                "instance_id": instance_id,
                 "symbols": _split_symbols(symbols),
                 "timing_params": _parse_mapping(timing_params),
                 "timing_freq": timing_freq,
@@ -770,28 +772,45 @@ class LiveModule(BaseModule):
 
         if route:
             _require_daemon_live_confirmation(self.live_daemon_status(state_dir=state_dir), confirm_live=confirm_live)
-        target = self._load_target(
-            target_path=target_path,
-            holdings=holdings,
-            prices=prices,
-            positions=positions,
-            date=date,
-            source=source,
-            session=session,
-            strategy_name=strategy_name,
-            factor_path=factor_path,
-            model_pickle_path=model_pickle_path,
-            yaml_params=yaml_params,
-            refresh_data=refresh_data,
-        )
-        payload = {
-            **target_to_dict(target),
-            "route": bool(route),
-            "confirm_live": bool(confirm_live),
-        }
+        model_source = bool(session or strategy_name or factor_path or model_pickle_path)
+        if model_source and target_path is None and holdings is None and positions is None:
+            action = "model_target"
+            payload = {
+                "date": date,
+                "source": source,
+                "session": session,
+                "strategy_name": strategy_name,
+                "factor_path": factor_path,
+                "model_pickle_path": model_pickle_path,
+                "yaml_params": yaml_params,
+                "refresh_data": bool(refresh_data),
+                "route": bool(route),
+                "confirm_live": bool(confirm_live),
+            }
+        else:
+            action = "target"
+            target = self._load_target(
+                target_path=target_path,
+                holdings=holdings,
+                prices=prices,
+                positions=positions,
+                date=date,
+                source=source,
+                session=session,
+                strategy_name=strategy_name,
+                factor_path=factor_path,
+                model_pickle_path=model_pickle_path,
+                yaml_params=yaml_params,
+                refresh_data=refresh_data,
+            )
+            payload = {
+                **target_to_dict(target),
+                "route": bool(route),
+                "confirm_live": bool(confirm_live),
+            }
         return send_daemon_command(
             self._system().config,
-            "target",
+            action,
             payload=payload,
             state_dir=state_dir,
             wait=wait,
@@ -951,23 +970,25 @@ class LiveModule(BaseModule):
         )
         if route:
             require_live_confirmation(runtime.config, confirm_live=confirm_live)
-        target = self._load_target(
-            target_path=target_path,
-            holdings=holdings,
-            prices=prices,
-            positions=positions,
-            date=date,
-            source=source,
-            session=session,
-            strategy_name=strategy_name,
-            factor_path=factor_path,
-            model_pickle_path=model_pickle_path,
-            yaml_params=yaml_params,
-            refresh_data=refresh_data,
-        )
         try:
             runtime.connect(paper_cash=cash)
-            runtime.wait_ready(timeout=timeout)
+            if not runtime.wait_ready(timeout=timeout):
+                raise RuntimeError("live runtime did not become ready before target planning")
+            target = self._load_target(
+                target_path=target_path,
+                holdings=holdings,
+                prices=prices,
+                positions=positions,
+                date=date,
+                source=source,
+                session=session,
+                strategy_name=strategy_name,
+                factor_path=factor_path,
+                model_pickle_path=model_pickle_path,
+                yaml_params=yaml_params,
+                refresh_data=refresh_data,
+                seed_state=_portfolio_seed_from_oms(runtime.engine.oms, date=date),
+            )
             return runtime.submit_target(target, route=route)
         finally:
             runtime.close()
@@ -987,6 +1008,7 @@ class LiveModule(BaseModule):
         model_pickle_path: str | None,
         yaml_params: str | None,
         refresh_data: bool,
+        seed_state: Any | None = None,
     ):
         from alphapilot.systems.live.targets import TargetPortfolio, parse_target_positions
 
@@ -1000,6 +1022,16 @@ class LiveModule(BaseModule):
                 source=str(data.get("source") or source or "target_file"),
                 market=data.get("market"),
                 positions=parse_target_positions(data.get("positions")),
+                decision_id=str(data.get("decision_id") or ""),
+                instance_id=str(data.get("instance_id") or "legacy"),
+                as_of=data.get("as_of"),
+                effective_session=data.get("effective_session"),
+                valid_until=data.get("valid_until"),
+                config_hash=str(data.get("config_hash") or ""),
+                data_version=str(data.get("data_version") or ""),
+                model_version=str(data.get("model_version") or ""),
+                target_weights={str(k): float(v) for k, v in (data.get("target_weights") or {}).items()},
+                price_source=str(data.get("price_source") or ""),
             )
         if holdings is not None or positions is not None:
             return TargetPortfolio(
@@ -1016,6 +1048,10 @@ class LiveModule(BaseModule):
 
         if not (session or strategy_name or factor_path or model_pickle_path):
             raise ValueError("provide target_path, holdings, session, strategy_name, factor_path or model_pickle_path")
+        if model_pickle_path:
+            from alphapilot.systems.trading.security import verify_trusted_model
+
+            verify_trusted_model(model_pickle_path)
         result = generate_daily_signal(
             self.context,
             DailySignalRequest(
@@ -1028,6 +1064,8 @@ class LiveModule(BaseModule):
                 refresh_data=refresh_data,
                 use_local=self.context.config.backtest.use_local,
             ),
+            seed_state=seed_state,
+            persist_state=False,
         )
         return to_target_portfolio(result, source=source)
 
@@ -1079,6 +1117,26 @@ def _parse_mapping(raw: str | dict | None) -> dict[str, Any]:
     if path.exists():
         return json.loads(path.read_text(encoding="utf-8"))
     return json.loads(text)
+
+
+def _portfolio_seed_from_oms(oms: Any, *, date: str | None = None):
+    """Build the qlib daily-planner seed from broker/OMS truth."""
+    from alphapilot.systems.backtest.live.types import PortfolioState
+
+    account = oms.account
+    if account is None:
+        raise RuntimeError("account snapshot is required before model target planning")
+    positions = {
+        str(position.key): float(position.volume)
+        for position in oms.get_positions()
+        if float(position.volume) > 0
+    }
+    return PortfolioState(
+        date=str(date or ""),
+        cash=float(account.available),
+        positions=positions,
+        metadata={"source": "live_oms", "account_id": str(account.account_id)},
+    )
 
 
 def _split_symbols(raw: str | list[str] | None) -> list[str]:

@@ -309,8 +309,13 @@ export type LiveRunnerStatus = {
   freq?: string;
   symbols?: string[];
   pending_requests?: number;
+  pending_intents?: number;
   algo_armed?: boolean;
   last_session?: string | null;
+  lifecycle?: string;
+  instance_id?: string;
+  config_hash?: string;
+  reconcile_required?: boolean;
   config?: { strategy?: string; freq?: string; enabled?: boolean; params?: Record<string, unknown> };
 };
 

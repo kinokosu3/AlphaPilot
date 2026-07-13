@@ -26,6 +26,22 @@ class TimingSystem(BaseSystem):
         self._engine = TimingBacktestEngine()
 
     def list_strategies(self) -> list[dict[str, Any]]:
+        if self.context.engine.has_system("trading"):
+            from alphapilot.systems.trading.registry import schema_defaults
+
+            return [
+                {
+                    "name": definition.strategy_id,
+                    "description": definition.description,
+                    "defaults": schema_defaults(definition.parameter_schema),
+                    "parameter_schema": definition.parameter_schema,
+                    "required_history": definition.required_history,
+                    "version": definition.version,
+                    "source": definition.source,
+                    "code_hash": definition.code_hash,
+                }
+                for definition in self.context.engine.get_system("trading").registry.list()
+            ]
         return list_strategy_specs()
 
     def load_bars(self, **options: Any) -> pd.DataFrame:
@@ -65,6 +81,27 @@ class TimingSystem(BaseSystem):
             data_dir=request.data_dir,
             adjust_mode=request.adjust_mode,
         )
+        if request.execution_adjust_mode and request.execution_adjust_mode != request.adjust_mode:
+            execution_bars = self.load_bars(
+                symbols=request.symbols,
+                stock_csv=request.stock_csv,
+                code_column=request.code_column,
+                start_date=request.start_date,
+                end_date=request.end_date,
+                freq=request.freq,
+                data_dir=request.data_dir,
+                adjust_mode=request.execution_adjust_mode,
+            )
+            trade_columns = ["datetime", "instrument", "open", "high", "low", "close"]
+            raw = execution_bars[trade_columns].rename(columns={
+                "open": "trade_open", "high": "trade_high", "low": "trade_low", "close": "trade_close",
+            })
+            bars = bars.merge(raw, on=["datetime", "instrument"], how="left", validate="one_to_one")
+            missing = bars[["trade_open", "trade_close"]].isna().any(axis=1)
+            if bool(missing.any()):
+                raise ValueError(
+                    f"unadjusted execution prices missing for {int(missing.sum())} signal bars"
+                )
         params = dict(request.strategy_params)
         params["target_percent"] = request.target_percent
         strategy = create_strategy(request.strategy_name, params)
