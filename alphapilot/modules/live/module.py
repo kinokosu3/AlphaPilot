@@ -53,7 +53,7 @@ class LiveModule(BaseModule):
         return self._system().snapshot()
 
     def live_modes(self) -> list[str]:
-        """List the run-mode ladder (dry_run -> paper -> live)."""
+        """List modes (SHADOW uses real data/account but cannot route)."""
         return self._system().modes()
 
     def live_brokers(self) -> list[dict[str, Any]]:
@@ -354,6 +354,7 @@ class LiveModule(BaseModule):
         state_dir: str | None = None,
         duration: float | None = None,
         timing_strategy: str | None = None,
+        strategy_instance_id: str | None = None,
         timing_params: str | dict | None = None,
         timing_freq: str = "day",
         bar_seconds: int = 60,
@@ -364,7 +365,9 @@ class LiveModule(BaseModule):
         """Start a detached live runtime daemon.
 
         The daemon connects and maintains OMS/state heartbeats. It does not route
-        orders by itself unless ``timing_strategy`` is explicitly enabled; even
+        orders by itself unless a strategy is explicitly enabled; formal
+        deployments should use ``strategy_instance_id``. Legacy
+        ``timing_strategy`` is retained for research/PAPER compatibility; even
         then every order still goes through LiveEngine.submit and RiskGate.
         ``duration`` is mainly for smoke tests; omit it for a persistent process.
         """
@@ -384,6 +387,7 @@ class LiveModule(BaseModule):
             state_dir=state_dir,
             duration=duration,
             timing_strategy=timing_strategy,
+            strategy_instance_id=strategy_instance_id,
             timing_params=_parse_mapping(timing_params),
             timing_freq=timing_freq,
             bar_seconds=int(bar_seconds),
@@ -675,13 +679,19 @@ class LiveModule(BaseModule):
         state_dir: str | None = None,
         wait: bool = True,
         timeout: float = 5.0,
+        confirm_live: bool = False,
     ) -> dict[str, Any]:
         """Resume the daemon strategy runner."""
         from alphapilot.systems.live.daemon import send_daemon_command
 
+        _require_daemon_live_confirmation(
+            self.live_daemon_status(state_dir=state_dir),
+            confirm_live=confirm_live,
+        )
         return send_daemon_command(
             self._system().config,
             "strategy_resume",
+            payload={"confirm_live": bool(confirm_live)},
             state_dir=state_dir,
             wait=wait,
             timeout=timeout,

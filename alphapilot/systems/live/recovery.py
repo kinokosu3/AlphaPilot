@@ -12,6 +12,8 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
+from alphapilot.systems.live.config import uses_real_providers
+
 
 class RecoveryService:
     """Best-effort recovery pass for a connected ``LiveRuntime``."""
@@ -32,7 +34,7 @@ class RecoveryService:
 
         try:
             refresh = self.runtime.refresh_broker_state(include_orders=True, include_trades=True)
-            settle_seconds = 1.5 if self.runtime.config.mode == "live" else 0.0
+            settle_seconds = 1.5 if uses_real_providers(self.runtime.config.mode) else 0.0
             self.runtime.settle_broker_events(settle_seconds)
             report["broker_refresh"] = refresh
             report["broker_refresh_kinds"] = list(refresh.get("requested") or [])

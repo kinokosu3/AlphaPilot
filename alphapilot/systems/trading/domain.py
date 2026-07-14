@@ -8,6 +8,16 @@ import hashlib
 import json
 from typing import Any, Protocol
 
+from alphapilot.systems.trading.contracts import (
+    CrossSectionalSignal,
+    PortfolioInputs,
+    PortfolioPolicy,
+    SignalEnvelope,
+    SignalKind,
+    TargetWeights,
+    TimingSignal,
+)
+
 
 class LifecycleState(str, Enum):
     CREATED = "created"
@@ -65,6 +75,8 @@ class StrategyInstanceConfig:
     frequency: str = "day"
     data_policy: dict[str, Any] = field(default_factory=dict)
     portfolio_policy: dict[str, Any] = field(default_factory=dict)
+    strategy_code_hash: str = ""
+    model_hash: str = ""
     deployment_level: str = DeploymentLevel.REPLAY.value
     config_hash: str = ""
 
@@ -84,6 +96,8 @@ class StrategyInstanceConfig:
             "frequency": self.frequency,
             "data_policy": self.data_policy,
             "portfolio_policy": self.portfolio_policy,
+            "strategy_code_hash": self.strategy_code_hash,
+            "model_hash": self.model_hash,
         }
         raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -104,13 +118,6 @@ class SignalRecord:
     signal: int
     score: float = 0.0
     reason: str = ""
-
-
-@dataclass(frozen=True)
-class TargetWeights:
-    as_of: str
-    weights: dict[str, float]
-    scores: dict[str, float] = field(default_factory=dict)
 
 
 class SignalProvider(Protocol):

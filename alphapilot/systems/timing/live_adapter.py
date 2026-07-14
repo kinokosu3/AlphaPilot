@@ -22,6 +22,7 @@ from collections import deque
 import pandas as pd
 
 from alphapilot.systems.live.bars import Bar
+from alphapilot.systems.live.types import normalize_symbol, symbol_key
 from alphapilot.systems.timing.base import OrderIntent, TimingContext, TimingStrategy
 
 
@@ -53,8 +54,9 @@ class BatchStrategyAdapter:
         """Feed one completed bar; return intents when the signal flips."""
         if self._stopped:
             return []
-        history = self._history.setdefault(bar.instrument, deque(maxlen=self.window))
-        history.append(bar.as_row())
+        instrument = _instrument_key(bar.instrument)
+        history = self._history.setdefault(instrument, deque(maxlen=self.window))
+        history.append({**bar.as_row(), "instrument": instrument})
         if len(history) < self.min_bars:
             return []
 
@@ -65,15 +67,15 @@ class BatchStrategyAdapter:
         latest = signals.iloc[-1]
         signal = int(latest["signal"])
 
-        previous = self._last_signal.get(bar.instrument)
-        self._last_signal[bar.instrument] = signal
+        previous = self._last_signal.get(instrument)
+        self._last_signal[instrument] = signal
         if previous is not None and signal == previous:
             return []
         target = float(latest["target_percent"]) if signal else 0.0
         return [
             OrderIntent(
                 datetime=pd.Timestamp(bar.datetime),
-                instrument=bar.instrument,
+                instrument=instrument,
                 action="target_percent",
                 target_percent=target,
                 reason=str(latest.get("reason", "")) or self.name,
@@ -87,7 +89,9 @@ class BatchStrategyAdapter:
         so the first live bar diffs against the warmed-up state instead of firing
         a spurious entry intent.
         """
-        for instrument, group in bars.sort_values("datetime").groupby("instrument"):
+        normalized = bars.copy()
+        normalized["instrument"] = normalized["instrument"].map(_instrument_key)
+        for instrument, group in normalized.sort_values("datetime").groupby("instrument"):
             history = self._history.setdefault(instrument, deque(maxlen=self.window))
             for row in group.to_dict("records"):
                 history.append(row)
@@ -123,8 +127,9 @@ class BatchStrategyAdapter:
 
     def synchronize_positions(self, held_instruments: set[str]) -> None:
         """Force the next bar to emit when warmed signal and OMS truth disagree."""
+        normalized_holdings = {_instrument_key(item) for item in held_instruments}
         for instrument, signal in list(self._last_signal.items()):
-            is_held = instrument in held_instruments
+            is_held = instrument in normalized_holdings
             if bool(signal) != is_held:
                 self._last_signal.pop(instrument, None)
 
@@ -140,10 +145,32 @@ class BatchStrategyAdapter:
             return
         if int(state.get("version") or 0) != 1:
             raise ValueError("unsupported BatchStrategyAdapter state version")
+        merged_history: dict[str, list[dict]] = {}
+        for key, rows in (state.get("history") or {}).items():
+            instrument = _instrument_key(str(key))
+            merged_history.setdefault(instrument, []).extend(
+                {**dict(row), "instrument": instrument}
+                for row in rows
+            )
         self._history = {
-            str(key): deque(list(rows), maxlen=self.window)
-            for key, rows in (state.get("history") or {}).items()
+            instrument: deque(
+                sorted(rows, key=lambda row: str(row.get("datetime") or ""))[-self.window:],
+                maxlen=self.window,
+            )
+            for instrument, rows in merged_history.items()
         }
-        self._last_signal = {
-            str(key): int(value) for key, value in (state.get("last_signal") or {}).items()
-        }
+        self._last_signal = {}
+        conflicts: set[str] = set()
+        for key, value in (state.get("last_signal") or {}).items():
+            instrument = _instrument_key(str(key))
+            signal = int(value)
+            if instrument in self._last_signal and self._last_signal[instrument] != signal:
+                conflicts.add(instrument)
+            self._last_signal[instrument] = signal
+        for instrument in conflicts:
+            self._last_signal.pop(instrument, None)
+
+
+def _instrument_key(value: str) -> str:
+    code, exchange = normalize_symbol(str(value))
+    return symbol_key(code, exchange)

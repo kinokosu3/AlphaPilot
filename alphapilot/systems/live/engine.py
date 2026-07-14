@@ -203,29 +203,39 @@ class LiveEngine:
         self._audit("closed", payload, source=self.trade_gateway.name)
 
     # ---- guarded actions ------------------------------------------------- #
-    def submit(self, req: OrderRequest) -> str | None:
+    def submit(self, req: OrderRequest, *, origin: str = "manual") -> str | None:
         """The single guarded submission path.
 
         Returns the broker order id, or ``None`` when the order was not routed
         (dry-run, halted, or rejected by the risk gate — all audited).
         """
         if self.runmode.is_dry_run():
-            self._audit("dry_run_intent", req, reference=req.reference)
+            self._audit("dry_run_intent", {"origin": origin, "req": _req(req)}, reference=req.reference)
             return None
         if not self.runmode.can_submit_orders():
-            self._audit("blocked", {"reason": f"halted:{self.runmode.halt_reason}", "req": _req(req)}, reference=req.reference)
+            reason = (
+                f"halted:{self.runmode.halt_reason}"
+                if self.runmode.halted
+                else f"routing_disabled_in_{self.runmode.mode}"
+            )
+            self._audit("blocked", {"origin": origin, "rule": "run_mode", "reason": reason, "req": _req(req)}, reference=req.reference)
             return None
         if self.risk is not None:
             verdict = self.risk.check(req, self.oms, self.session, self.runmode)
             if not verdict.ok:
                 self._audit(
                     "rejected",
-                    {"rule": verdict.rule, "reason": verdict.reason, "req": _req(req)},
+                    {"origin": origin, "rule": verdict.rule, "reason": verdict.reason, "req": _req(req)},
                     reference=req.reference,
                 )
                 return None
         order_id = self.trade_gateway.send_order(req)
-        self._audit("submit", {"order_id": order_id, "req": _req(req)}, order_id=order_id, reference=req.reference)
+        self._audit(
+            "submit",
+            {"origin": origin, "order_id": order_id, "req": _req(req)},
+            order_id=order_id,
+            reference=req.reference,
+        )
         return order_id
 
     def cancel(self, order: Order | str, *, active_only: bool = True) -> dict[str, Any]:

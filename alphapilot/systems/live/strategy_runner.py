@@ -24,7 +24,7 @@ arrive via the engine's tick listener independently of stepping.
 from __future__ import annotations
 
 from dataclasses import asdict
-from datetime import date, datetime
+from datetime import date, datetime, time as datetime_time, timedelta
 from collections import deque
 import hashlib
 import json
@@ -37,7 +37,11 @@ from alphapilot.systems.live.executor import orders_from_intents
 from alphapilot.systems.live.fsm.session_fsm import SessionState
 from alphapilot.systems.live.types import OrderRequest, TickData
 from alphapilot.systems.live.state_io import atomic_write_json
+from alphapilot.systems.live.journal import InMemoryExecutionJournal
+from alphapilot.systems.live.routing import AutomatedOrderRouter, utc_now_iso
+from alphapilot.systems.live.config import RunMode, requires_live_market_safety
 from alphapilot.systems.timing.base import OrderIntent
+from alphapilot.systems.trading.ports import RouteContext, RouteOrigin
 
 
 class BarStrategy(Protocol):
@@ -64,6 +68,9 @@ class LiveTimingRunner:
         config_hash: str = "",
         state_path: str | Path | None = None,
         bar_source: Any | None = None,
+        execution_journal: Any | None = None,
+        route_port: Any | None = None,
+        runtime_id: str = "",
     ) -> None:
         if freq not in ("day", "min"):
             raise ValueError(f"freq must be 'day' or 'min', got {freq!r}")
@@ -77,6 +84,7 @@ class LiveTimingRunner:
         self.config_hash = str(config_hash or "")
         self.state_path = Path(state_path).expanduser() if state_path else None
         self.bar_source = bar_source
+        self.runtime_id = str(runtime_id or "")
 
         interval = DAY_INTERVAL if freq == "day" else int(bar_seconds)
         self.interval = interval
@@ -92,14 +100,25 @@ class LiveTimingRunner:
         self._stopped = False
         self._reconcile_required = False
         self._bar_queue: deque[Bar] = deque(maxlen=10_000)
-        from alphapilot.systems.trading.store import StrategyRuntimeStore
-
-        store_root = (
-            self.state_path.parents[2]
-            if self.state_path is not None and len(self.state_path.parents) >= 3
-            else Path(engine.ledger.root).parent
-        )
-        self.runtime_store = StrategyRuntimeStore(store_root / "strategy_runtime.sqlite3")
+        self.runtime_store = execution_journal or InMemoryExecutionJournal()
+        if route_port is not None:
+            self.route_port = route_port
+        elif engine.config.mode in {RunMode.LIVE, RunMode.SHADOW}:
+            self.route_port = AutomatedOrderRouter(
+                engine,
+                None,
+                lambda: RouteContext(
+                    origin=RouteOrigin.AUTOMATED,
+                    instance_id=self.instance_id,
+                    config_hash=self.config_hash,
+                    deployment_level=engine.config.mode,
+                    runtime_id=self.runtime_id,
+                ),
+            )
+        else:
+            # Standalone PAPER construction is retained for old tests and CLI.
+            self.route_port = engine
+        self._last_cancel_report: dict[str, Any] = {}
 
     # ---- lifecycle ---------------------------------------------------------- #
     def start(self) -> None:
@@ -121,14 +140,16 @@ class LiveTimingRunner:
             sync({position.key for position in self.engine.oms.get_positions() if position.volume > 0})
         self._started = True
         self._checkpoint()
+        self._heartbeat()
 
     def pause(self, *, cancel_active: bool = True) -> dict[str, Any]:
         """Pause strategy signal generation without disconnecting market data."""
         if not self._stopped:
             self._paused = True
             if cancel_active:
-                self._cancel_owned_orders()
+                self._last_cancel_report = self._cancel_owned_orders()
         self._checkpoint()
+        self._heartbeat()
         return self.status()
 
     def resume(self) -> dict[str, Any]:
@@ -138,6 +159,7 @@ class LiveTimingRunner:
         if self._started and not self._stopped:
             self._paused = False
         self._checkpoint()
+        self._heartbeat()
         return self.status()
 
     def stop(self) -> dict[str, Any]:
@@ -147,7 +169,7 @@ class LiveTimingRunner:
         self.pending_requests = []
         self.pending_intents = []
         self.algo = None
-        self._cancel_owned_orders()
+        self._last_cancel_report = self._cancel_owned_orders()
         if self.bar_source is not None:
             self.bar_source.remove_bar_listener(self.interval, self._enqueue_bar)
         else:
@@ -156,6 +178,7 @@ class LiveTimingRunner:
         if callable(stop_strategy):
             stop_strategy("runner_stopped")
         self._checkpoint()
+        self._heartbeat()
         return self.status()
 
     def status(self) -> dict[str, Any]:
@@ -173,7 +196,9 @@ class LiveTimingRunner:
             "last_session": None if self._last_session_state is None else self._last_session_state.value,
             "instance_id": self.instance_id,
             "config_hash": self.config_hash,
+            "runtime_id": self.runtime_id,
             "reconcile_required": self._reconcile_required,
+            "cancel_report": dict(self._last_cancel_report),
             "queued_bars": len(self._bar_queue),
             "lifecycle": (
                 "stopped" if self._stopped else
@@ -198,6 +223,7 @@ class LiveTimingRunner:
 
         state = self.engine.session.tick()
         if self._paused:
+            self._heartbeat()
             status = self.status()
             status["session"] = state.value
             return status
@@ -221,6 +247,7 @@ class LiveTimingRunner:
             if self.algo.step() == AlgoState.DONE:
                 self.algo = None
 
+        self._heartbeat()
         return {
             **self.status(),
             "session": state.value,
@@ -230,7 +257,14 @@ class LiveTimingRunner:
     def _on_bar_closed(self, bar: Bar) -> None:
         if self._paused or self._stopped:
             return
-        intents = self.strategy.on_bar(bar)
+        try:
+            intents = self.strategy.on_bar(bar)
+        except Exception as exc:
+            self._record_stage_event(
+                "unresolved_errors",
+                details={"where": "strategy.on_bar", "error": f"{type(exc).__name__}: {exc}"},
+            )
+            raise
         if not intents:
             return
         if self.freq == "min":
@@ -241,11 +275,7 @@ class LiveTimingRunner:
             )
             self._journal_decision(decision_id, intents)
             for req in self._journal_requests(decision_id, requests, status="routing"):
-                order_id = self.engine.submit(req)
-                self.runtime_store.update_child_order(
-                    req.reference, status="submitted" if order_id else "rejected",
-                    order_id=str(order_id or ""),
-                )
+                self.submit(req)
         else:
             # Persist decisions, not stale close-priced orders. Requests are
             # built from next-session quotes immediately before the auction.
@@ -271,6 +301,28 @@ class LiveTimingRunner:
             return
         prices: dict[str, float] = {}
         now = self.engine.session._now_fn() if hasattr(self.engine.session, "_now_fn") else datetime.now()
+        signal_days = self._pending_signal_days()
+        if len(signal_days) != 1:
+            self._discard_pending_target(
+                "pending daily intents do not share one valid signal session",
+                event_type="unresolved_errors",
+            )
+            return
+        effective_day = self._next_trading_day(next(iter(signal_days)), now)
+        if effective_day is None:
+            self._discard_pending_target(
+                "the next trading session could not be resolved from the configured calendar",
+                event_type="unresolved_errors",
+            )
+            return
+        if now.date() < effective_day:
+            return
+        if now.date() > effective_day:
+            self._discard_pending_target(
+                f"daily target for {effective_day.isoformat()} expired before execution",
+                event_type="expired_targets",
+            )
+            return
         for intent in self.pending_intents:
             from alphapilot.systems.live.types import normalize_symbol, symbol_key
 
@@ -278,7 +330,11 @@ class LiveTimingRunner:
             tick = self.engine.oms.get_tick(symbol_key(code, exchange))
             if tick is None or tick.last_price <= 0:
                 return
-            if self.engine.config.mode == "live" and tick.datetime is not None and tick.datetime.date() != now.date():
+            if (
+                requires_live_market_safety(self.engine.config.mode)
+                and tick.datetime is not None
+                and tick.datetime.date() != now.date()
+            ):
                 return
             prices[intent.instrument] = float(tick.last_price)
         decision_id = self._decision_id(self.pending_intents)
@@ -290,7 +346,60 @@ class LiveTimingRunner:
         self.pending_intents = []
         requests = self._journal_requests(decision_id, requests, status="armed")
         if requests:
-            self.algo = CallAuctionAlgo(self.engine, requests, window=self.auction_window)
+            self.algo = CallAuctionAlgo(
+                self.engine,
+                requests,
+                window=self.auction_window,
+                route_port=self,
+            )
+        self._checkpoint()
+
+    def _pending_signal_days(self) -> set[date]:
+        days: set[date] = set()
+        for intent in self.pending_intents:
+            value = getattr(intent, "datetime", None)
+            if isinstance(value, datetime):
+                days.add(value.date())
+                continue
+            if isinstance(value, date):
+                days.add(value)
+                continue
+            try:
+                days.add(date.fromisoformat(str(value)[:10]))
+            except ValueError:
+                return set()
+        return days
+
+    def _next_trading_day(self, signal_day: date, now: datetime) -> date | None:
+        predicate = getattr(self.engine.session, "_is_trading_day_fn", None)
+        if not callable(predicate):
+            return None
+        for offset in range(1, 32):
+            candidate = signal_day + timedelta(days=offset)
+            probe = datetime.combine(candidate, datetime_time(12), tzinfo=now.tzinfo)
+            try:
+                if predicate(probe):
+                    return candidate
+            except Exception:  # noqa: BLE001 - calendar failure must fail closed
+                return None
+        return None
+
+    def _discard_pending_target(self, reason: str, *, event_type: str) -> None:
+        count = len(self.pending_intents)
+        self.pending_intents = []
+        self._record_stage_event(
+            event_type,
+            details={"reason": reason, "discarded_intents": count},
+        )
+        self.engine.ledger.record(
+            "blocked",
+            {
+                "origin": "automated",
+                "rule": "effective_session",
+                "reason": reason,
+                "instance_id": self.instance_id,
+            },
+        )
         self._checkpoint()
 
     def _journal_decision(self, decision_id: str, intents: list[Any]) -> None:
@@ -309,12 +418,21 @@ class LiveTimingRunner:
         plan_id = hashlib.sha256(f"plan:{decision_id}".encode("utf-8")).hexdigest()[:24]
         payload = [order_request_to_dict(request) for request in requests]
         self.runtime_store.record_plan(plan_id, decision_id, self.instance_id, payload, status)
-        return [
-            request for request in requests
+        accepted: list[OrderRequest] = []
+        for request in requests:
             if self.runtime_store.record_child_order(
-                request.reference, plan_id, order_request_to_dict(request), status=status
-            )
-        ]
+                request.reference,
+                plan_id,
+                order_request_to_dict(request),
+                status=status,
+            ):
+                accepted.append(request)
+            else:
+                self._record_stage_event(
+                    "duplicate_routes",
+                    details={"reference": request.reference, "plan_id": plan_id},
+                )
+        return accepted
 
     def _decision_id(self, intents: list[Any]) -> str:
         payload = json.dumps(
@@ -345,16 +463,71 @@ class LiveTimingRunner:
     def _is_ready(self) -> bool:
         history = getattr(self.strategy, "_history", {})
         required = int(getattr(self.strategy, "min_bars", 1) or 1)
-        return bool(history) and all(len(rows) >= required for rows in history.values())
+        if not history or not self.symbols:
+            return False
+        from alphapilot.systems.live.types import normalize_symbol, symbol_key
 
-    def _cancel_owned_orders(self) -> None:
+        expected = []
+        for raw_symbol in self.symbols:
+            code, exchange = normalize_symbol(raw_symbol)
+            expected.append(symbol_key(code, exchange))
+        return all(len(history.get(key, ())) >= required for key in expected)
+
+    def _cancel_owned_orders(self) -> dict[str, Any]:
         prefix = f"{self.instance_id}:"
+        report: dict[str, Any] = {"attempted": [], "cancelled": [], "errors": []}
         for order in list(self.engine.oms.get_active_orders()):
             if str(order.reference).startswith(prefix):
+                report["attempted"].append(str(order.order_id))
                 try:
-                    self.engine.cancel(order)
-                except Exception:  # noqa: BLE001 - halt remains fail-closed
-                    pass
+                    result = self.engine.cancel(order)
+                    if result.get("cancelled"):
+                        report["cancelled"].append(str(order.order_id))
+                    else:
+                        report["errors"].append({
+                            "order_id": str(order.order_id),
+                            "reason": result.get("reason") or "cancel was not accepted",
+                        })
+                except Exception as exc:  # noqa: BLE001 - halt remains fail-closed
+                    report["errors"].append({
+                        "order_id": str(order.order_id),
+                        "reason": f"{type(exc).__name__}: {exc}",
+                    })
+        return report
+
+    def submit(self, request: OrderRequest) -> str | None:
+        """Route one already-journaled automated child and persist its result."""
+
+        order_id = self.route_port.submit(request)
+        self.runtime_store.update_child_order(
+            request.reference,
+            status="submitted" if order_id else "rejected",
+            order_id=str(order_id or ""),
+        )
+        if not order_id:
+            events = self.engine.ledger.events(reference=request.reference, limit=5)
+            payload: dict[str, Any] = {}
+            for event in reversed(events):
+                if event.get("kind") in {"blocked", "rejected"}:
+                    candidate = event.get("payload")
+                    payload = candidate if isinstance(candidate, dict) else {}
+                    break
+            rule = str(payload.get("rule") or "")
+            self._record_stage_event(
+                "route_rejections",
+                details={"reference": request.reference, "rule": rule},
+            )
+            if rule == "duplicate":
+                self._record_stage_event(
+                    "duplicate_routes",
+                    details={"reference": request.reference, "source": "risk_gate"},
+                )
+            if rule == "max_position_pct":
+                self._record_stage_event(
+                    "position_breaches",
+                    details={"reference": request.reference},
+                )
+        return order_id
 
     def snapshot(self) -> dict[str, Any]:
         strategy_state = getattr(self.strategy, "snapshot", lambda: {})()
@@ -390,7 +563,60 @@ class LiveTimingRunner:
             raise RuntimeError("runner recovery has unresolved reconciliation warnings")
         self._reconcile_required = False
         self._checkpoint()
+        self._heartbeat()
         return self.status()
+
+    def mark_reconcile_required(self) -> dict[str, Any]:
+        """Force a restored or newly started LIVE runner into fail-closed pause."""
+
+        self._reconcile_required = True
+        self._paused = True
+        self._checkpoint()
+        self._heartbeat()
+        return self.status()
+
+    def _heartbeat(self) -> None:
+        stage = str(self.engine.config.mode)
+        if stage in {RunMode.PAPER, RunMode.SHADOW}:
+            record_session = getattr(self.runtime_store, "record_stage_session", None)
+            state_value = str(getattr(self.engine.session.state, "value", self.engine.session.state))
+            if callable(record_session) and state_value not in {"closed", "pre_open", "post_close"}:
+                now = (
+                    self.engine.session._now_fn()
+                    if hasattr(self.engine.session, "_now_fn") else datetime.now()
+                )
+                record_session(
+                    self.instance_id,
+                    config_hash=self.config_hash,
+                    stage=stage,
+                    session=now.date().isoformat(),
+                )
+        if not self.runtime_id:
+            return
+        record = getattr(self.runtime_store, "record_runtime_heartbeat", None)
+        if not callable(record):
+            return
+        record(
+            self.instance_id,
+            config_hash=self.config_hash,
+            runtime_id=self.runtime_id,
+            heartbeat_at=utc_now_iso(),
+            observed_state=self.status()["lifecycle"],
+        )
+
+    def _record_stage_event(self, event_type: str, *, details: Any = None) -> None:
+        stage = str(self.engine.config.mode)
+        if stage not in {RunMode.PAPER, RunMode.SHADOW}:
+            return
+        record = getattr(self.runtime_store, "record_stage_event", None)
+        if callable(record):
+            record(
+                self.instance_id,
+                config_hash=self.config_hash,
+                stage=stage,
+                event_type=event_type,
+                details=details,
+            )
 
     def _checkpoint(self) -> None:
         if self.state_path is not None:

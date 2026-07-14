@@ -24,7 +24,7 @@ from alphapilot.systems.live.engine import LiveEngine
 from alphapilot.systems.live.ledger import Ledger
 from alphapilot.systems.live.strategy_runner import LiveTimingRunner
 from alphapilot.systems.live.types import Exchange, TickData
-from alphapilot.systems.timing.base import TimingContext
+from alphapilot.systems.timing.base import OrderIntent, TimingContext
 from alphapilot.systems.timing.live_adapter import BatchStrategyAdapter
 
 KEY = "600000.SSE"
@@ -88,6 +88,19 @@ def test_adapter_warm_up_suppresses_spurious_first_intent() -> None:
     history = pd.DataFrame([make_bar(d, 10.0 + d * 0.1).as_row() for d in range(1, 4)])
     adapter.warm_up(history)                                 # ends long (rising closes)
     assert adapter.on_bar(make_bar(6, 11.0)) == []           # still long: silence
+
+
+def test_adapter_normalizes_qlib_and_live_symbols_into_one_history() -> None:
+    adapter = BatchStrategyAdapter(MomentumToy(), min_bars=2)
+    history = pd.DataFrame([
+        {**make_bar(1, 10.0).as_row(), "instrument": "SH600000"},
+        {**make_bar(2, 10.2).as_row(), "instrument": "SH600000"},
+    ])
+
+    adapter.warm_up(history)
+
+    assert list(adapter._history) == [KEY]
+    assert adapter.on_bar(make_bar(3, 10.4)) == []
 
 
 def test_adapter_reconciles_first_flat_signal_with_real_holding() -> None:
@@ -157,6 +170,36 @@ def test_day_mode_flat_signal_arms_nothing(tmp_path: Path) -> None:
     assert state["algo_armed"] is False and state["pending_requests"] == 0
 
 
+def test_day_mode_discards_target_after_its_effective_session(tmp_path: Path) -> None:
+    clock = SimulatedClock(datetime(2026, 7, 8, 9, 16))
+    engine = make_engine(tmp_path, clock)
+    runner = LiveTimingRunner(
+        engine,
+        BatchStrategyAdapter(MomentumToy(), min_bars=2),
+        ["600000"],
+        freq="day",
+        instance_id="ma",
+        config_hash="hash",
+    )
+    runner.start()
+    runner.pending_intents = [
+        OrderIntent(
+            datetime="2026-07-06",
+            instrument=KEY,
+            action="target_percent",
+            target_percent=0.2,
+            reason="stale",
+        )
+    ]
+
+    state = runner.step()
+
+    assert state["pending_intents"] == 0
+    assert engine.oms.get_position(KEY) is None
+    blocked = engine.ledger.events(kind="blocked")
+    assert blocked[-1]["payload"]["rule"] == "effective_session"
+
+
 # --------------------------------------------------------------------------- #
 # runner: minute mode (bar close -> immediate submission)
 # --------------------------------------------------------------------------- #
@@ -224,6 +267,17 @@ def test_runner_pause_resume_stop_lifecycle(tmp_path: Path) -> None:
     stopped = runner.stop()
     assert stopped["stopped"] is True
     assert runner.step()["session"] is None
+
+
+def test_runner_stays_warming_until_every_configured_symbol_has_history(tmp_path: Path) -> None:
+    clock = SimulatedClock(datetime(2026, 7, 6, 9, 31))
+    engine = make_engine(tmp_path, clock)
+    adapter = BatchStrategyAdapter(MomentumToy(), min_bars=2)
+    adapter.warm_up(pd.DataFrame([make_bar(1, 10.0).as_row(), make_bar(2, 10.2).as_row()]))
+    runner = LiveTimingRunner(engine, adapter, ["600000", "000001.SZSE"], freq="day")
+    runner.start()
+
+    assert runner.status()["lifecycle"] == "warming_up"
 
 
 def test_runner_checkpoint_requires_reconcile_before_resume(tmp_path: Path) -> None:

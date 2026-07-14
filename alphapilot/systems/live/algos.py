@@ -32,8 +32,16 @@ class CallAuctionAlgo:
     14:57–15:00 closing auction.
     """
 
-    def __init__(self, engine: Any, requests: list[OrderRequest], *, window: str = "open") -> None:
+    def __init__(
+        self,
+        engine: Any,
+        requests: list[OrderRequest],
+        *,
+        window: str = "open",
+        route_port: Any | None = None,
+    ) -> None:
         self.engine = engine
+        self.route_port = route_port or engine
         self.requests = list(requests)
         self.window = window
         self.state = AlgoState.ARMED
@@ -47,7 +55,7 @@ class CallAuctionAlgo:
         session_state = self.engine.session.tick()
         if self.state == AlgoState.ARMED and session_state == self._target_state:
             for req in self.requests:
-                oid = self.engine.submit(req)
+                oid = self.route_port.submit(req)
                 if oid:
                     self.order_ids.append(oid)
             self.state = AlgoState.SUBMITTED
@@ -60,8 +68,17 @@ class CallAuctionAlgo:
 class TwapAlgo:
     """Slice one order into ``slices`` children across the continuous session."""
 
-    def __init__(self, engine: Any, request: OrderRequest, *, slices: int = 4, lot_size: int = 100) -> None:
+    def __init__(
+        self,
+        engine: Any,
+        request: OrderRequest,
+        *,
+        slices: int = 4,
+        lot_size: int = 100,
+        route_port: Any | None = None,
+    ) -> None:
         self.engine = engine
+        self.route_port = route_port or engine
         self.request = request
         self.slices = max(1, int(slices))
         self.lot_size = lot_size
@@ -97,7 +114,7 @@ class TwapAlgo:
                 direction=self.request.direction, volume=vol, price=self.request.price,
                 type=self.request.type, reference=f"{self.request.reference}:twap{self.submitted}",
             )
-            oid = self.engine.submit(child)
+            oid = self.route_port.submit(child)
             if oid:
                 self.order_ids.append(oid)
             self.submitted += 1

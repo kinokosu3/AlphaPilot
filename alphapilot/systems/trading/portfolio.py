@@ -7,8 +7,7 @@ import hashlib
 import math
 from typing import Iterable
 
-from alphapilot.systems.live.targets import AccountSnapshot, TargetPortfolio
-from alphapilot.systems.live.types import normalize_symbol, symbol_key
+from alphapilot.systems.trading.contracts import AccountSnapshot, TargetPortfolio
 from alphapilot.systems.trading.domain import SignalRecord, StrategyInstanceConfig, TargetWeights
 
 
@@ -42,8 +41,7 @@ class AccountSizer:
         holdings: dict[str, float] = {}
         normalized_prices: dict[str, float] = {}
         for raw_symbol, weight in sorted(weights.weights.items()):
-            code, exchange = normalize_symbol(raw_symbol)
-            key = symbol_key(code, exchange)
+            key = _canonical_instrument(raw_symbol)
             price = float(prices.get(raw_symbol) or prices.get(key) or 0.0)
             if price <= 0:
                 raise ValueError(f"missing positive execution price for {raw_symbol}")
@@ -81,3 +79,33 @@ def _floor_lot(value: float, lot: int) -> float:
     if lot > 0:
         return float(math.floor(value / lot) * lot)
     return float(math.floor(max(value, 0.0)))
+
+
+def _canonical_instrument(symbol: str) -> str:
+    """Normalize common A-share keys without importing the live subsystem."""
+
+    raw = str(symbol).strip().upper().replace(" ", "")
+    aliases = {"SH": "SSE", "SZ": "SZSE", "BJ": "BSE"}
+    exchange_tags = {"SSE", "SZSE", "BSE", "SHFE", "DCE", "CZCE", "CFFEX", "INE"}
+    for separator in (".", "-", "_"):
+        if separator not in raw:
+            continue
+        left, right = raw.split(separator, 1)
+        left_exchange = aliases.get(left, left if left in exchange_tags else "")
+        right_exchange = aliases.get(right, right if right in exchange_tags else "")
+        if left_exchange:
+            return f"{right}.{left_exchange}"
+        if right_exchange:
+            return f"{left}.{right_exchange}"
+    for prefix, exchange in aliases.items():
+        if raw.startswith(prefix) and raw[len(prefix):].isdigit():
+            return f"{raw[len(prefix):]}.{exchange}"
+    if raw.isdigit():
+        exchange = (
+            "SSE" if raw[0] in {"5", "6"} or raw.startswith("11")
+            else "SZSE" if raw[0] in {"0", "1", "2", "3"}
+            else "BSE" if raw[0] in {"4", "8"} or raw.startswith("920")
+            else "UNKNOWN"
+        )
+        return f"{raw}.{exchange}"
+    return f"{raw}.UNKNOWN"

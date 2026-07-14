@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from alphapilot.kernel.base import BaseSystem
-from alphapilot.systems.live.config import LiveConfig, RunMode
+from alphapilot.systems.live.config import LiveConfig, RunMode, uses_real_providers
 
 if TYPE_CHECKING:
     from alphapilot.kernel.context import Context
@@ -36,10 +36,10 @@ class LiveSystem(BaseSystem):
     def make_broker(self):
         """Pick the broker gateway for the configured mode/broker.
 
-        DRY_RUN / PAPER -> in-process :class:`PaperBroker`; LIVE -> resolve through
+        DRY_RUN / PAPER -> in-process :class:`PaperBroker`; SHADOW / LIVE -> resolve through
         the broker registry (native gateways constructed directly, vn.py gateways
         wrapped in an adapter — either way the SDK loads lazily, here)."""
-        if self.config.mode == RunMode.LIVE:
+        if uses_real_providers(self.config.mode):
             from alphapilot.systems.live.brokers.registry import create_gateway
 
             return create_gateway(self.config.trade_broker or self.config.broker)
@@ -54,7 +54,7 @@ class LiveSystem(BaseSystem):
 
         quote_gateway = None
         selected_broker = broker
-        if selected_broker is None and self.config.mode == RunMode.LIVE:
+        if selected_broker is None and uses_real_providers(self.config.mode):
             from alphapilot.systems.live.brokers.registry import create_gateway_pair
 
             selected_broker, quote_gateway = create_gateway_pair(
@@ -101,6 +101,7 @@ class LiveSystem(BaseSystem):
         quote_provider: str | None = None,
         ledger_dir: str | None = None,
         state_dir: str | None = None,
+        runtime_id: str | None = None,
         now_fn=None,
         is_trading_day_fn=None,
     ):
@@ -121,11 +122,48 @@ class LiveSystem(BaseSystem):
             ledger_dir=ledger_dir,
             state_dir=state_dir,
         )
+        execution_journal = None
+        route_authorizer = None
+        try:
+            # A journal/authorizer is bound to one state directory.  Reusing it
+            # for a runtime pointed at another directory could authorize orders
+            # against the wrong deployment database, so fail closed instead.
+            configured_state = Path(self.config.state_dir).expanduser().resolve()
+            runtime_state = Path(cfg.state_dir).expanduser().resolve()
+            if runtime_state == configured_state and self.context.engine.has_system("trading"):
+                trading = self.context.engine.get_system("trading")
+                execution_journal = getattr(trading, "store", None)
+                route_authorizer = getattr(trading, "route_authorizer", None)
+            elif runtime_state != configured_state:
+                # Legacy PAPER daemons may intentionally use an isolated state
+                # directory. Give that runtime its own journal and authorizer;
+                # never reuse the kernel's differently-bound deployment truth.
+                from alphapilot.systems.trading.authorization import AutomatedRouteAuthorizer
+                from alphapilot.systems.trading.store import StrategyRuntimeStore
+
+                execution_journal = StrategyRuntimeStore(
+                    runtime_state / "strategy_runtime.sqlite3"
+                )
+                route_authorizer = AutomatedRouteAuthorizer(execution_journal)
+        except (KeyError, RuntimeError):
+            # Standalone PAPER runtimes retain an in-memory compatibility
+            # journal; automated LIVE routing fails closed without authorizer.
+            pass
         return LiveRuntime.create(
             cfg,
             now_fn=now_fn,
             is_trading_day_fn=is_trading_day_fn or self._trading_day_predicate(mode=cfg.mode),
+            execution_journal=execution_journal,
+            route_authorizer=route_authorizer,
+            runtime_id=runtime_id,
         )
+
+    def runtime_control(self):
+        """Return the concrete daemon adapter behind the trading control port."""
+
+        from alphapilot.systems.live.control import DaemonRuntimeControl
+
+        return DaemonRuntimeControl(self.config)
 
     def _trading_day_predicate(self, *, mode: str | None = None):
         """Use the local Qlib exchange calendar; LIVE fails closed if absent."""
@@ -149,13 +187,13 @@ class LiveSystem(BaseSystem):
                 continue
         if days:
             return lambda dt: dt.date().isoformat() in days
-        if selected_mode == RunMode.LIVE:
+        if uses_real_providers(selected_mode):
             return lambda _dt: False
         return lambda dt: dt.weekday() < 5
 
     # ---- introspection (used by CLI / portal) ---------------------------- #
     def modes(self) -> list[str]:
-        return [RunMode.DRY_RUN, RunMode.PAPER, RunMode.LIVE]
+        return [RunMode.DRY_RUN, RunMode.PAPER, RunMode.SHADOW, RunMode.LIVE]
 
     def snapshot(self) -> dict[str, Any]:
         """Non-secret view of the resolved live configuration."""

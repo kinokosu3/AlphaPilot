@@ -1062,6 +1062,63 @@ def create_app(
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
+    @app.post("/api/trading/stage-runs/{instance_id}/{stage}/start")
+    def trading_stage_run_start(instance_id: str, stage: str) -> dict[str, Any]:
+        try:
+            return _jsonable(
+                _engine(app).get_system("trading").start_stage_run(instance_id, stage)
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/trading/stage-runs/{run_id}/finish")
+    def trading_stage_run_finish(run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _jsonable(
+                _engine(app).get_system("trading").finish_stage_run(run_id, payload)
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/trading/stage-runs/{instance_id}/{stage}/evaluate")
+    def trading_stage_run_evaluate(instance_id: str, stage: str) -> dict[str, Any]:
+        try:
+            return _jsonable(
+                _engine(app).get_system("trading").evaluate_stage(instance_id, stage)
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.get("/api/trading/kill-switches")
+    def trading_kill_switches() -> dict[str, Any]:
+        try:
+            return _jsonable({
+                "kill_switches": _engine(app).get_system("trading").list_kill_switches()
+            })
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/trading/kill-switches/{scope_type}/{scope_id}/{action}")
+    def trading_kill_switch(
+        scope_type: str,
+        scope_id: str,
+        action: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            if action not in {"engage", "release"}:
+                raise ValueError("kill-switch action must be engage or release")
+            return _jsonable(
+                _engine(app).get_system("trading").set_kill_switch(
+                    scope_type,
+                    scope_id,
+                    active=action == "engage",
+                    reason=str((payload or {}).get("reason") or ""),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
     @app.get("/api/timing/jobs/{job_id}/detail")
     def timing_job_detail(job_id: str, max_rows: int = 1000) -> dict[str, Any]:
         try:
@@ -2052,6 +2109,7 @@ def create_app(
                     state_dir=payload.get("state_dir"),
                     wait=bool(payload.get("wait", True)),
                     timeout=float(payload.get("timeout") or 5.0),
+                    confirm_live=bool(payload.get("confirm_live", False)),
                 )
             )
         except Exception as exc:  # noqa: BLE001

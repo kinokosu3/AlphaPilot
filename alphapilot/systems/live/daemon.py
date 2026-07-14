@@ -10,15 +10,16 @@ import subprocess
 import sys
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from alphapilot.systems.live.config import LiveConfig, RunMode
+from alphapilot.systems.live.config import LiveConfig, RunMode, uses_real_providers
 from alphapilot.systems.live.market_data import market_snapshot_path
 from alphapilot.systems.live.runtime import clone_config, require_live_confirmation
 from alphapilot.systems.live.state_io import atomic_write_json
 from alphapilot.systems.live.targets import TargetPortfolio, parse_target_positions
+from alphapilot.systems.trading.ports import RouteContext, RouteOrigin
 
 
 def daemon_path(state_dir: str | Path | None = None) -> Path:
@@ -224,18 +225,21 @@ def start_daemon(
     state_dir: str | Path | None = None,
     duration: float | None = None,
     timing_strategy: str | None = None,
+    strategy_instance_id: str | None = None,
     timing_params: dict[str, Any] | None = None,
     timing_freq: str = "day",
     bar_seconds: int = 60,
     min_bars: int = 30,
     window: int = 250,
     record_market_data: bool | None = None,
+    runtime_id: str | None = None,
 ) -> dict[str, Any]:
     selected_mode = mode or config.mode
     trade_override = trade_broker or broker
-    selected_broker = trade_override or ("paper" if selected_mode != RunMode.LIVE else config.trade_broker)
+    real_providers = uses_real_providers(selected_mode)
+    selected_broker = trade_override or (config.trade_broker if real_providers else "paper")
     selected_quote = quote_provider or (
-        "paper" if selected_mode != RunMode.LIVE
+        "paper" if not real_providers
         else selected_broker if trade_override
         else config.quote_provider or selected_broker
     )
@@ -249,7 +253,7 @@ def start_daemon(
         state_dir=state_dir,
     )
     plugin_selection = None
-    if cfg.mode == RunMode.LIVE:
+    if uses_real_providers(cfg.mode):
         from alphapilot.systems.live.brokers.registry import (
             missing_quote_setting_fields,
             missing_setting_fields,
@@ -275,16 +279,21 @@ def start_daemon(
             raise ValueError("missing live provider env fields: " + ", ".join(sorted(set(missing))))
 
     symbols = _normalize_symbols(symbols or [])
-    if timing_strategy and not symbols:
-        raise ValueError("symbols are required when timing_strategy is enabled")
+    if (timing_strategy or strategy_instance_id) and not symbols:
+        raise ValueError("symbols are required when a strategy runner is enabled")
 
     current = load_daemon(cfg.state_dir)
-    if current.get("running"):
+    if current.get("alive") and current.get("status") in {"starting", "connecting", "running"}:
         return {"started": False, **current}
 
     cfg.state_dir.mkdir(parents=True, exist_ok=True)
     cfg.ledger_dir.mkdir(parents=True, exist_ok=True)
     log_path = cfg.state_dir / "runtime_daemon.log"
+    runtime_identifier = str(runtime_id or uuid.uuid4().hex)
+    deprecation_warning = (
+        "timing_strategy is deprecated for daemon deployment; use strategy_instance_id"
+        if timing_strategy and not strategy_instance_id else ""
+    )
     args = [
         sys.executable,
         "-m",
@@ -306,6 +315,8 @@ def start_daemon(
         str(cfg.ledger_dir),
         "--state-dir",
         str(cfg.state_dir),
+        "--runtime-id",
+        runtime_identifier,
     ]
     if symbols:
         args.extend(["--symbols", ",".join(symbols)])
@@ -323,6 +334,8 @@ def start_daemon(
         args.extend(["--window", str(int(window))])
         if timing_params:
             args.extend(["--timing-params", json.dumps(timing_params, ensure_ascii=False)])
+    if strategy_instance_id:
+        args.extend(["--strategy-instance-id", str(strategy_instance_id)])
 
     with log_path.open("ab") as log:
         proc = subprocess.Popen(  # noqa: S603 - args are constructed, not shell-expanded
@@ -337,6 +350,8 @@ def start_daemon(
     meta = {
         "pid": proc.pid,
         "status": "starting",
+        "runtime_id": runtime_identifier,
+        "deprecation_warning": deprecation_warning,
         "alive": True,
         "starting": True,
         "running": False,
@@ -356,6 +371,7 @@ def start_daemon(
             bar_seconds=bar_seconds,
             min_bars=min_bars,
             window=window,
+            instance_id=strategy_instance_id,
         ),
         "ledger_dir": str(cfg.ledger_dir),
         "state_dir": str(cfg.state_dir),
@@ -492,6 +508,7 @@ def _apply_command(
                 offset=str(payload.get("offset") or "none"),
                 product=str(payload.get("product") or "equity"),
                 reference=str(payload.get("reference") or "daemon"),
+                route_context=RouteContext.manual(),
             )
             ack = (
                 runtime.wait_for_order_ack(str(order.get("order_id")), timeout=event_timeout)
@@ -540,7 +557,14 @@ def _apply_command(
                 target_weights={str(k): float(v) for k, v in (payload.get("target_weights") or {}).items()},
                 price_source=str(payload.get("price_source") or ""),
             )
-            routed = runtime.submit_target(target, route=route)
+            routed = runtime.submit_target(
+                target,
+                route=route,
+                route_context=RouteContext(
+                    origin=RouteOrigin.MANUAL,
+                    instance_id=target.instance_id,
+                ),
+            )
             fully_routed = bool(routed.get("fully_routed", True))
             result.update({
                 "message": (
@@ -602,7 +626,14 @@ def _apply_command(
                 persist_state=False,
             )
             target = to_target_portfolio(daily, source=payload.get("source"))
-            routed = runtime.submit_target(target, route=route)
+            routed = runtime.submit_target(
+                target,
+                route=route,
+                route_context=RouteContext(
+                    origin=RouteOrigin.MANUAL,
+                    instance_id=target.instance_id,
+                ),
+            )
             result.update({
                 "message": "model_target_submitted" if route else "model_target_planned",
                 "target": routed.get("target"),
@@ -625,7 +656,27 @@ def _apply_command(
             runner = _require_runner(runner_holder)
             result["message"] = "strategy_paused"
             result["runner_status"] = runner.pause()
+            confirmations, cancel_errors = _confirm_runner_cancellations(
+                runtime,
+                result["runner_status"],
+                timeout=_event_timeout(payload),
+            )
+            result["cancel_confirmations"] = confirmations
+            if cancel_errors:
+                result.update({
+                    "ok": False,
+                    "error": "one or more strategy orders could not be cancelled",
+                    "cancel_errors": cancel_errors,
+                })
+        elif action == "strategy_reconcile":
+            runner = _require_runner(runner_holder)
+            runner.pause()
+            recovery = runtime.recover()
+            result["message"] = "strategy_reconciled"
+            result["recovery"] = recovery
+            result["runner_status"] = runner.mark_reconciled(recovery)
         elif action == "strategy_resume":
+            require_live_confirmation(runtime.config, confirm_live=bool(payload.get("confirm_live", False)))
             runner = _require_runner(runner_holder)
             result["message"] = "strategy_resumed"
             result["runner_status"] = runner.resume()
@@ -633,6 +684,18 @@ def _apply_command(
             runner = _require_runner(runner_holder)
             result["message"] = "strategy_stopped"
             result["runner_status"] = runner.stop()
+            confirmations, cancel_errors = _confirm_runner_cancellations(
+                runtime,
+                result["runner_status"],
+                timeout=_event_timeout(payload),
+            )
+            result["cancel_confirmations"] = confirmations
+            if cancel_errors:
+                result.update({
+                    "ok": False,
+                    "error": "one or more strategy orders could not be cancelled",
+                    "cancel_errors": cancel_errors,
+                })
             if runner_holder is not None:
                 runner_holder["config"] = {**(runner_holder.get("config") or {}), "enabled": False}
         elif action == "strategy_start":
@@ -674,6 +737,7 @@ def _apply_command(
                 state_dir=runtime.config.state_dir,
                 strategy_instance_id=strategy_instance_id,
                 bar_source=None if runner_holder is None else runner_holder.get("bar_source"),
+                runtime=runtime,
             )
             if runner_holder is not None:
                 runner_holder["runner"] = runner
@@ -711,6 +775,26 @@ def _require_runner(runner_holder: dict[str, Any] | None):
     if runner is None:
         raise ValueError("strategy runner is not enabled")
     return runner
+
+
+def _confirm_runner_cancellations(
+    runtime: Any,
+    runner_status: dict[str, Any],
+    *,
+    timeout: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    cancel = runner_status.get("cancel_report") if isinstance(runner_status, dict) else {}
+    errors = list((cancel or {}).get("errors") or [])
+    confirmations: list[dict[str, Any]] = []
+    for order_id in (cancel or {}).get("attempted") or []:
+        confirmation = runtime.wait_for_order_terminal(str(order_id), timeout=timeout)
+        confirmations.append(confirmation)
+        if not confirmation.get("terminal"):
+            errors.append({
+                "order_id": str(order_id),
+                "reason": "cancel was not confirmed terminal before timeout",
+            })
+    return confirmations, errors
 
 
 def _runner_status(runner_holder: dict[str, Any] | None) -> dict[str, Any]:
@@ -759,7 +843,7 @@ def _runner_config(
     instance_id: str | None = None,
 ) -> dict[str, Any]:
     return {
-        "enabled": bool(timing_strategy),
+        "enabled": bool(timing_strategy or instance_id),
         "strategy": timing_strategy,
         "params": timing_params or {},
         "freq": timing_freq,
@@ -784,6 +868,7 @@ def _build_timing_runner(
     state_dir: str | Path | None = None,
     strategy_instance_id: str | None = None,
     bar_source: Any | None = None,
+    runtime: Any | None = None,
 ) -> Any | None:
     if not timing_strategy and not strategy_instance_id:
         return None
@@ -793,16 +878,29 @@ def _build_timing_runner(
 
     definition = None
     stored_instance = None
+    trading = None
     if strategy_instance_id:
         if kernel_engine is None or not kernel_engine.has_system("trading"):
             raise RuntimeError("trading strategy system is required for instance deployment")
         trading = kernel_engine.get_system("trading")
+        if runtime is not None and runtime.execution_journal is not trading.store:
+            raise RuntimeError(
+                "formal strategy instances must use the configured deployment state directory"
+            )
         stored_instance = trading.store.get_instance(strategy_instance_id)
         validation = trading.validate_instance(strategy_instance_id)
         if not validation.get("ok"):
             raise ValueError("; ".join(validation.get("errors") or []))
-        if engine.config.mode == "live" and stored_instance["deployment_level"] != "live":
-            raise ValueError("strategy instance must be promoted to LIVE before routing")
+        expected_level = {
+            RunMode.PAPER: "paper",
+            RunMode.SHADOW: "shadow",
+            RunMode.LIVE: "live",
+        }.get(engine.config.mode)
+        if expected_level and stored_instance["deployment_level"] != expected_level:
+            raise ValueError(
+                f"strategy instance must be promoted to {expected_level.upper()} "
+                f"before running in {engine.config.mode}"
+            )
         config = stored_instance["config"]
         timing_strategy = str(config["strategy_id"])
         timing_params = dict(config.get("params") or {})
@@ -811,7 +909,7 @@ def _build_timing_runner(
         definition = trading.registry.get(timing_strategy)
         strategy = trading.registry.create(timing_strategy, timing_params)
     elif kernel_engine is not None and kernel_engine.has_system("trading"):
-        if engine.config.mode == "live":
+        if engine.config.mode in {RunMode.LIVE, RunMode.SHADOW}:
             raise ValueError("legacy strategy_name routing is disabled in LIVE; use a promoted instance_id")
         trading = kernel_engine.get_system("trading")
         definition = trading.registry.get(timing_strategy)
@@ -820,7 +918,15 @@ def _build_timing_runner(
         from alphapilot.systems.timing.strategies import create_strategy
 
         strategy = create_strategy(timing_strategy, timing_params or {})
-    required_history = int(getattr(definition, "required_history", 0) or min_bars or 1)
+    from alphapilot.systems.trading.registry import resolve_required_history
+
+    required_history = resolve_required_history(
+        definition,
+        dict(timing_params or {}),
+        fallback=int(min_bars or 1),
+    )
+    if not symbols:
+        raise ValueError("symbols are required when timing strategy is enabled")
     instance = (
         StrategyInstanceConfig.from_dict(stored_instance["config"])
         if stored_instance is not None
@@ -831,6 +937,7 @@ def _build_timing_runner(
             params=dict(timing_params or {}),
             universe=tuple(symbols),
             frequency=timing_freq,
+            strategy_code_hash=str(getattr(definition, "code_hash", "") or ""),
         )
     )
     target_pct = float(instance.params.get("target_percent", 1.0) or 0.0)
@@ -839,8 +946,27 @@ def _build_timing_runner(
             f"target_percent {target_pct:.1%} exceeds automated max_position_pct "
             f"{engine.config.risk.max_position_pct:.1%}"
         )
-    if not symbols:
-        raise ValueError("symbols are required when timing strategy is enabled")
+    legacy_paper_adapter = False
+    if (
+        stored_instance is None
+        and trading is not None
+        and runtime is not None
+        and engine.config.mode == RunMode.PAPER
+    ):
+        stored_instance = _prepare_legacy_paper_instance(trading, instance, runtime)
+        instance = StrategyInstanceConfig.from_dict(stored_instance["config"])
+        legacy_paper_adapter = True
+    route_port = (
+        runtime.automated_order_router(
+            instance_id=instance.instance_id,
+            config_hash=instance.config_hash,
+            deployment_level=(
+                stored_instance["deployment_level"]
+                if stored_instance is not None else engine.config.mode
+            ),
+        )
+        if runtime is not None else None
+    )
     adapter = BatchStrategyAdapter(strategy, min_bars=required_history, window=max(window, required_history))
     checkpoint = (
         Path(state_dir).expanduser() / "strategy_instances" / instance.instance_id / "runner.json"
@@ -872,11 +998,100 @@ def _build_timing_runner(
         config_hash=instance.config_hash,
         state_path=checkpoint,
         bar_source=bar_source,
+        execution_journal=(
+            getattr(runtime, "execution_journal", None)
+            if runtime is not None else
+            getattr(trading, "store", None) if trading is not None else None
+        ),
+        route_port=route_port,
+        runtime_id=(getattr(runtime, "runtime_id", "") if runtime is not None else ""),
     )
     if restored and checkpoint_state is not None:
-        runner.restore(checkpoint_state, require_reconcile=engine.config.mode == "live")
+        runner.restore(checkpoint_state, require_reconcile=engine.config.mode == RunMode.LIVE)
     runner.start()
+    if legacy_paper_adapter and runtime is not None:
+        journal = runtime.execution_journal
+        if journal.get_active_stage_run(instance.instance_id, stage="paper") is None:
+            journal.start_stage_run(instance.instance_id, "paper")
+        journal.set_route_block("instance", instance.instance_id, active=False)
+    if engine.config.mode == RunMode.LIVE:
+        runner.mark_reconcile_required()
     return runner
+
+
+def _prepare_legacy_paper_instance(trading: Any, config: Any, runtime: Any) -> dict[str, Any]:
+    """Adapt the deprecated strategy-name daemon path to a persisted PAPER instance."""
+
+    if runtime.route_authorizer is None:
+        raise RuntimeError("legacy PAPER automation requires a bound route authorizer")
+    store = runtime.execution_journal
+    required_store_methods = {
+        "get_instance", "create_instance", "update_instance", "record_stage",
+        "promote", "transition_runtime", "set_route_block", "start_stage_run",
+    }
+    if any(not callable(getattr(store, name, None)) for name in required_store_methods):
+        raise RuntimeError("legacy PAPER automation requires a persistent execution journal")
+    definition = trading.registry.get(config.strategy_id)
+    if config.strategy_version != definition.version:
+        raise ValueError("legacy strategy version does not match the registered definition")
+    if not definition.code_hash or config.strategy_code_hash != definition.code_hash:
+        raise ValueError("legacy strategy code hash does not match the trusted definition")
+    try:
+        current = store.get_instance(config.instance_id)
+    except KeyError:
+        current = store.create_instance(config)
+    else:
+        if current["strategy_id"] != config.strategy_id:
+            raise ValueError(f"reserved legacy instance id {config.instance_id!r} is already in use")
+        if current["config_hash"] != config.config_hash:
+            current = store.update_instance(
+                config.instance_id,
+                {
+                    "strategy_version": config.strategy_version,
+                    "params": config.params,
+                    "universe": list(config.universe),
+                    "frequency": config.frequency,
+                    "data_policy": config.data_policy,
+                    "portfolio_policy": config.portfolio_policy,
+                    "strategy_code_hash": config.strategy_code_hash,
+                    "model_hash": config.model_hash,
+                },
+            )
+    current = store.get_instance(config.instance_id)
+    if current["deployment_level"] == "replay":
+        store.record_stage(
+            config.instance_id,
+            "replay",
+            passed=True,
+            details={"source": "deprecated_paper_strategy_adapter"},
+        )
+        current = store.promote(config.instance_id, "paper")
+    elif current["deployment_level"] != "paper":
+        raise ValueError("legacy strategy-name automation is restricted to PAPER deployment")
+
+    account = runtime.engine.oms.account
+    if account is None or not str(account.account_id):
+        raise RuntimeError("PAPER account snapshot is not ready")
+    store.transition_runtime(
+        config.instance_id,
+        lifecycle="warming_up",
+        desired_state="running",
+        observed_state="warming_up",
+        account_id=str(account.account_id),
+        broker=str(runtime.config.trade_broker or runtime.config.broker or "paper"),
+        runtime_id=runtime.runtime_id,
+        runner_heartbeat_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        reconcile_required=False,
+        binding_active=False,
+        last_error={},
+    )
+    store.set_route_block(
+        "instance",
+        config.instance_id,
+        active=True,
+        reason="legacy PAPER runner is awaiting start confirmation",
+    )
+    return store.get_instance(config.instance_id)
 
 
 def _warm_timing_adapter(
@@ -948,21 +1163,24 @@ def run_daemon(
     state_dir: str | Path | None = None,
     duration: float | None = None,
     timing_strategy: str | None = None,
+    strategy_instance_id: str | None = None,
     timing_params: dict[str, Any] | None = None,
     timing_freq: str = "day",
     bar_seconds: int = 60,
     min_bars: int = 30,
     window: int = 250,
     record_market_data: bool | None = None,
+    runtime_id: str | None = None,
 ) -> int:
     from alphapilot.kernel import build_engine
 
     base = LiveConfig.load()
     selected_mode = mode or base.mode
     trade_override = trade_broker or broker
-    selected_trade = trade_override or ("paper" if selected_mode != RunMode.LIVE else base.trade_broker)
+    real_providers = uses_real_providers(selected_mode)
+    selected_trade = trade_override or (base.trade_broker if real_providers else "paper")
     selected_quote = quote_provider or (
-        "paper" if selected_mode != RunMode.LIVE
+        "paper" if not real_providers
         else selected_trade if trade_override
         else base.quote_provider or selected_trade
     )
@@ -977,7 +1195,7 @@ def run_daemon(
         state_dir=state_dir,
     )
     plugin_selection = None
-    if cfg.mode == RunMode.LIVE:
+    if uses_real_providers(cfg.mode):
         from alphapilot.systems.live.brokers.registry import provider_pair_metadata
 
         plugin_selection = provider_pair_metadata(cfg.trade_broker, cfg.quote_provider)
@@ -998,10 +1216,16 @@ def run_daemon(
         quote_provider=cfg.quote_provider,
         ledger_dir=str(cfg.ledger_dir),
         state_dir=str(cfg.state_dir),
+        runtime_id=runtime_id,
     )
     meta = {
         "pid": os.getpid(),
         "status": "connecting",
+        "runtime_id": runtime.runtime_id,
+        "deprecation_warning": (
+            "timing_strategy is deprecated for daemon deployment; use strategy_instance_id"
+            if timing_strategy and not strategy_instance_id else ""
+        ),
         "mode": cfg.mode,
         "broker": cfg.broker,
         "trade_broker": cfg.trade_broker,
@@ -1018,6 +1242,7 @@ def run_daemon(
             bar_seconds=bar_seconds,
             min_bars=min_bars,
             window=window,
+            instance_id=strategy_instance_id,
         ),
     }
 
@@ -1042,8 +1267,9 @@ def run_daemon(
             window=window,
             kernel_engine=engine,
             state_dir=cfg.state_dir,
-            strategy_instance_id=None,
+            strategy_instance_id=strategy_instance_id,
             bar_source=runtime.market_data,
+            runtime=runtime,
         )
         if symbols and runner is None:
             runtime.engine.subscribe_market_data(symbols)
@@ -1085,7 +1311,7 @@ def run_daemon(
                 runtime.market_data.write_snapshot()
             runtime.write_state()
             _write_status(
-                heartbeat_at=datetime.now().isoformat(timespec="seconds"),
+                heartbeat_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 runner_status=runner_status,
                 halted=runtime.engine.runmode.halted,
             )
@@ -1153,8 +1379,10 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--timeout", type=float, default=20.0)
     run.add_argument("--ledger-dir")
     run.add_argument("--state-dir")
+    run.add_argument("--runtime-id")
     run.add_argument("--duration", type=float)
     run.add_argument("--timing-strategy")
+    run.add_argument("--strategy-instance-id")
     run.add_argument("--timing-params")
     run.add_argument("--timing-freq", default="day")
     run.add_argument("--bar-seconds", type=int, default=60)
@@ -1174,8 +1402,10 @@ def main(argv: list[str] | None = None) -> int:
             timeout=ns.timeout,
             ledger_dir=ns.ledger_dir,
             state_dir=ns.state_dir,
+            runtime_id=ns.runtime_id,
             duration=ns.duration,
             timing_strategy=ns.timing_strategy,
+            strategy_instance_id=ns.strategy_instance_id,
             timing_params=_parse_json_obj(ns.timing_params),
             timing_freq=ns.timing_freq,
             bar_seconds=ns.bar_seconds,

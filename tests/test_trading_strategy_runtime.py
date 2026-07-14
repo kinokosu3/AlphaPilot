@@ -12,7 +12,7 @@ from alphapilot.systems.live.types import (
     Account, Direction, Exchange, Order, OrderStatus, Position,
 )
 from alphapilot.systems.trading.domain import StrategyInstanceConfig
-from alphapilot.systems.trading.registry import StrategyRegistry
+from alphapilot.systems.trading.registry import StrategyRegistry, resolve_required_history
 from alphapilot.systems.trading.store import StrategyRuntimeStore
 
 
@@ -28,6 +28,14 @@ def test_builtin_registry_exposes_schema_and_creates_parameterized_instances() -
     definition = registry.get("dual_ma")
 
     assert definition.required_history == 21
+    assert resolve_required_history(
+        definition,
+        {"short_window": 20, "long_window": 60},
+    ) == 61
+    assert resolve_required_history(
+        registry.get("stoch_rsi_reversion"),
+        {"rsi_window": 14, "stoch_window": 14},
+    ) == 29
     assert definition.parameter_schema["properties"]["short_window"]["default"] == 5
     assert registry.create("dual_ma", {"short_window": 10, "long_window": 30}).params["long_window"] == 30
     with pytest.raises(ValueError, match="less than"):
@@ -206,3 +214,57 @@ def test_qlib_model_scores_share_the_signal_record_contract() -> None:
     assert [(item.instrument, item.signal) for item in records] == [
         ("SH600000", 1), ("SZ000001", 0)
     ]
+
+
+def test_legacy_paper_daemon_strategy_is_adapted_to_authorized_temporary_instance(
+    engine,
+) -> None:
+    from datetime import datetime, timezone
+
+    from alphapilot.systems.live.daemon import _build_timing_runner
+    from alphapilot.systems.live.types import Exchange, OrderRequest
+
+    live = engine.get_system("live")
+    runtime = live.create_runtime(mode="paper", broker="paper", trade_broker="paper")
+    runtime.connect(paper_cash=100_000)
+    runner = _build_timing_runner(
+        runtime.engine,
+        ["600000"],
+        timing_strategy="dual_ma",
+        timing_params={"short_window": 5, "long_window": 20, "target_percent": 0.2},
+        timing_freq="day",
+        bar_seconds=60,
+        min_bars=30,
+        window=250,
+        kernel_engine=engine,
+        state_dir=runtime.config.state_dir,
+        runtime=runtime,
+    )
+    trading = engine.get_system("trading")
+    temporary = trading.store.get_instance("legacy-dual_ma-day")
+    assert temporary["deployment_level"] == "paper"
+    assert trading.store.get_active_stage_run("legacy-dual_ma-day", stage="paper") is not None
+
+    trading.store.transition_runtime(
+        "legacy-dual_ma-day",
+        lifecycle="running",
+        desired_state="running",
+        observed_state="running",
+        runner_heartbeat_at=datetime.now(timezone.utc).isoformat(),
+    )
+    request = OrderRequest.buy(
+        "600000",
+        Exchange.SSE,
+        100,
+        10.0,
+        reference=(
+            f"legacy-dual_ma-day:{temporary['config_hash']}:"
+            "decision:600000.SSE:B:0"
+        ),
+    )
+    runner.route_port.submit(request)
+
+    assert runner.route_port.last_authorization is not None
+    assert runner.route_port.last_authorization.allowed is True
+    runner.stop()
+    runtime.close()

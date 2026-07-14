@@ -47,3 +47,28 @@ def test_legacy_timing_catalog_declares_compatibility_route(engine) -> None:
     body = client.get("/api/timing/strategies").json()
     assert body["deprecated"] is True
     assert body["replacement"] == "/api/trading/strategy-definitions"
+
+
+def test_trading_kill_switch_api_engages_lists_and_releases(engine) -> None:
+    client = TestClient(create_app(engine=engine))
+
+    engaged = client.post(
+        "/api/trading/kill-switches/global/all/engage",
+        json={"reason": "operator test"},
+    )
+    assert engaged.status_code == 200
+    assert engaged.json() == {
+        "scope_type": "global",
+        "scope_id": "*",
+        "active": True,
+        "reason": "operator test",
+    }
+    listed = client.get("/api/trading/kill-switches")
+    assert listed.status_code == 200
+    assert any(
+        row["scope_type"] == "global" and row["active"] is True
+        for row in listed.json()["kill_switches"]
+    )
+    released = client.post("/api/trading/kill-switches/global/all/release", json={})
+    assert released.status_code == 200
+    assert released.json()["active"] is False

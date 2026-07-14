@@ -150,7 +150,14 @@ class StrategyRegistry:
                 for definition in definitions:
                     if not isinstance(definition, StrategyDefinition):
                         raise TypeError("entry point must return StrategyDefinition or a list of them")
-                    definition.source = f"pip:{getattr(ep, 'dist', '') or ep.name}"
+                    distribution = getattr(ep, "dist", None)
+                    package_version = str(getattr(distribution, "version", "") or "")
+                    definition.source = f"pip:{distribution or ep.name}"
+                    definition.package_version = definition.package_version or package_version
+                    if not definition.code_hash:
+                        definition.code_hash = _entry_point_code_hash(ep, definition)
+                    if not definition.code_hash:
+                        raise ValueError("installed strategy code could not be hashed")
                     self._register(definition)
             except Exception as exc:  # noqa: BLE001
                 self._quarantined.append(
@@ -187,6 +194,27 @@ def schema_defaults(schema: dict[str, Any]) -> dict[str, Any]:
         for key, spec in (schema.get("properties") or {}).items()
         if isinstance(spec, dict) and "default" in spec
     }
+
+
+def resolve_required_history(
+    definition: StrategyDefinition | None,
+    params: dict[str, Any] | None,
+    *,
+    fallback: int = 1,
+) -> int:
+    """Resolve warmup bars from the concrete instance parameters."""
+
+    values = params or {}
+    windows = {
+        key: int(value)
+        for key, value in values.items()
+        if "window" in key and isinstance(value, int) and not isinstance(value, bool) and value > 0
+    }
+    if "rsi_window" in windows and "stoch_window" in windows:
+        return windows["rsi_window"] + windows["stoch_window"] + 1
+    if windows:
+        return max(windows.values()) + 1
+    return max(int(getattr(definition, "required_history", 0) or fallback or 1), 1)
 
 
 def validate_parameters(schema: dict[str, Any], params: dict[str, Any]) -> list[str]:
@@ -293,3 +321,57 @@ def _manifest_code_hash(manifest: Path, factory: str) -> str:
     if source.is_file():
         digest.update(source.read_bytes())
     return digest.hexdigest()
+
+
+def _entry_point_code_hash(ep: Any, definition: StrategyDefinition) -> str:
+    """Hash installed code/metadata rather than trusting a version label alone."""
+
+    digest = hashlib.sha256()
+    artifacts = 0
+    paths: set[Path] = set()
+    factory = definition.factory
+    if isinstance(factory, str):
+        module_name = factory.partition(":")[0]
+        if ":" not in factory:
+            module_name = factory.rpartition(".")[0]
+        try:
+            spec = importlib.util.find_spec(module_name)
+        except (ImportError, AttributeError, ValueError):
+            spec = None
+        if spec is not None and spec.origin:
+            paths.add(Path(spec.origin))
+    else:
+        source = inspect.getsourcefile(factory)
+        if source:
+            paths.add(Path(source))
+    ep_module = str(getattr(ep, "value", "")).partition(":")[0]
+    if ep_module:
+        try:
+            spec = importlib.util.find_spec(ep_module)
+        except (ImportError, AttributeError, ValueError):
+            spec = None
+        if spec is not None and spec.origin:
+            paths.add(Path(spec.origin))
+    for path in sorted(paths, key=str):
+        try:
+            payload = path.read_bytes()
+        except OSError:
+            continue
+        digest.update(str(path.name).encode("utf-8"))
+        digest.update(payload)
+        artifacts += 1
+
+    distribution = getattr(ep, "dist", None)
+    read_text = getattr(distribution, "read_text", None)
+    if callable(read_text):
+        for metadata_name in ("RECORD", "direct_url.json", "METADATA"):
+            try:
+                payload = read_text(metadata_name)
+            except (OSError, UnicodeError):
+                payload = None
+            if not payload:
+                continue
+            digest.update(metadata_name.encode("utf-8"))
+            digest.update(str(payload).encode("utf-8"))
+            artifacts += 1
+    return digest.hexdigest() if artifacts else ""

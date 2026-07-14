@@ -23,7 +23,26 @@ class RunMode:
 
     DRY_RUN = "dry_run"   # compute + print intents, submit nothing
     PAPER = "paper"       # route to the in-process PaperBroker
+    SHADOW = "shadow"     # real account/quotes, planning only; routing is impossible
     LIVE = "live"         # route to a real broker gateway
+
+
+def uses_real_providers(mode: str) -> bool:
+    """Whether the mode connects to configured broker and quote providers."""
+
+    return mode in {RunMode.SHADOW, RunMode.LIVE}
+
+
+def allows_order_routing(mode: str) -> bool:
+    """Whether the run-mode FSM may route a new order."""
+
+    return mode in {RunMode.PAPER, RunMode.LIVE}
+
+
+def requires_live_market_safety(mode: str) -> bool:
+    """Whether planning requires production-grade account/contract/quote truth."""
+
+    return uses_real_providers(mode)
 
 
 def _env(name: str, default: str) -> str:
@@ -118,7 +137,7 @@ class MarketDataConfig:
 class LiveConfig:
     """Top-level live-trading config."""
 
-    #: One of ``RunMode.{DRY_RUN,PAPER,LIVE}``.
+    #: One of ``RunMode.{DRY_RUN,PAPER,SHADOW,LIVE}``.
     mode: str = field(default_factory=lambda: _env("ALPHAPILOT_LIVE_MODE", RunMode.DRY_RUN))
     #: Backward-compatible alias for the trade broker.
     broker: str | None = field(default_factory=lambda: _env("ALPHAPILOT_LIVE_BROKER", "paper"))

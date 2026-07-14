@@ -16,13 +16,21 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+import uuid
 
-from alphapilot.systems.live.config import LiveConfig, RunMode
+from alphapilot.systems.live.config import (
+    LiveConfig,
+    RunMode,
+    requires_live_market_safety,
+    uses_real_providers,
+)
 from alphapilot.systems.live.engine import LiveEngine
 from alphapilot.systems.live.executor import reconcile
 from alphapilot.systems.live.risk import RiskGate
 from alphapilot.systems.live.targets import TargetPortfolio
 from alphapilot.systems.live.market_data import tick_to_dict
+from alphapilot.systems.live.journal import InMemoryExecutionJournal
+from alphapilot.systems.live.routing import AutomatedOrderRouter
 from alphapilot.systems.live.state_io import atomic_write_json
 from alphapilot.systems.live.types import (
     CancelRequest,
@@ -36,6 +44,7 @@ from alphapilot.systems.live.types import (
     TickData,
     normalize_symbol,
 )
+from alphapilot.systems.trading.ports import RouteContext, RouteOrigin
 
 
 def clone_config(
@@ -72,17 +81,25 @@ def require_live_confirmation(config: LiveConfig, *, confirm_live: bool) -> None
 class LiveRuntime:
     """A connected or connectable live trading runtime."""
 
-    def __init__(self, config: LiveConfig, engine: LiveEngine) -> None:
+    def __init__(
+        self,
+        config: LiveConfig,
+        engine: LiveEngine,
+        *,
+        execution_journal: Any | None = None,
+        route_authorizer: Any | None = None,
+        runtime_id: str | None = None,
+    ) -> None:
         self.config = config
         self.engine = engine
+        self.runtime_id = str(runtime_id or uuid.uuid4().hex)
         self.state_path = Path(config.state_dir).expanduser() / "runtime_state.json"
         self.recovery: dict[str, Any] | None = None
         self.market_data = None
-        from alphapilot.systems.trading.store import StrategyRuntimeStore
-
-        self.strategy_store = StrategyRuntimeStore(
-            Path(config.state_dir).expanduser() / "strategy_runtime.sqlite3"
-        )
+        self.execution_journal = execution_journal or InMemoryExecutionJournal()
+        # Compatibility attribute for callers written before the port split.
+        self.strategy_store = self.execution_journal
+        self.route_authorizer = route_authorizer
 
     # ---- construction ----------------------------------------------------- #
     @classmethod
@@ -94,6 +111,9 @@ class LiveRuntime:
         quote_provider: Any = None,
         now_fn=None,
         is_trading_day_fn=None,
+        execution_journal: Any | None = None,
+        route_authorizer: Any | None = None,
+        runtime_id: str | None = None,
     ) -> "LiveRuntime":
         """Build a runtime from config without connecting yet."""
         if broker is not None:
@@ -102,7 +122,7 @@ class LiveRuntime:
         elif quote_provider is not None:
             gateway = _make_trade_gateway(config)
             quote_gateway = quote_provider
-        elif config.mode == RunMode.LIVE:
+        elif uses_real_providers(config.mode):
             from alphapilot.systems.live.brokers.registry import create_gateway_pair
 
             gateway, quote_gateway = create_gateway_pair(
@@ -118,9 +138,15 @@ class LiveRuntime:
             quote_gateway=quote_gateway,
             now_fn=now_fn,
             is_trading_day_fn=is_trading_day_fn,
-            risk=RiskGate(config.risk, enforce_session=config.mode == RunMode.LIVE),
+            risk=RiskGate(config.risk, enforce_session=requires_live_market_safety(config.mode)),
         )
-        return cls(config, engine)
+        return cls(
+            config,
+            engine,
+            execution_journal=execution_journal,
+            route_authorizer=route_authorizer,
+            runtime_id=runtime_id,
+        )
 
     # ---- lifecycle -------------------------------------------------------- #
     def connect(self, *, setting: dict | None = None, paper_cash: float | None = None) -> dict[str, Any]:
@@ -294,9 +320,9 @@ class LiveRuntime:
     ) -> bool:
         """Wait until the runtime has the minimum state needed for execution."""
         if require_contracts is None:
-            require_contracts = self.config.mode == RunMode.LIVE
+            require_contracts = requires_live_market_safety(self.config.mode)
         if settle_seconds is None:
-            settle_seconds = 2.5 if self.config.mode == RunMode.LIVE else 0.0
+            settle_seconds = 2.5 if uses_real_providers(self.config.mode) else 0.0
         deadline = time.time() + float(timeout)
         while time.time() < deadline:
             oms = self.engine.oms
@@ -324,6 +350,7 @@ class LiveRuntime:
         offset: str = "none",
         product: str = "equity",
         reference: str = "",
+        route_context: RouteContext | None = None,
     ) -> dict[str, Any]:
         """Submit one normalized order through the guarded engine path."""
         if product.lower() in {"future", "futures"} and self.config.mode == RunMode.LIVE:
@@ -350,7 +377,8 @@ class LiveRuntime:
             offset=req_offset,
             reference=reference,
         )
-        order_id = self.engine.submit(req)
+        context = route_context or RouteContext.manual()
+        order_id = self._submit_request(req, context)
         routing_event = None if order_id else _last_routing_event(self.engine.ledger, reference=req.reference)
         routing_payload = routing_event.get("payload") if isinstance(routing_event, dict) else {}
         if not isinstance(routing_payload, dict):
@@ -410,7 +438,13 @@ class LiveRuntime:
             max_order_value=self.config.risk.max_order_value,
         )
 
-    def submit_target(self, target: TargetPortfolio, *, route: bool = False) -> dict[str, Any]:
+    def submit_target(
+        self,
+        target: TargetPortfolio,
+        *,
+        route: bool = False,
+        route_context: RouteContext | None = None,
+    ) -> dict[str, Any]:
         """Plan and optionally route all orders for a target portfolio."""
         from alphapilot.systems.live.planner import ExecutionPlanner
 
@@ -418,13 +452,24 @@ class LiveRuntime:
             lot_size=self.config.risk.lot_size,
             max_order_value=self.config.risk.max_order_value,
         ).plan(target, self.engine.oms)
+        context = route_context or RouteContext.manual()
+        if context.origin == RouteOrigin.AUTOMATED and (
+            target.instance_id != context.instance_id
+            or target.config_hash != context.config_hash
+        ):
+            from alphapilot.systems.live.planner import PlanIssue
+
+            plan.issues.append(PlanIssue(
+                "route_binding",
+                "target instance_id/config_hash does not match automated route authorization",
+            ))
         self._preflight_target(target, plan)
         requests = plan.requests
         target_payload = target_to_dict(target)
-        self.strategy_store.record_decision(
+        self.execution_journal.record_decision(
             plan.decision_id, target.instance_id or "legacy", target.config_hash, target_payload
         )
-        self.strategy_store.record_plan(
+        self.execution_journal.record_plan(
             plan.plan_id, plan.decision_id, target.instance_id or "legacy",
             {"target": target_payload, "requests": [order_request_to_dict(req) for req in requests]},
             "planned" if plan.ok else "blocked",
@@ -433,7 +478,7 @@ class LiveRuntime:
         unrouted_requests: list[dict[str, Any]] = []
         if route and plan.ok:
             for req in requests:
-                inserted = self.strategy_store.record_child_order(
+                inserted = self.execution_journal.record_child_order(
                     req.reference, plan.plan_id, order_request_to_dict(req), status="routing"
                 )
                 if not inserted:
@@ -443,15 +488,21 @@ class LiveRuntime:
                         "routing_reason": "child order reference already journaled",
                     })
                     continue
-                order_id = self.engine.submit(req)
+                order_id = self._submit_request(req, context)
                 if order_id:
                     routed.append(order_id)
-                    self.strategy_store.update_child_order(
+                    self.execution_journal.update_child_order(
                         req.reference, status="submitted", order_id=str(order_id)
                     )
                 else:
-                    unrouted_requests.append(order_request_to_dict(req))
-                    self.strategy_store.update_child_order(req.reference, status="rejected")
+                    event = _last_routing_event(self.engine.ledger, reference=req.reference) or {}
+                    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+                    unrouted_requests.append({
+                        **order_request_to_dict(req),
+                        "routing_rule": payload.get("rule"),
+                        "routing_reason": payload.get("reason"),
+                    })
+                    self.execution_journal.update_child_order(req.reference, status="rejected")
         return {
             "target": target_payload,
             "plan_id": plan.plan_id,
@@ -467,6 +518,58 @@ class LiveRuntime:
             "fully_routed": ((not route) or not unrouted_requests) and plan.ok,
             "state": self.write_state(),
         }
+
+    def automated_order_router(
+        self,
+        *,
+        instance_id: str,
+        config_hash: str,
+        deployment_level: str,
+    ) -> AutomatedOrderRouter:
+        """Return the only route port supplied to an automated strategy runner."""
+
+        def context() -> RouteContext:
+            account = self.engine.oms.account
+            return RouteContext(
+                origin=RouteOrigin.AUTOMATED,
+                instance_id=str(instance_id),
+                config_hash=str(config_hash),
+                account_id="" if account is None else str(account.account_id),
+                broker=str(self.config.trade_broker or self.config.broker or ""),
+                deployment_level=str(deployment_level),
+                runtime_id=self.runtime_id,
+            )
+
+        return AutomatedOrderRouter(self.engine, self.route_authorizer, context)
+
+    def _submit_request(self, request: OrderRequest, context: RouteContext) -> str | None:
+        if context.origin == RouteOrigin.AUTOMATED:
+            router = AutomatedOrderRouter(self.engine, self.route_authorizer, lambda: context)
+            return router.submit(request)
+        blocks = self._manual_route_blocks(context)
+        if blocks:
+            reason = ", ".join(f"{item['scope_type']}:{item['scope_id']}" for item in blocks)
+            self.engine.ledger.record(
+                "blocked",
+                {
+                    "origin": "manual",
+                    "rule": "kill_switch",
+                    "reason": f"route blocked by {reason}",
+                },
+                reference=request.reference,
+            )
+            return None
+        return self.engine.submit(request, origin="manual")
+
+    def _manual_route_blocks(self, context: RouteContext) -> list[dict[str, Any]]:
+        lookup = getattr(self.execution_journal, "active_route_blocks", None)
+        if not callable(lookup):
+            return []
+        account = self.engine.oms.account
+        return lookup(
+            instance_id=context.instance_id,
+            account_id=context.account_id or ("" if account is None else str(account.account_id)),
+        )
 
     def _preflight_target(self, target: TargetPortfolio, plan: Any) -> None:
         """Whole-book checks that cannot be expressed as independent order rules."""
@@ -496,7 +599,7 @@ class LiveRuntime:
                     plan.issues.append(PlanIssue("expired_target", "target validity window has expired"))
             except ValueError:
                 plan.issues.append(PlanIssue("invalid_validity", "valid_until must be ISO-8601"))
-        if self.config.mode == RunMode.LIVE and target.effective_session:
+        if requires_live_market_safety(self.config.mode) and target.effective_session:
             try:
                 effective_day = datetime.fromisoformat(str(target.effective_session)[:10]).date()
                 if effective_day != now_value.date():
@@ -540,7 +643,7 @@ class LiveRuntime:
                     "max_position_pct",
                     f"target weight {weight:.1%} > cap {limit:.1%}", key,
                 ))
-            if self.config.mode != RunMode.LIVE:
+            if not requires_live_market_safety(self.config.mode):
                 continue
             if oms.get_contract(key) is None:
                 plan.issues.append(PlanIssue("unknown_contract", "LIVE contract metadata is required", key))
@@ -600,7 +703,7 @@ class LiveRuntime:
         oms = self.engine.oms
         account = oms.account
         plugins = None
-        if self.config.mode == RunMode.LIVE:
+        if uses_real_providers(self.config.mode):
             try:
                 from alphapilot.systems.live.brokers.registry import provider_pair_metadata
 
@@ -611,6 +714,7 @@ class LiveRuntime:
             except Exception as exc:  # noqa: BLE001 - keep state readable after uninstall
                 plugins = {"error": f"{type(exc).__name__}: {exc}"}
         return {
+            "runtime_id": self.runtime_id,
             "config": {
                 "mode": self.config.mode,
                 "broker": self.config.broker,
@@ -689,7 +793,7 @@ class LiveRuntime:
 
 
 def _make_trade_gateway(config: LiveConfig):
-    if config.mode == RunMode.LIVE:
+    if uses_real_providers(config.mode):
         from alphapilot.systems.live.brokers.registry import create_gateway
 
         return create_gateway(config.trade_broker or config.broker)
@@ -699,7 +803,7 @@ def _make_trade_gateway(config: LiveConfig):
 
 
 def _make_quote_gateway(config: LiveConfig, trade_gateway: Any):
-    if config.mode != RunMode.LIVE:
+    if not uses_real_providers(config.mode):
         return trade_gateway
     quote_provider = config.quote_provider or config.trade_broker or config.broker
     trade_name = config.trade_broker or config.broker
@@ -725,7 +829,7 @@ def build_runtime_setting(config: LiveConfig, *, paper_cash: float | None = None
 
 def build_trade_setting(config: LiveConfig, *, paper_cash: float | None = None) -> dict[str, Any]:
     """Build trade-gateway connect settings."""
-    if config.mode == RunMode.LIVE:
+    if uses_real_providers(config.mode):
         from alphapilot.systems.live.brokers.registry import build_connect_setting, missing_setting_fields
 
         broker = config.trade_broker or config.broker
@@ -738,7 +842,7 @@ def build_trade_setting(config: LiveConfig, *, paper_cash: float | None = None) 
 
 def build_quote_setting(config: LiveConfig, *, paper_cash: float | None = None) -> dict[str, Any]:
     """Build quote-provider connect settings."""
-    if config.mode == RunMode.LIVE:
+    if uses_real_providers(config.mode):
         from alphapilot.systems.live.brokers.registry import build_quote_connect_setting, missing_quote_setting_fields
 
         provider = config.quote_provider or config.trade_broker or config.broker
