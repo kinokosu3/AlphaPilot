@@ -56,12 +56,54 @@ class StrategyDefinition:
     code_hash: str = ""
     description: str = ""
     api_version: int = 1
+    provider_api_version: int = 0
+    signal_kind: SignalKind = SignalKind.INSTRUMENT_TIMING
+    deployable_modes: tuple[str, ...] = (
+        DeploymentLevel.REPLAY.value,
+        DeploymentLevel.PAPER.value,
+        DeploymentLevel.SHADOW.value,
+        DeploymentLevel.LIVE.value,
+    )
+
+    def __post_init__(self) -> None:
+        self.signal_kind = SignalKind(self.signal_kind)
+        self.provider_api_version = int(self.provider_api_version or self.api_version or 1)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["factory"] = factory_path(self.factory)
+        data["signal_kind"] = self.signal_kind.value
         data["supported_assets"] = list(self.supported_assets)
         data["supported_frequencies"] = list(self.supported_frequencies)
+        data["deployable_modes"] = list(self.deployable_modes)
+        return data
+
+
+@dataclass
+class PortfolioPolicyDefinition:
+    policy_id: str
+    version: str
+    factory: Any = field(repr=False)
+    parameter_schema: dict[str, Any] = field(default_factory=dict)
+    supported_signal_kinds: tuple[SignalKind, ...] = (
+        SignalKind.INSTRUMENT_TIMING,
+    )
+    source: str = "builtin"
+    package_version: str = ""
+    code_hash: str = ""
+    description: str = ""
+    api_version: int = 1
+
+    def __post_init__(self) -> None:
+        self.policy_id = str(self.policy_id).strip().lower()
+        self.supported_signal_kinds = tuple(
+            SignalKind(item) for item in self.supported_signal_kinds
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["factory"] = factory_path(self.factory)
+        data["supported_signal_kinds"] = [item.value for item in self.supported_signal_kinds]
         return data
 
 
@@ -77,15 +119,25 @@ class StrategyInstanceConfig:
     portfolio_policy: dict[str, Any] = field(default_factory=dict)
     strategy_code_hash: str = ""
     model_hash: str = ""
+    artifact_binding: dict[str, Any] = field(default_factory=dict)
     deployment_level: str = DeploymentLevel.REPLAY.value
     config_hash: str = ""
 
     def __post_init__(self) -> None:
+        from alphapilot.systems.trading.contracts import canonical_instrument
+
         self.instance_id = str(self.instance_id).strip()
         self.strategy_id = str(self.strategy_id).strip().lower()
-        self.universe = tuple(str(item).strip() for item in self.universe if str(item).strip())
-        if not self.config_hash:
-            self.config_hash = self.compute_hash()
+        self.universe = tuple(
+            dict.fromkeys(
+                canonical_instrument(str(item))
+                for item in self.universe if str(item).strip()
+            )
+        )
+        expected_hash = self.compute_hash()
+        if self.config_hash and self.config_hash != expected_hash:
+            raise ValueError("strategy instance config_hash does not match its immutable fields")
+        self.config_hash = expected_hash
 
     def compute_hash(self) -> str:
         payload = {
@@ -98,6 +150,7 @@ class StrategyInstanceConfig:
             "portfolio_policy": self.portfolio_policy,
             "strategy_code_hash": self.strategy_code_hash,
             "model_hash": self.model_hash,
+            "artifact_binding": self.artifact_binding,
         }
         raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -123,7 +176,7 @@ class SignalRecord:
 class SignalProvider(Protocol):
     def initialize(self, context: Any) -> None: ...
     def warmup(self, history: Any) -> None: ...
-    def on_bars(self, completed_bars: Any) -> list[SignalRecord]: ...
+    def evaluate(self, context: Any) -> SignalEnvelope: ...
     def snapshot(self) -> dict[str, Any]: ...
     def restore(self, state: dict[str, Any]) -> None: ...
     def stop(self, reason: str) -> None: ...

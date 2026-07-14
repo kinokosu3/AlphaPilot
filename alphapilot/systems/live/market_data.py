@@ -385,13 +385,19 @@ class LiveMarketDataService:
 
     def step(self, session: Any) -> None:
         value = str(getattr(session, "value", session))
-        if value != self._last_session and value in {"lunch_break", "post_close", "closed"}:
-            self.flush_bars()
+        if value != self._last_session and value == "lunch_break":
+            # A lunch break completes intraday windows, but it must not emit a
+            # half-day bar as the official daily close.
+            self.flush_bars(include_daily=False)
+        elif value != self._last_session and value in {"post_close", "closed"}:
+            self.flush_bars(include_daily=True)
         self._last_session = value
 
-    def flush_bars(self) -> None:
+    def flush_bars(self, *, include_daily: bool = True) -> None:
         with self._lock:
-            for aggregator in self._bars.values():
+            for interval, aggregator in self._bars.items():
+                if interval == DAY_INTERVAL and not include_daily:
+                    continue
                 aggregator.flush()
 
     def snapshot(self) -> dict[str, Any]:

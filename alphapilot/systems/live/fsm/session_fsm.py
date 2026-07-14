@@ -7,7 +7,7 @@ The execution algos (call-auction / TWAP) key off this state.
 
 The clock is **injected** (``now_fn``) so tests drive a full trading day with a
 simulated clock instead of waiting on the wall clock; the trading-day predicate
-(``is_trading_day_fn``) lets a real calendar be plugged in later.
+(``is_trading_day_fn``) supplies the configured exchange calendar.
 """
 
 from __future__ import annotations
@@ -101,7 +101,9 @@ class SessionClock:
         is_trading_day_fn: Callable[[datetime], bool] | None = None,
     ) -> None:
         self._now_fn = now_fn
-        self._is_trading_day_fn = is_trading_day_fn or (lambda _dt: True)
+        # Standalone PAPER/test clocks use weekdays only. Real-account engines
+        # install an exchange calendar (and fail closed when it is unavailable).
+        self._is_trading_day_fn = is_trading_day_fn or (lambda dt: dt.weekday() < 5)
         self.state: SessionState = self.current_state()
 
     def current_state(self) -> SessionState:

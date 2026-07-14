@@ -49,6 +49,8 @@ def test_local_manifest_is_explicit_and_duplicate_is_quarantined(tmp_path: Path)
         "class Demo:\n    def __init__(self, window=3): self.window=window\n",
         encoding="utf-8",
     )
+    helper = local / "helper.py"
+    helper.write_text("VALUE = 1\n", encoding="utf-8")
     (local / "strategy.toml").write_text(
         """
 [strategy]
@@ -69,9 +71,54 @@ parameter_schema_json = '''{"type":"object","properties":{"window":{"type":"inte
 
     registry = StrategyRegistry(local_root=tmp_path / "strategies").discover()
 
-    assert registry.get("custom_demo").code_hash
+    initial_hash = registry.get("custom_demo").code_hash
+    assert initial_hash
     assert registry.create("custom_demo", {"window": 7}, isolated=False).window == 7
     assert any(item["strategy_id"] == "dual_ma" for item in registry.quarantined())
+
+    helper.write_text("VALUE = 2\n", encoding="utf-8")
+    refreshed = StrategyRegistry(local_root=tmp_path / "strategies").discover()
+    assert refreshed.get("custom_demo").code_hash != initial_hash
+
+
+def test_local_v2_manifest_uses_lifecycle_worker_without_forced_artifact_argument(
+    tmp_path: Path,
+) -> None:
+    local = tmp_path / "strategies" / "v2"
+    local.mkdir(parents=True)
+    (local / "provider.py").write_text(
+        "class Provider:\n"
+        "    def __init__(self, window=3): self.window = window; self.calls = 0\n"
+        "    def initialize(self, context): self.calls += 1\n"
+        "    def warmup(self, history): self.calls += 1\n"
+        "    def evaluate(self, context): self.calls += 1; return None\n"
+        "    def snapshot(self): return {'window': self.window, 'calls': self.calls}\n"
+        "    def restore(self, state): self.calls = state['calls']\n"
+        "    def stop(self, reason): pass\n",
+        encoding="utf-8",
+    )
+    (local / "strategy.toml").write_text(
+        """
+[strategy]
+id = "custom_v2"
+version = "0.1.0"
+factory = "provider:Provider"
+api_version = 2
+signal_kind = "instrument_timing"
+parameter_schema_json = '''{"type":"object","properties":{"window":{"type":"integer","default":3}},"additionalProperties":false}'''
+""",
+        encoding="utf-8",
+    )
+    registry = StrategyRegistry(local_root=tmp_path / "strategies").discover(
+        builtin_contributions=[],
+    )
+    definition = registry.get("custom_v2")
+    assert definition.provider_api_version == 2
+    provider = registry.create_provider("custom_v2", {"window": 7}, factory_context={})
+    provider.initialize(None)
+    provider.warmup([])
+    assert provider.snapshot() == {"window": 7, "calls": 2}
+    provider.stop("test")
 
 
 def test_execution_planner_counts_working_orders_and_splits_large_orders() -> None:
@@ -123,18 +170,20 @@ def test_runtime_store_enforces_stage_evidence_and_single_live_writer(tmp_path: 
     assert store.record_decision("d1", "a", "hash", {}) is False
 
 
-def test_instance_configuration_change_demotes_live_to_shadow(tmp_path: Path) -> None:
+def test_instance_configuration_change_resets_live_to_replay(tmp_path: Path) -> None:
     store = StrategyRuntimeStore(tmp_path / "runtime.sqlite3")
     store.create_instance(StrategyInstanceConfig(
         "a", "dual_ma", "1.0.0", {"short_window": 5, "long_window": 20}, ("SH600000",),
     ))
-    with sqlite3.connect(store.path) as db:
-        db.execute("UPDATE strategy_instances SET deployment_level='live' WHERE instance_id='a'")
-        db.commit()
+    for source, target in (("replay", "paper"), ("paper", "shadow")):
+        store.record_stage("a", source, passed=True)
+        store.promote("a", target)
+    store.record_stage("a", "shadow", passed=True)
+    store.promote("a", "live", account_id="account", broker="paper", approval="test")
 
     updated = store.update_instance("a", {"params": {"short_window": 10, "long_window": 30}})
 
-    assert updated["deployment_level"] == "shadow"
+    assert updated["deployment_level"] == "replay"
     assert updated["config_hash"] == updated["config"]["config_hash"]
     assert len(updated["config_hash"]) == 64
 
@@ -201,6 +250,7 @@ def test_live_runner_accepts_only_promoted_instance(engine, tmp_path: Path) -> N
         kernel_engine=engine, state_dir=cfg.state_dir, strategy_instance_id=instance_id,
     )
     assert runner.status()["instance_id"] == instance_id
+    assert runner.step()["instance_id"] == instance_id
 
 
 def test_qlib_model_scores_share_the_signal_record_contract() -> None:

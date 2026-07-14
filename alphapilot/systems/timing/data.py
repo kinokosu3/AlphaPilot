@@ -17,6 +17,10 @@ from alphapilot.systems.data.stock_list import (
 )
 
 BAR_COLUMNS = ["datetime", "instrument", "open", "high", "low", "close", "volume", "amount"]
+EXECUTION_COLUMNS = [
+    "suspended", "limit_up", "limit_down", "stale",
+    "lot_size", "price_tick", "settlement_days", "asset_type",
+]
 
 
 def parse_symbols(symbols: list[str] | str | None) -> list[str]:
@@ -70,8 +74,11 @@ def _read_one(csv_path: Path, code: str) -> pd.DataFrame:
     out["instrument"] = baostock_to_qlib_instrument(code)
     for col in ("open", "high", "low", "close", "volume", "amount"):
         out[col] = pd.to_numeric(df[col], errors="coerce") if col in df.columns else pd.NA
+    for col in EXECUTION_COLUMNS:
+        if col in df.columns:
+            out[col] = df[col]
     out = out.dropna(subset=["datetime", "open", "high", "low", "close"])
-    return out[BAR_COLUMNS]
+    return out[[*BAR_COLUMNS, *[col for col in EXECUTION_COLUMNS if col in out.columns]]]
 
 
 def load_bars(

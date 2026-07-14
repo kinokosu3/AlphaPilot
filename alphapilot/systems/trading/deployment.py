@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+import uuid
 
 from alphapilot.systems.trading.domain import DeploymentLevel, LifecycleState
 from alphapilot.systems.trading.ports import RuntimeCommandResult, RuntimeControlPort
@@ -22,12 +23,14 @@ class DeploymentCoordinator:
             raise ValueError("REPLAY instances cannot be started as a deployment")
         live = level == DeploymentLevel.LIVE.value
         self._block(instance_id, True, "deployment start is awaiting runtime confirmation")
+        runtime_id = str(instance["runtime"].get("runtime_id") or uuid.uuid4().hex)
         prepared = self.store.update_runtime_state(
             instance_id,
             expected_version=instance["runtime"]["version"],
             desired_state=(LifecycleState.PAUSED.value if live else LifecycleState.RUNNING.value),
             reconcile_required=live,
             binding_active=(True if live else instance["runtime"]["binding_active"]),
+            runtime_id=runtime_id,
             last_error={},
         )
         instance["runtime"] = prepared

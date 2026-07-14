@@ -17,6 +17,27 @@ def test_live_system_registered_and_snapshot(engine) -> None:
     assert snap["risk"]["lot_size"] == 100
 
 
+def test_formal_strategy_runtime_requires_exchange_calendar(engine) -> None:
+    live = engine.get_system("live")
+
+    with pytest.raises(RuntimeError, match="exchange trading calendar"):
+        live.create_runtime(
+            mode="paper",
+            broker="paper",
+            trade_broker="paper",
+            require_exchange_calendar=True,
+        )
+
+    runtime = live.create_runtime(
+        mode="paper",
+        broker="paper",
+        trade_broker="paper",
+        is_trading_day_fn=lambda _dt: True,
+        require_exchange_calendar=True,
+    )
+    assert runtime is not None
+
+
 def test_live_module_status_and_modes(engine) -> None:
     live = engine.get_module("live")
     snap = live.live_status()

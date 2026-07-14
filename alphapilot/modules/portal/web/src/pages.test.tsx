@@ -121,44 +121,42 @@ function mockPortalFetch({
 function mockTimingFetch() {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
-    if (path === "/api/timing/strategies") {
+    if (path === "/api/trading/strategy-definitions") {
       return Response.json({
-        names: ["boll_mean_reversion", "dual_ma"],
-        strategies: [
+        definitions: [
           {
-            name: "boll_mean_reversion",
+            strategy_id: "boll_mean_reversion",
+            version: "1.0.0",
+            signal_kind: "instrument_timing",
             description: "BOLL mean reversion",
-            defaults: { window: 20, num_std: 2 },
+            parameter_schema: { properties: { window: { default: 20 }, num_std: { default: 2 } } },
           },
           {
-            name: "dual_ma",
+            strategy_id: "dual_ma",
+            version: "1.0.0",
+            signal_kind: "instrument_timing",
             description: "Dual moving average",
-            defaults: { short_window: 5, long_window: 20 },
+            parameter_schema: { properties: { short_window: { default: 5 }, long_window: { default: 20 } } },
           },
         ],
       });
     }
-    if (path === "/api/timing/signal" && init?.method === "POST") {
+    if (path === "/api/trading/strategy-instances") {
+      return Response.json({ instances: [{
+        instance_id: "boll_demo", strategy_id: "boll_mean_reversion", lifecycle: "validated",
+        deployment_level: "replay", config_hash: "abc1234567890",
+      }] });
+    }
+    if (path === "/api/trading/strategy-instances/boll_demo/preview" && init?.method === "POST") {
       return Response.json({
-        strategy_name: "boll_mean_reversion",
-        signals: {
-          columns: ["datetime", "instrument", "signal", "target_percent", "reason"],
-          rows: [{ datetime: "2026-01-01", instrument: "SZ000001", signal: 1, target_percent: 1, reason: "test" }],
-          row_count: 1,
-          truncated: false,
-        },
+        signal: { as_of: "2026-01-01", payload: { scores: { "000001.SZSE": 1 }, states: { "000001.SZSE": "long" } } },
       });
     }
-    if (path === "/api/timing/backtest" && init?.method === "POST") {
-      return Response.json({
-        job_id: "timing-job",
-        kind: "timing_backtest",
-        status: "running",
-        progress: { percent: 0, stage: "queued" },
-      });
+    if (path === "/api/trading/strategy-instances/boll_demo/backtest-runs" && init?.method === "POST") {
+      return Response.json({ run_id: "timing-job", status: "running" });
     }
-    if (path === "/api/jobs/timing-job/progress") {
-      return Response.json({ job_id: "timing-job", status: "running", percent: 10, stage: "running" });
+    if (path === "/api/trading/backtest-runs/timing-job") {
+      return Response.json({ run_id: "timing-job", status: "running" });
     }
     if (path === "/api/jobs") {
       return Response.json([]);
@@ -281,19 +279,18 @@ describe("TimingPage", () => {
     renderTimingPage();
 
     expect(await screen.findByText("BOLL mean reversion")).toBeInTheDocument();
+    fireEvent.change(await screen.findByLabelText("运行实例"), { target: { value: "boll_demo" } });
 
     fireEvent.click(screen.getByRole("button", { name: "预览信号" }));
     await waitFor(() => {
-      expect(postedJson(fetchMock, "/api/timing/signal")).not.toBeNull();
+      expect(postedJson(fetchMock, "/api/trading/strategy-instances/boll_demo/preview")).not.toBeNull();
     });
-    expect(await screen.findByText("SZ000001")).toBeInTheDocument();
-    expect(postedJson(fetchMock, "/api/timing/signal")?.strategy_name).toBe("boll_mean_reversion");
+    expect(await screen.findByText("000001.SZSE")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "运行择时回测" }));
     await waitFor(() => {
-      expect(postedJson(fetchMock, "/api/timing/backtest")).not.toBeNull();
+      expect(postedJson(fetchMock, "/api/trading/strategy-instances/boll_demo/backtest-runs")).not.toBeNull();
     });
-    expect(postedJson(fetchMock, "/api/timing/backtest")?.strategy_name).toBe("boll_mean_reversion");
     expect(await screen.findByText("timing-job")).toBeInTheDocument();
   });
 });

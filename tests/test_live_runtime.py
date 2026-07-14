@@ -10,6 +10,7 @@ from alphapilot.systems.live.brokers.sim import SimBroker
 from alphapilot.systems.live.clock import SimulatedClock
 from alphapilot.systems.live.config import LiveConfig, RunMode
 from alphapilot.systems.live.runtime import LiveRuntime, require_live_confirmation
+from alphapilot.systems.live.journal import InMemoryExecutionJournal
 from alphapilot.systems.live.targets import TargetPortfolio
 
 
@@ -26,6 +27,11 @@ class QueryTrackingPaper(PaperBroker):
     def query_trades(self) -> bool:
         self.trade_queries += 1
         return super().query_trades()
+
+
+class ActiveWriterJournal(InMemoryExecutionJournal):
+    def active_live_writer(self, account_id: str):  # noqa: ANN201
+        return {"instance_id": "live-writer", "account_id": account_id}
 
 
 def _runtime(tmp_path: Path) -> LiveRuntime:
@@ -169,3 +175,28 @@ def test_runtime_live_requires_explicit_confirmation() -> None:
     with pytest.raises(ValueError, match="confirm_live"):
         require_live_confirmation(cfg, confirm_live=False)
     require_live_confirmation(cfg, confirm_live=True)
+
+
+def test_manual_buy_is_blocked_while_automated_live_writer_owns_account(tmp_path: Path) -> None:
+    cfg = LiveConfig(
+        mode=RunMode.PAPER,
+        broker="paper",
+        ledger_dir=tmp_path / "ledger",
+        state_dir=tmp_path / "state",
+    )
+    broker = PaperBroker(
+        cash=100_000.0, prices={"600000.SSE": 10.0}, open_cost=0.0, min_cost=0.0,
+    )
+    runtime = LiveRuntime.create(
+        cfg,
+        broker=broker,
+        now_fn=SimulatedClock(datetime(2026, 7, 1, 10, 0)),
+        execution_journal=ActiveWriterJournal(),
+    )
+    runtime.connect(paper_cash=100_000.0)
+
+    result = runtime.submit_order("SH600000", side="buy", volume=100, price=10.0)
+
+    assert result["submitted"] is False
+    assert result["routing_event"]["payload"]["rule"] == "automated_writer_lock"
+    runtime.close()

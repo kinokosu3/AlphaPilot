@@ -12,10 +12,11 @@ import json
 from pathlib import Path
 from typing import Any, Iterable
 
+from alphapilot.systems.trading.contracts import SignalKind
 from alphapilot.systems.trading.domain import StrategyDefinition
 
 STRATEGY_ENTRY_POINT_GROUP = "alphapilot.strategies"
-STRATEGY_API_VERSION = 1
+STRATEGY_API_VERSIONS = {1, 2}
 
 
 @dataclass(frozen=True)
@@ -32,11 +33,20 @@ class StrategyRegistry:
         self._quarantined: list[QuarantinedStrategy] = []
         self._local_bases: dict[str, Path] = {}
 
-    def discover(self) -> "StrategyRegistry":
+    def discover(
+        self,
+        *,
+        builtin_contributions: Iterable[StrategyDefinition] | None = None,
+    ) -> "StrategyRegistry":
         self._definitions.clear()
         self._quarantined.clear()
         self._local_bases.clear()
-        for definition in builtin_definitions():
+        contributions = (
+            list(builtin_contributions)
+            if builtin_contributions is not None
+            else builtin_definitions()
+        )
+        for definition in contributions:
             self._register(definition)
         self._discover_local()
         self._discover_entry_points()
@@ -78,8 +88,51 @@ class StrategyRegistry:
             factory = _load_factory(factory, base=self._local_bases.get(definition.strategy_id))
         return factory(**merged)
 
+    def create_provider(
+        self,
+        strategy_id: str,
+        params: dict[str, Any] | None = None,
+        *,
+        factory_context: dict[str, Any] | None = None,
+    ) -> Any:
+        """Create one provider-v2 object, adapting legacy batch strategies."""
+
+        definition = self.get(strategy_id)
+        merged = schema_defaults(definition.parameter_schema)
+        merged.update(params or {})
+        errors = validate_parameters(definition.parameter_schema, merged)
+        if errors:
+            raise ValueError("; ".join(errors))
+        if definition.provider_api_version == 1:
+            from alphapilot.systems.trading.providers import V1BatchProviderAdapter
+
+            return V1BatchProviderAdapter(
+                self.create(strategy_id, merged),
+                params=merged,
+            )
+        if definition.source != "builtin":
+            from alphapilot.systems.trading.worker import PersistentStrategyWorker
+
+            return PersistentStrategyWorker(
+                definition.to_dict()["factory"],
+                {**merged, **(factory_context or {})},
+                base=self._local_bases.get(definition.strategy_id),
+            )
+        factory = definition.factory
+        if isinstance(factory, str):
+            factory = _load_factory(factory, base=self._local_bases.get(definition.strategy_id))
+        provider = factory(**{**merged, **(factory_context or {})})
+        required = {"initialize", "warmup", "evaluate", "snapshot", "restore", "stop"}
+        missing = sorted(name for name in required if not callable(getattr(provider, name, None)))
+        if missing:
+            raise TypeError(f"provider v2 is missing lifecycle methods: {', '.join(missing)}")
+        return provider
+
     def quarantined(self) -> list[dict[str, str]]:
         return [item.__dict__ for item in self._quarantined]
+
+    def register(self, definition: StrategyDefinition, *, base: str | Path | None = None) -> None:
+        self._register(definition, base=None if base is None else Path(base))
 
     def _register(self, definition: StrategyDefinition, *, base: Path | None = None) -> None:
         key = str(definition.strategy_id).strip().lower()
@@ -92,11 +145,13 @@ class StrategyRegistry:
             return
         if int(definition.state_schema_version) <= 0:
             raise ValueError("state_schema_version must be positive")
-        if int(definition.api_version) != STRATEGY_API_VERSION:
+        if int(definition.api_version) not in STRATEGY_API_VERSIONS:
             raise ValueError(
                 f"strategy api version {definition.api_version} is unsupported; "
-                f"expected {STRATEGY_API_VERSION}"
+                f"expected one of {sorted(STRATEGY_API_VERSIONS)}"
             )
+        if int(definition.provider_api_version) not in STRATEGY_API_VERSIONS:
+            raise ValueError("provider_api_version must be 1 or 2")
         definition.strategy_id = key
         self._definitions[key] = definition
         if base is not None:
@@ -109,8 +164,8 @@ class StrategyRegistry:
             try:
                 data = _read_toml(manifest)
                 section = data.get("strategy") or data
-                api_version = int(section.get("api_version", STRATEGY_API_VERSION))
-                if api_version != STRATEGY_API_VERSION:
+                api_version = int(section.get("api_version", 1))
+                if api_version not in STRATEGY_API_VERSIONS:
                     raise ValueError(f"strategy api version {api_version} is unsupported")
                 schema = section.get("parameter_schema") or {}
                 if section.get("parameter_schema_json"):
@@ -130,6 +185,14 @@ class StrategyRegistry:
                     code_hash=_manifest_code_hash(manifest, str(section["factory"])),
                     description=str(section.get("description") or ""),
                     api_version=api_version,
+                    provider_api_version=int(section.get("provider_api_version") or api_version),
+                    signal_kind=SignalKind(
+                        str(section.get("signal_kind") or "instrument_timing")
+                    ),
+                    deployable_modes=tuple(
+                        section.get("deployable_modes")
+                        or ("replay", "paper", "shadow", "live")
+                    ),
                 )
                 self._register(definition, base=manifest.parent)
             except Exception as exc:  # noqa: BLE001 - bad plugins are isolated
@@ -166,26 +229,10 @@ class StrategyRegistry:
 
 
 def builtin_definitions() -> list[StrategyDefinition]:
-    from alphapilot.systems.timing.strategies import _STRATEGY_CLASSES
+    """Compatibility discovery without importing timing at module import time."""
 
-    definitions: list[StrategyDefinition] = []
-    for cls in _STRATEGY_CLASSES:
-        schema = _schema_from_defaults(cls.defaults)
-        required = _required_history(cls.defaults)
-        definitions.append(
-            StrategyDefinition(
-                strategy_id=cls.name,
-                version="1.0.0",
-                kind="rule",
-                factory=cls,
-                parameter_schema=schema,
-                required_history=required,
-                source="builtin",
-                code_hash=_source_hash(cls),
-                description=cls.description,
-            )
-        )
-    return definitions
+    module = importlib.import_module("alphapilot.systems.timing.definitions")
+    return list(module.strategy_definitions())
 
 
 def schema_defaults(schema: dict[str, Any]) -> dict[str, Any]:
@@ -315,11 +362,25 @@ def _source_hash(obj: Any) -> str:
 
 
 def _manifest_code_hash(manifest: Path, factory: str) -> str:
-    module_name = factory.split(":", 1)[0]
-    source = manifest.parent / f"{module_name}.py"
-    digest = hashlib.sha256(manifest.read_bytes())
-    if source.is_file():
-        digest.update(source.read_bytes())
+    del factory
+    return _local_directory_hash(manifest.parent)
+
+
+def _local_directory_hash(root: Path) -> str:
+    """Bind a local strategy to every code/config asset in its manifest directory."""
+
+    digest = hashlib.sha256(b"alphapilot-local-strategy-v1\0")
+    files = [
+        path for path in root.rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"
+    ]
+    for path in sorted(files, key=lambda item: item.relative_to(root).as_posix()):
+        if path.is_symlink():
+            raise ValueError("local strategy directories cannot contain symbolic links")
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        digest.update(path.read_bytes())
     return digest.hexdigest()
 
 

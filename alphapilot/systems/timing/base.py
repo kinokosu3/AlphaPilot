@@ -8,7 +8,7 @@ from typing import Any, Literal, Protocol
 
 import pandas as pd
 
-from alphapilot.systems.live.types import OrderStatus
+from alphapilot.systems.trading.contracts import OrderStatus
 
 OrderAction = Literal["buy", "sell", "target_percent", "target_shares", "close"]
 
@@ -63,8 +63,8 @@ class EventTimingStrategy(Protocol):
         """Return order intents for one bar."""
 
 
-# ``OrderStatus`` now lives in ``systems/live/types`` (6-state, vn.py-aligned) and
-# is imported above; re-exported here (and via ``systems/timing/__init__``) so
+# ``OrderStatus`` lives in the dependency-free trading contracts and is imported
+# above; re-exported here (and via ``systems/timing/__init__``) so
 # existing timing code keeps its ``OrderStatus.SUBMITTED`` / ``.CANCELLED`` usage.
 #
 # The old request/reply broker abstractions (``ExecutionReport`` + a second

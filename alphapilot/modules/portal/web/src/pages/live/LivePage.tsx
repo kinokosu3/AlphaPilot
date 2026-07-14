@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, qs } from "../../api";
+import { api, getOperatorToken, qs, setOperatorToken } from "../../api";
 import { Alert, PageTitle, useConfirm } from "../../components";
 import { useAsync, useJsonInput, useSerialPolling } from "../../hooks";
 import { useI18n } from "../../i18n";
@@ -28,6 +28,19 @@ import type {
 type Workspace = "live" | "paper";
 type SimulationMode = "paper" | "dry_run";
 type Ticket = "order" | "target";
+
+type DeploymentPackage = {
+  instance?: { instance_id?: string; lifecycle?: string; deployment_level?: string; config_hash?: string };
+  runtime?: {
+    desired_state?: string; observed_state?: string; account_id?: string; broker?: string;
+    runner_heartbeat_at?: string; reconcile_required?: boolean; last_error?: Record<string, unknown>;
+  };
+  stage_runs?: Array<{
+    run_id: string; stage: string; status: string; trading_sessions: number;
+    config_hash: string; metrics?: Record<string, unknown>;
+  }>;
+  route_blocks?: Array<{ scope_type: string; scope_id: string; active: boolean; reason?: string }>;
+};
 
 const WORKSPACE_STORAGE_KEY = "portal_live_workspace";
 
@@ -60,9 +73,8 @@ export function LivePage() {
   const brokerCatalog = useAsync(() => api.get<LiveBrokerSpec[]>("/api/live/brokers"), []);
   const quoteProviderCatalog = useAsync(() => api.get<LiveQuoteProviderSpec[]>("/api/live/quote-providers"), []);
   const pluginDiagnostics = useAsync(() => api.get<LivePluginDiagnostics>("/api/live/plugins"), []);
-  const timingStrategies = useAsync(() => api.get<{ names: string[] }>("/api/timing/strategies"), []);
   const strategyInstances = useAsync(
-    () => api.get<{ instances: Array<{ instance_id: string; deployment_level: string; lifecycle: string }> }>("/api/trading/strategy-instances"),
+    () => api.get<{ instances: Array<{ instance_id: string; deployment_level: string; lifecycle: string; config?: { frequency?: string; universe?: string[] } }> }>("/api/trading/strategy-instances"),
     [],
   );
 
@@ -118,8 +130,21 @@ export function LivePage() {
 
   const [daemonSymbols, setDaemonSymbols] = useState("600000");
   const [daemonTimingStrategy, setDaemonTimingStrategy] = useState("");
-  const [daemonTimingFreq, setDaemonTimingFreq] = useState("day");
-  const daemonTimingParams = useJsonInput('{"target_percent":0.2}');
+  const [operatorToken, setOperatorTokenValue] = useState(getOperatorToken());
+  const [killReason, setKillReason] = useState("");
+  const deploymentEvidence = useAsync(
+    () => daemonTimingStrategy.trim()
+      ? api.get<DeploymentPackage>(`/api/trading/deployments/${daemonTimingStrategy.trim()}`)
+      : Promise.resolve({} as DeploymentPackage),
+    [daemonTimingStrategy],
+  );
+  const safetyState = useAsync(async () => {
+    const [switches, audit] = await Promise.all([
+      api.get<{ kill_switches: Array<{ scope_type: string; scope_id: string; active: boolean; reason?: string; updated_at?: string }> }>("/api/trading/kill-switches"),
+      api.get<{ events: Array<Record<string, unknown>> }>("/api/trading/audit-events?limit=50"),
+    ]);
+    return { switches: switches.kill_switches, events: audit.events };
+  }, []);
   const [initialCash, setInitialCash] = useState("1000000");
   const [ticket, setTicket] = useState<Ticket>("order");
   const [orderCode, setOrderCode] = useState("");
@@ -183,8 +208,14 @@ export function LivePage() {
   const closeDiagnostics = useCallback(() => setDiagnosticsOpen(false), []);
 
   const refreshWorkspace = useCallback(async () => {
-    await Promise.all([daemonStatus.refresh(), runtimeState.refresh(), riskStatus.refresh(), ledgerEvents.refresh()]);
-  }, [daemonStatus.refresh, runtimeState.refresh, riskStatus.refresh, ledgerEvents.refresh]);
+    await Promise.all([
+      daemonStatus.refresh(), runtimeState.refresh(), riskStatus.refresh(), ledgerEvents.refresh(),
+      deploymentEvidence.refresh(), safetyState.refresh(),
+    ]);
+  }, [
+    daemonStatus.refresh, runtimeState.refresh, riskStatus.refresh, ledgerEvents.refresh,
+    deploymentEvidence.refresh, safetyState.refresh,
+  ]);
 
   const checkRuntime = () => run(async () => {
     const result = await api.post<LivePreflight>("/api/live/runtime/preflight", {
@@ -213,7 +244,6 @@ export function LivePage() {
       if (workspace === "paper" && (!Number.isFinite(Number(initialCash)) || Number(initialCash) <= 0)) {
         throw new Error("initial cash must be greater than 0");
       }
-      const timingParams = workspace === "paper" && daemonTimingStrategy.trim() ? daemonTimingParams.parse() : undefined;
       await api.post("/api/live/daemon/start", {
         ...query,
         cash: workspace === "paper" ? Number(initialCash) || undefined : undefined,
@@ -221,9 +251,6 @@ export function LivePage() {
         interval: 1,
         record_market_data: true,
         timeout: 30,
-        timing_strategy: workspace === "paper" ? daemonTimingStrategy.trim() || undefined : undefined,
-        timing_params: timingParams,
-        timing_freq: daemonTimingFreq,
       });
       await refreshWorkspace();
     }, t("liveDaemonStarted"));
@@ -253,22 +280,39 @@ export function LivePage() {
     if (workspace === "live" && !(await confirm({ message: t("liveDaemonReconnectConfirm"), danger: true }))) return;
     await command("/api/live/daemon/reconnect", t("liveDaemonReconnected"), { timeout: 20, auto_resume: false });
   };
-  const strategyPause = () => command("/api/live/daemon/strategy/pause", t("liveStrategyPaused"));
-  const strategyResume = () => command("/api/live/daemon/strategy/resume", t("liveStrategyResumed"));
+  const deploymentCommand = (action: string, message: string) => run(async () => {
+    if (!daemonTimingStrategy.trim()) throw new Error("strategy instance is required");
+    await api.post(`/api/trading/deployments/${daemonTimingStrategy.trim()}/${action}`, { reason: "portal" });
+    await Promise.all([
+      refreshWorkspace(), strategyInstances.refresh(), deploymentEvidence.refresh(),
+    ]);
+  }, message);
+  const strategyPause = () => deploymentCommand("pause", t("liveStrategyPaused"));
+  const strategyReconcile = () => deploymentCommand("reconcile", "策略实例对账完成");
+  const strategyResume = () => deploymentCommand("resume", t("liveStrategyResumed"));
   const strategyStop = async () => {
     if (!(await confirm({ message: t("liveStrategyStopConfirm"), danger: true }))) return;
-    await command("/api/live/daemon/strategy/stop", t("liveStrategyStopped"));
+    await deploymentCommand("stop", t("liveStrategyStopped"));
   };
   const strategyStart = async () => {
     if (workspace === "live" && !(await confirm({ message: t("liveStrategyStartConfirm"), danger: true }))) return;
-    await command("/api/live/daemon/strategy/start", t("liveStrategyStarted"), {
-      timing_strategy: workspace === "paper" ? daemonTimingStrategy.trim() : undefined,
-      instance_id: workspace === "live" ? daemonTimingStrategy.trim() : undefined,
-      symbols: daemonSymbols,
-      timing_params: workspace === "paper" ? daemonTimingParams.parse() : undefined,
-      timing_freq: daemonTimingFreq,
-      confirm_live: workspace === "live",
-    });
+    await deploymentCommand("start", t("liveStrategyStarted"));
+  };
+
+  const changeKillSwitch = async (scopeType: string, scopeId: string, action: "engage" | "release") => {
+    const reason = killReason.trim();
+    if (!reason) {
+      await run(async () => { throw new Error("kill switch 操作必须填写原因"); });
+      return;
+    }
+    if (!(await confirm({
+      message: `${action === "engage" ? "启用" : "解除"} ${scopeType}:${scopeId} kill switch？`,
+      danger: true,
+    }))) return;
+    await run(async () => {
+      await api.post(`/api/trading/kill-switches/${scopeType}/${encodeURIComponent(scopeId)}/${action}`, { reason });
+      await Promise.all([deploymentEvidence.refresh(), safetyState.refresh()]);
+    }, action === "engage" ? "Kill switch 已启用" : "Kill switch 已解除");
   };
 
   const submitOrder = async () => {
@@ -324,6 +368,14 @@ export function LivePage() {
   return (
     <div className="stack live-workspace-page">
       <PageTitle title={t("navLive")} subtitle={t("liveWorkspaceIntro")} />
+      <section className="panel inset">
+        <label className="field"><span>操作员令牌（只保存在当前浏览器内存）</span>
+          <input type="password" value={operatorToken} onChange={(event) => {
+            setOperatorTokenValue(event.target.value);
+            setOperatorToken(event.target.value);
+          }} placeholder="apop_…" autoComplete="off" />
+        </label>
+      </section>
       <div className="live-environment-tabs" role="tablist" aria-label={t("liveEnvironment")}>
         <button type="button" role="tab" aria-selected={workspace === "live"} className={workspace === "live" ? "active live" : ""} disabled={Boolean(daemon?.alive)} onClick={() => switchWorkspace("live")}>{t("liveEnvironmentLive")}</button>
         <button type="button" role="tab" aria-selected={workspace === "paper"} className={workspace === "paper" ? "active" : ""} disabled={Boolean(daemon?.alive)} onClick={() => switchWorkspace("paper")}>{t("liveEnvironmentPaper")}</button>
@@ -343,14 +395,9 @@ export function LivePage() {
           setSymbols={setDaemonSymbols}
           strategy={daemonTimingStrategy}
           setStrategy={setDaemonTimingStrategy}
-          strategyNames={workspace === "live"
-            ? (strategyInstances.data?.instances || [])
-              .filter((item) => item.deployment_level === "live")
-              .map((item) => item.instance_id)
-            : timingStrategies.data?.names || []}
-          freq={daemonTimingFreq}
-          setFreq={setDaemonTimingFreq}
-          params={daemonTimingParams}
+          strategyNames={(strategyInstances.data?.instances || [])
+            .filter((item) => item.deployment_level === (workspace === "live" ? "live" : "paper"))
+            .map((item) => item.instance_id)}
           initialCash={initialCash}
           setInitialCash={setInitialCash}
           simulated={workspace === "paper"}
@@ -358,6 +405,7 @@ export function LivePage() {
           onStartDaemon={startDaemon}
           onStrategyStart={strategyStart}
           onStrategyPause={strategyPause}
+          onStrategyReconcile={strategyReconcile}
           onStrategyResume={strategyResume}
           onStrategyStop={strategyStop}
           onRefreshDaemon={refreshDaemon}
@@ -392,6 +440,62 @@ export function LivePage() {
           onSubmitTarget={submitTarget}
         />
       </div>
+      <section className="panel" aria-labelledby="deployment-safety-title">
+        <div className="panel-head">
+          <div>
+            <h2 id="deployment-safety-title">部署证据与安全控制</h2>
+            <span className="muted">状态以 trading runtime 为准；daemon 心跳、对账和配置哈希不一致时自动路由关闭。</span>
+          </div>
+        </div>
+        {deploymentEvidence.error || safetyState.error ? (
+          <Alert tone="error">{deploymentEvidence.error || safetyState.error}</Alert>
+        ) : null}
+        {!daemonTimingStrategy.trim() ? <div className="empty">选择策略实例后查看部署、阶段证据和 kill switch。</div> : (
+          <>
+            <div className="live-runner-summary">
+              <span><small>Desired / Observed</small><strong>{deploymentEvidence.data?.runtime?.desired_state || "—"} / {deploymentEvidence.data?.runtime?.observed_state || "—"}</strong></span>
+              <span><small>账户 / Broker</small><strong>{deploymentEvidence.data?.runtime?.account_id || "—"} / {deploymentEvidence.data?.runtime?.broker || "—"}</strong></span>
+              <span><small>最近心跳</small><strong>{deploymentEvidence.data?.runtime?.runner_heartbeat_at || "—"}</strong></span>
+              <span><small>需要对账</small><strong>{deploymentEvidence.data?.runtime?.reconcile_required ? "是" : "否"}</strong></span>
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>阶段</th><th>状态</th><th>交易日</th><th>配置哈希</th></tr></thead>
+                <tbody>{(deploymentEvidence.data?.stage_runs || []).map((item) => (
+                  <tr key={item.run_id}><td>{item.stage}</td><td>{item.status}</td><td>{item.trading_sessions}</td><td><code>{item.config_hash.slice(0, 12)}</code></td></tr>
+                ))}</tbody>
+              </table>
+            </div>
+          </>
+        )}
+        <label className="field"><span>Kill switch 操作原因</span>
+          <input value={killReason} onChange={(event) => setKillReason(event.target.value)} placeholder="必填，并写入操作员审计" />
+        </label>
+        <div className="row-actions">
+          {daemonTimingStrategy.trim() ? (
+            <button className="button danger" onClick={() => changeKillSwitch("instance", daemonTimingStrategy.trim(), "engage")}>实例级停止新单</button>
+          ) : null}
+          {deploymentEvidence.data?.runtime?.account_id ? (
+            <button className="button danger" onClick={() => changeKillSwitch("account", String(deploymentEvidence.data?.runtime?.account_id), "engage")}>账户级停止新单</button>
+          ) : null}
+          <button className="button danger" onClick={() => changeKillSwitch("global", "*", "engage")}>全局停止新单</button>
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>范围</th><th>状态</th><th>原因</th><th>操作</th></tr></thead>
+            <tbody>{(safetyState.data?.switches || []).map((item) => (
+              <tr key={`${item.scope_type}:${item.scope_id}`}>
+                <td>{item.scope_type}:{item.scope_id}</td><td>{item.active ? "ACTIVE" : "released"}</td><td>{item.reason || "—"}</td>
+                <td>{item.active ? <button className="button small" onClick={() => changeKillSwitch(item.scope_type, item.scope_id, "release")}>解除</button> : "—"}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+        <details>
+          <summary>最近操作员审计</summary>
+          <pre className="inline-json">{JSON.stringify((safetyState.data?.events || []).slice(0, 20), null, 2)}</pre>
+        </details>
+      </section>
       <LiveActivityTabs
         daemon={daemon}
         mode={runtimeMode}

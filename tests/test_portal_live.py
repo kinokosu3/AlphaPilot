@@ -6,6 +6,7 @@ import json
 import socket
 import time
 from datetime import datetime, timedelta
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
@@ -15,7 +16,14 @@ from alphapilot.systems.live.types import Exchange, TickData
 
 
 def _client(engine):
-    return TestClient(create_app(engine=engine))
+    token = engine.get_system("trading").create_operator_token("portal-live-test")["token"]
+    return TestClient(
+        create_app(engine=engine),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "X-Request-ID": uuid4().hex,
+        },
+    )
 
 
 def _listen_local() -> socket.socket:
@@ -23,6 +31,21 @@ def _listen_local() -> socket.socket:
     sock.bind(("127.0.0.1", 0))
     sock.listen(1)
     return sock
+
+
+def test_live_mutations_require_operator_token(engine) -> None:
+    client = TestClient(create_app(engine=engine))
+
+    denied = client.post("/api/live/paper/connect", json={"cash": 100_000})
+    assert denied.status_code == 401
+    assert "Bearer operator token" in denied.json()["detail"]
+
+    # Read-only GETs and POST probes remain available without a token.
+    assert client.get("/api/live/status").status_code == 200
+    assert client.post(
+        "/api/live/runtime/preflight",
+        json={"broker": "paper", "network": False},
+    ).status_code == 200
 
 
 def test_live_status_before_connect(engine) -> None:

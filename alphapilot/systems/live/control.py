@@ -77,8 +77,20 @@ class DaemonRuntimeControl:
                         raw=status,
                     )
                 if not runner_status.get("stopped"):
-                    return self._from_status(daemon_status(self.config), status_only=True)
-                return self._command(
+                    observed_status = daemon_status(self.config)
+                    observed = self._from_status(observed_status, status_only=True)
+                    binding_error = self._binding_error(observed, instance)
+                    if binding_error:
+                        return RuntimeCommandResult(
+                            False,
+                            runtime_id=observed.runtime_id,
+                            heartbeat_at=observed.heartbeat_at,
+                            runner_status=observed.runner_status,
+                            error=binding_error,
+                            raw=observed_status,
+                        )
+                    return observed
+                restarted = self._command(
                     "strategy_start",
                     {
                         "instance_id": instance["instance_id"],
@@ -86,6 +98,18 @@ class DaemonRuntimeControl:
                         "confirm_live": mode == RunMode.LIVE,
                     },
                 )
+                binding_error = self._binding_error(restarted, instance)
+                if restarted.ok and binding_error:
+                    return RuntimeCommandResult(
+                        False,
+                        command_id=restarted.command_id,
+                        runtime_id=restarted.runtime_id,
+                        heartbeat_at=restarted.heartbeat_at,
+                        runner_status=restarted.runner_status,
+                        error=binding_error,
+                        raw=restarted.raw,
+                    )
+                return restarted
             runner_status = status.get("runner_status") or {}
             if current and not runner_status.get("stopped"):
                 return RuntimeCommandResult(
@@ -114,6 +138,7 @@ class DaemonRuntimeControl:
             state_dir=self.config.state_dir,
             ledger_dir=self.config.ledger_dir,
             strategy_instance_id=instance["instance_id"],
+            runtime_id=str(runtime.get("runtime_id") or "") or None,
             timeout=self.timeout,
         )
         if not start.get("started") and not start.get("running") and not start.get("starting"):
@@ -125,7 +150,18 @@ class DaemonRuntimeControl:
             if latest.get("running") and _runner_matches(
                 latest.get("runner_status") or {}, instance["instance_id"]
             ):
-                return self._from_status(latest, status_only=True)
+                observed = self._from_status(latest, status_only=True)
+                binding_error = self._binding_error(observed, instance)
+                if binding_error:
+                    return RuntimeCommandResult(
+                        False,
+                        runtime_id=observed.runtime_id,
+                        heartbeat_at=observed.heartbeat_at,
+                        runner_status=observed.runner_status,
+                        error=binding_error,
+                        raw=latest,
+                    )
+                return observed
             if latest.get("status") == "error" or not latest.get("alive", True):
                 break
             time.sleep(0.1)

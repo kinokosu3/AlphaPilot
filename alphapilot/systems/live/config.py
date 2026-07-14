@@ -98,6 +98,16 @@ class RiskLimits:
     max_quote_age_seconds: float = field(
         default_factory=lambda: _env_float("ALPHAPILOT_LIVE_MAX_QUOTE_AGE", 3.0)
     )
+    #: Conservative fee assumptions used by account sizing before routing.
+    buy_fee_rate: float = field(
+        default_factory=lambda: _env_float("ALPHAPILOT_LIVE_BUY_FEE_RATE", 0.0003)
+    )
+    sell_fee_rate: float = field(
+        default_factory=lambda: _env_float("ALPHAPILOT_LIVE_SELL_FEE_RATE", 0.0013)
+    )
+    min_fee: float = field(
+        default_factory=lambda: _env_float("ALPHAPILOT_LIVE_MIN_FEE", 5.0)
+    )
 
 
 @dataclass

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, qs } from "./api";
+import { api, qs, setOperatorToken } from "./api";
 
 function mockFetch(response: {
   ok?: boolean;
@@ -18,6 +18,7 @@ function mockFetch(response: {
 }
 
 afterEach(() => {
+  setOperatorToken("");
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -29,7 +30,7 @@ describe("api client", () => {
     expect(out).toEqual({ hello: "world" });
     const [path, init] = fetchMock.mock.calls[0];
     expect(path).toBe("/api/status");
-    expect((init.headers as Record<string, string>)["Content-Type"]).toBe("application/json");
+    expect(new Headers(init.headers).get("Content-Type")).toBe("application/json");
   });
 
   it("POST serializes the body and sets the method", async () => {
@@ -41,6 +42,14 @@ describe("api client", () => {
       factor_name: "f",
       factor_expression: "$close",
     });
+  });
+
+  it("keeps the operator token in memory and adds it as a bearer header", async () => {
+    const fetchMock = mockFetch({ json: { ok: true } });
+    setOperatorToken("apop_test_only");
+    await api.post("/api/trading/deployments/demo/pause", { reason: "test" });
+    const [, init] = fetchMock.mock.calls[0];
+    expect(new Headers(init.headers).get("Authorization")).toBe("Bearer apop_test_only");
   });
 
   it("POST with no body sends an empty object", async () => {

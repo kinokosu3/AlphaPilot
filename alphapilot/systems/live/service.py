@@ -104,6 +104,7 @@ class LiveSystem(BaseSystem):
         runtime_id: str | None = None,
         now_fn=None,
         is_trading_day_fn=None,
+        require_exchange_calendar: bool = False,
     ):
         """Build a reusable live runtime for CLI / Portal / daemon control.
 
@@ -149,10 +150,16 @@ class LiveSystem(BaseSystem):
             # Standalone PAPER runtimes retain an in-memory compatibility
             # journal; automated LIVE routing fails closed without authorizer.
             pass
+        calendar = is_trading_day_fn
+        if calendar is None:
+            calendar = self._trading_day_predicate(
+                mode=cfg.mode,
+                require_exchange_calendar=require_exchange_calendar,
+            )
         return LiveRuntime.create(
             cfg,
             now_fn=now_fn,
-            is_trading_day_fn=is_trading_day_fn or self._trading_day_predicate(mode=cfg.mode),
+            is_trading_day_fn=calendar,
             execution_journal=execution_journal,
             route_authorizer=route_authorizer,
             runtime_id=runtime_id,
@@ -165,8 +172,19 @@ class LiveSystem(BaseSystem):
 
         return DaemonRuntimeControl(self.config)
 
-    def _trading_day_predicate(self, *, mode: str | None = None):
-        """Use the local Qlib exchange calendar; LIVE fails closed if absent."""
+    def _trading_day_predicate(
+        self,
+        *,
+        mode: str | None = None,
+        require_exchange_calendar: bool = False,
+    ):
+        """Use the local Qlib exchange calendar and fail closed when required.
+
+        Legacy standalone PAPER tools retain the weekday fallback for backwards
+        compatibility.  Formal strategy-instance runtimes opt into
+        ``require_exchange_calendar`` so holidays can never be counted as stage
+        evidence or reach order planning merely because they fall on a weekday.
+        """
         selected_mode = mode or self.config.mode
         data_config = getattr(self.context.config, "data", None)
         qlib_root = Path(getattr(data_config, "qlib_data_dir", "") or "").expanduser()
@@ -187,6 +205,10 @@ class LiveSystem(BaseSystem):
                 continue
         if days:
             return lambda dt: dt.date().isoformat() in days
+        if require_exchange_calendar:
+            raise RuntimeError(
+                "configured exchange trading calendar is required for a formal strategy instance"
+            )
         if uses_real_providers(selected_mode):
             return lambda _dt: False
         return lambda dt: dt.weekday() < 5

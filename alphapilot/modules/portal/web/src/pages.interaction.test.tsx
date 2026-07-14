@@ -194,9 +194,10 @@ describe("TimingPage merged-parameter validation", () => {
   it("rejects contradictory advanced strategy windows before either endpoint is called", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input);
-      if (path === "/api/timing/strategies") return Response.json({
-        names: ["dual_ma"], strategies: [{ name: "dual_ma", description: "Dual MA", defaults: { short_window: 5, long_window: 20 } }],
+      if (path === "/api/trading/strategy-definitions") return Response.json({
+        definitions: [{ strategy_id: "dual_ma", version: "1.0.0", signal_kind: "instrument_timing", description: "Dual MA", parameter_schema: { properties: { short_window: { default: 5 }, long_window: { default: 20 } } } }],
       });
+      if (path === "/api/trading/strategy-instances") return Response.json({ instances: [{ instance_id: "dual_ma_demo", strategy_id: "dual_ma", lifecycle: "validated", deployment_level: "replay", config_hash: "abc" }] });
       if (path === "/api/jobs") return Response.json([]);
       return Response.json({}, { status: 404 });
     });
@@ -204,13 +205,14 @@ describe("TimingPage merged-parameter validation", () => {
     const user = userEvent.setup();
     renderPage(<TimingPage />);
     await screen.findByText("Dual MA");
+    await user.selectOptions(screen.getByLabelText("运行实例"), "dual_ma_demo");
     const advanced = screen.getByText("高级 JSON").closest("details")?.querySelector("textarea") as HTMLTextAreaElement;
     await user.clear(advanced);
     await user.click(advanced);
     await user.paste('{"strategy_params":{"short_window":20,"long_window":5}}');
     await user.click(screen.getByRole("button", { name: "预览信号" }));
     await screen.findByText("strategy_params.short_window must be less than strategy_params.long_window");
-    expect(fetchMock.mock.calls.some(([path]) => String(path) === "/api/timing/signal")).toBe(false);
+    expect(fetchMock.mock.calls.some(([path]) => String(path).endsWith("/preview"))).toBe(false);
   });
 });
 

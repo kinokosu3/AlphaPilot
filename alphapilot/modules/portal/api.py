@@ -4,17 +4,19 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import tempfile
 import time
+import uuid
 from dataclasses import asdict, is_dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -61,8 +63,68 @@ def _safe_call(label: str, fn, default: Any = None) -> Any:  # noqa: ANN001
 
 
 def _api_error(exc: Exception) -> HTTPException:
-    status = 404 if isinstance(exc, FileNotFoundError) else 400
+    status = (
+        401 if isinstance(exc, PermissionError)
+        else 404 if isinstance(exc, (FileNotFoundError, KeyError))
+        else 400
+    )
     return HTTPException(status_code=status, detail=f"{type(exc).__name__}: {exc}")
+
+
+def _truthy_env(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _trading_operator(
+    app: FastAPI,
+    request: Request,
+    authorization: str | None,
+    *,
+    reason: str = "",
+) -> Any:
+    trading = _engine(app).get_system("trading")
+    request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
+    if _truthy_env("ALPHAPILOT_OPERATOR_AUTH_REQUIRED", "true"):
+        return trading.operator_auth.authenticate(
+            authorization or "",
+            request_id=request_id,
+            reason=reason,
+        )
+    from alphapilot.systems.trading.contracts import OperatorContext
+
+    return OperatorContext(
+        operator_id="local-compat",
+        request_id=request_id,
+        reason=reason,
+        auth_source="local-compatibility",
+    )
+
+
+def _deprecated(response: Response, replacement: str) -> None:
+    response.headers["Deprecation"] = "true"
+    response.headers["Link"] = f'<{replacement}>; rel="successor-version"'
+
+
+def _record_legacy_entrypoint(app: FastAPI, entrypoint: str) -> None:
+    try:
+        _engine(app).get_system("trading").store.record_legacy_usage(entrypoint)
+    except (AttributeError, KeyError):
+        # Lightweight embedded/test engines may intentionally omit trading.
+        return
+
+
+def _legacy_live_mutation(path: str, method: str) -> bool:
+    """Identify legacy live writes that must not bypass operator auth."""
+
+    if method.upper() not in {"POST", "PATCH", "PUT", "DELETE"}:
+        return False
+    if not path.startswith("/api/live/"):
+        return False
+    # These two POST endpoints are read-only probes kept for compatibility.
+    return path not in {
+        "/api/live/runtime/preflight",
+        "/api/live/daemon/strategy/status",
+    }
 
 
 def _count_unique_symbols(symbols_by_mode: Any) -> int:
@@ -517,6 +579,14 @@ def create_app(
         app.state.engine = engine
     app.state.portal_host = portal_host
     app.state.portal_port = portal_port
+    selected_host = str(portal_host or "127.0.0.1")
+    if (
+        selected_host not in {"127.0.0.1", "localhost", "::1"}
+        and _truthy_env("ALPHAPILOT_AUTOMATED_LIVE_ENABLED")
+    ):
+        raise RuntimeError(
+            "automated LIVE requires the Portal to bind to a loopback address"
+        )
 
     app.add_middleware(
         CORSMiddleware,
@@ -525,6 +595,58 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def authenticate_legacy_live_writes(request: Request, call_next):  # noqa: ANN001
+        """Protect retained live APIs with the same local operator boundary.
+
+        The explicit ``/api/trading`` endpoints authenticate and audit inside
+        their handlers because they carry richer instance/account context.
+        Older ``/api/live`` writes are intentionally retained for UAT and
+        recovery, but must not remain an unauthenticated route around that
+        boundary.
+        """
+
+        if not _legacy_live_mutation(request.url.path, request.method):
+            return await call_next(request)
+        try:
+            operator = _trading_operator(
+                app,
+                request,
+                request.headers.get("authorization"),
+                reason=(
+                    request.headers.get("x-operator-reason")
+                    or f"legacy live API {request.url.path}"
+                ),
+            )
+            trading = _engine(app).get_system("trading")
+            # Persist the request before allowing the mutation.  A second
+            # event records the HTTP outcome; if that write later fails, the
+            # immutable requested event still preserves the operator trail.
+            trading.operator_auth.audit(
+                operator,
+                action=f"legacy_live:{request.url.path}",
+                result="requested",
+                details={"method": request.method},
+            )
+        except Exception as exc:  # noqa: BLE001 - fail closed at the API boundary
+            error = _api_error(exc)
+            return JSONResponse(
+                status_code=error.status_code,
+                content={"detail": error.detail},
+            )
+
+        response = await call_next(request)
+        try:
+            trading.operator_auth.audit(
+                operator,
+                action=f"legacy_live:{request.url.path}",
+                result="ok" if response.status_code < 400 else "failed",
+                details={"method": request.method, "status_code": response.status_code},
+            )
+        except Exception:  # noqa: BLE001 - the pre-action audit is already durable
+            pass
+        return response
 
     @app.get("/api/status")
     def status() -> dict[str, Any]:
@@ -955,8 +1077,10 @@ def create_app(
             raise _api_error(exc) from exc
 
     @app.get("/api/timing/strategies")
-    def timing_strategies() -> dict[str, Any]:
+    def timing_strategies(response: Response) -> dict[str, Any]:
         try:
+            _deprecated(response, "/api/trading/strategy-definitions")
+            _record_legacy_entrypoint(app, "GET /api/timing/strategies")
             strategies = _engine(app).get_system("timing").list_strategies()
             return _jsonable({
                 "strategies": strategies,
@@ -968,8 +1092,10 @@ def create_app(
             raise _api_error(exc) from exc
 
     @app.post("/api/timing/signal")
-    def timing_signal(payload: dict[str, Any], max_rows: int = 500) -> dict[str, Any]:
+    def timing_signal(response: Response, payload: dict[str, Any], max_rows: int = 500) -> dict[str, Any]:
         try:
+            _deprecated(response, "/api/trading/strategy-instances/{id}/preview")
+            _record_legacy_entrypoint(app, "POST /api/timing/signal")
             req = _timing_request_from_payload(payload)
             signals = _engine(app).get_system("timing").generate_signals(req)
             return _jsonable(
@@ -984,8 +1110,10 @@ def create_app(
             raise _api_error(exc) from exc
 
     @app.post("/api/timing/backtest")
-    def timing_backtest(payload: dict[str, Any]) -> dict[str, Any]:
+    def timing_backtest(response: Response, payload: dict[str, Any]) -> dict[str, Any]:
         try:
+            _deprecated(response, "/api/trading/strategy-instances/{id}/backtest-runs")
+            _record_legacy_entrypoint(app, "POST /api/timing/backtest")
             return _jsonable({
                 **jobs.start_job("timing_backtest", dict(payload)),
                 "deprecated": True,
@@ -1001,6 +1129,15 @@ def create_app(
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
+    @app.get("/api/trading/portfolio-policy-definitions")
+    def trading_portfolio_policy_definitions() -> dict[str, Any]:
+        try:
+            return _jsonable(
+                _engine(app).get_system("trading").list_portfolio_policy_definitions()
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
     @app.get("/api/trading/strategy-instances")
     def trading_strategy_instances() -> dict[str, Any]:
         try:
@@ -1009,35 +1146,174 @@ def create_app(
             raise _api_error(exc) from exc
 
     @app.post("/api/trading/strategy-instances")
-    def trading_strategy_instance_create(payload: dict[str, Any]) -> dict[str, Any]:
+    def trading_strategy_instance_create(
+        payload: dict[str, Any],
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
         try:
-            return _jsonable(_engine(app).get_system("trading").create_instance(payload))
+            operator = _trading_operator(app, request, authorization, reason=str(payload.get("reason") or ""))
+            trading = _engine(app).get_system("trading")
+            result = trading.create_instance(payload)
+            trading.operator_auth.audit(
+                operator, action="create_instance", result="ok",
+                instance_id=result["instance_id"], config_hash=result["config_hash"],
+            )
+            return _jsonable(result)
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/trading/strategy-instances/from-research-asset")
+    def trading_strategy_instance_from_research(
+        payload: dict[str, Any],
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        try:
+            operator = _trading_operator(app, request, authorization, reason=str(payload.get("reason") or ""))
+            trading = _engine(app).get_system("trading")
+            result = trading.create_instance_from_research_asset(payload)
+            trading.operator_auth.audit(
+                operator, action="create_instance_from_research_asset", result="ok",
+                instance_id=result["instance_id"], config_hash=result["config_hash"],
+                details={"research_asset": payload.get("strategy_name") or payload.get("research_asset")},
+            )
+            return _jsonable(result)
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
     @app.patch("/api/trading/strategy-instances/{instance_id}")
-    def trading_strategy_instance_update(instance_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def trading_strategy_instance_update(
+        instance_id: str,
+        payload: dict[str, Any],
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
         try:
-            return _jsonable(_engine(app).get_system("trading").update_instance(instance_id, payload))
+            operator = _trading_operator(app, request, authorization, reason=str(payload.get("reason") or ""))
+            trading = _engine(app).get_system("trading")
+            result = trading.update_instance(instance_id, payload)
+            trading.operator_auth.audit(
+                operator, action="update_instance", result="ok",
+                instance_id=instance_id, config_hash=result["config_hash"],
+            )
+            return _jsonable(result)
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
     @app.post("/api/trading/strategy-instances/{instance_id}/validate")
-    def trading_strategy_instance_validate(instance_id: str) -> dict[str, Any]:
+    def trading_strategy_instance_validate(
+        instance_id: str,
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
         try:
-            return _jsonable(_engine(app).get_system("trading").validate_instance(instance_id))
+            operator = _trading_operator(app, request, authorization)
+            trading = _engine(app).get_system("trading")
+            result = trading.validate_instance(instance_id)
+            current = trading.store.get_instance(instance_id)
+            trading.operator_auth.audit(
+                operator, action="validate_instance", result="ok" if result["ok"] else "rejected",
+                instance_id=instance_id, config_hash=current["config_hash"], details=result.get("errors"),
+            )
+            return _jsonable(result)
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
     @app.post("/api/trading/strategy-instances/{instance_id}/backtest")
-    def trading_strategy_instance_backtest(instance_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def trading_strategy_instance_backtest(
+        instance_id: str,
+        payload: dict[str, Any],
+        response: Response,
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
         try:
+            _deprecated(response, f"/api/trading/strategy-instances/{instance_id}/backtest-runs")
+            operator = _trading_operator(app, request, authorization, reason=str(payload.get("reason") or ""))
             result = _engine(app).get_system("trading").backtest_instance(instance_id, payload)
+            _engine(app).get_system("trading").operator_auth.audit(
+                operator, action="legacy_sync_backtest", result="ok",
+                instance_id=instance_id,
+                config_hash=_engine(app).get_system("trading").store.get_instance(instance_id)["config_hash"],
+            )
             return _jsonable({
                 "instance_id": instance_id,
                 "summary": result.summary,
                 "artifact_dir": str(result.artifact_dir),
             })
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/trading/strategy-instances/{instance_id}/preview")
+    def trading_strategy_instance_preview(
+        instance_id: str,
+        payload: dict[str, Any],
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        try:
+            operator = _trading_operator(app, request, authorization, reason=str(payload.get("reason") or ""))
+            trading = _engine(app).get_system("trading")
+            result = trading.preview_instance(instance_id, payload)
+            trading.operator_auth.audit(
+                operator, action="preview_signal", result="ok",
+                instance_id=instance_id, config_hash=result["config_hash"],
+            )
+            return _jsonable(result)
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/trading/strategy-instances/{instance_id}/backtest-runs")
+    def trading_backtest_run_create(
+        instance_id: str,
+        payload: dict[str, Any],
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        try:
+            operator = _trading_operator(app, request, authorization, reason=str(payload.get("reason") or ""))
+            trading = _engine(app).get_system("trading")
+            result = trading.start_backtest_run(instance_id, payload)
+            trading.operator_auth.audit(
+                operator, action="start_backtest", result="queued",
+                instance_id=instance_id, config_hash=result["config_hash"],
+                details={"run_id": result["run_id"]},
+            )
+            return _jsonable(result)
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.get("/api/trading/backtest-runs/{run_id}")
+    def trading_backtest_run_get(run_id: str) -> dict[str, Any]:
+        try:
+            return _jsonable(_engine(app).get_system("trading").get_backtest_run(run_id))
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.get("/api/trading/backtest-runs/{run_id}/detail")
+    def trading_backtest_run_detail(run_id: str) -> dict[str, Any]:
+        try:
+            return _jsonable(_engine(app).get_system("trading").get_backtest_run(run_id, detail=True))
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/trading/backtest-runs/{run_id}/cancel")
+    def trading_backtest_run_cancel(
+        run_id: str,
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        try:
+            operator = _trading_operator(app, request, authorization, reason="cancel backtest")
+            trading = _engine(app).get_system("trading")
+            result = trading.cancel_backtest_run(run_id)
+            trading.operator_auth.audit(
+                operator, action="cancel_backtest", result="requested",
+                instance_id=result["instance_id"], config_hash=result["config_hash"],
+                details={"run_id": run_id},
+            )
+            return _jsonable(result)
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
@@ -1049,43 +1325,184 @@ def create_app(
             raise _api_error(exc) from exc
 
     @app.post("/api/trading/deployments/{instance_id}/promote")
-    def trading_deployment_promote(instance_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def trading_deployment_promote(
+        instance_id: str,
+        payload: dict[str, Any],
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
         try:
-            return _jsonable(_engine(app).get_system("trading").promote(instance_id, payload))
+            reason = str(payload.get("reason") or "").strip()
+            if not reason:
+                raise ValueError("deployment promotion requires an operator reason")
+            operator = _trading_operator(app, request, authorization, reason=reason)
+            trading = _engine(app).get_system("trading")
+            result = trading.promote(instance_id, payload)
+            trading.operator_auth.audit(
+                operator, action="promote_deployment", result="ok",
+                instance_id=instance_id, config_hash=result["config_hash"],
+                account_id=str(payload.get("account_id") or ""), broker=str(payload.get("broker") or ""),
+                details={"to": payload.get("to")},
+            )
+            return _jsonable(result)
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/trading/deployments/{instance_id}/authorize-live")
+    def trading_deployment_authorize_live(
+        instance_id: str,
+        payload: dict[str, Any],
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        try:
+            operator = _trading_operator(app, request, authorization, reason=str(payload.get("reason") or ""))
+            return _jsonable(
+                _engine(app).get_system("trading").authorize_live(instance_id, payload, operator)
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    def _deployment_command(
+        instance_id: str,
+        action: str,
+        payload: dict[str, Any],
+        request: Request,
+        authorization: str | None,
+    ) -> dict[str, Any]:
+        reason = str(payload.get("reason") or "").strip()
+        if not reason:
+            raise ValueError(f"deployment {action} requires an operator reason")
+        operator = _trading_operator(app, request, authorization, reason=reason)
+        trading = _engine(app).get_system("trading")
+        result = trading.lifecycle_action(instance_id, action)
+        current = trading.store.get_instance(instance_id)
+        runtime = trading.store.get_runtime_state(instance_id)
+        trading.operator_auth.audit(
+            operator, action=f"deployment_{action}", result="ok" if result.get("ok", True) else "failed",
+            instance_id=instance_id, config_hash=current["config_hash"],
+            account_id=runtime["account_id"], broker=runtime["broker"], details=result,
+        )
+        return _jsonable(result)
+
+    for _action in ("start", "pause", "reconcile", "resume", "stop"):
+        def _make_action(action_name: str):
+            def endpoint(
+                instance_id: str,
+                request: Request,
+                payload: dict[str, Any] | None = None,
+                authorization: str | None = Header(default=None),
+            ) -> dict[str, Any]:
+                try:
+                    return _deployment_command(
+                        instance_id, action_name, payload or {}, request, authorization,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    raise _api_error(exc) from exc
+            return endpoint
+        app.post(f"/api/trading/deployments/{{instance_id}}/{_action}")(
+            _make_action(_action)
+        )
+
+    @app.get("/api/trading/deployments/{instance_id}/status")
+    def trading_deployment_status(instance_id: str) -> dict[str, Any]:
+        try:
+            return _jsonable(_engine(app).get_system("trading").lifecycle_action(instance_id, "status"))
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
     @app.post("/api/trading/deployments/{instance_id}/{action}")
-    def trading_deployment_action(instance_id: str, action: str) -> dict[str, Any]:
+    def trading_deployment_action(
+        instance_id: str,
+        action: str,
+        response: Response,
+        request: Request,
+        payload: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
         try:
-            return _jsonable(_engine(app).get_system("trading").lifecycle_action(instance_id, action))
+            _deprecated(response, f"/api/trading/deployments/{instance_id}/{action}")
+            compatibility_payload = dict(payload or {})
+            compatibility_payload.setdefault(
+                "reason", "legacy compatibility lifecycle action",
+            )
+            return _deployment_command(
+                instance_id, action, compatibility_payload, request, authorization,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.get("/api/trading/deployments/{instance_id}/stage-runs")
+    def trading_deployment_stage_runs(instance_id: str) -> dict[str, Any]:
+        try:
+            return _jsonable({
+                "stage_runs": _engine(app).get_system("trading").store.list_stage_runs(instance_id)
+            })
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
     @app.post("/api/trading/stage-runs/{instance_id}/{stage}/start")
-    def trading_stage_run_start(instance_id: str, stage: str) -> dict[str, Any]:
+    def trading_stage_run_start(
+        instance_id: str,
+        stage: str,
+        request: Request,
+        response: Response,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
         try:
-            return _jsonable(
-                _engine(app).get_system("trading").start_stage_run(instance_id, stage)
+            _deprecated(response, f"/api/trading/deployments/{instance_id}/start")
+            operator = _trading_operator(app, request, authorization, reason="legacy stage-run start")
+            trading = _engine(app).get_system("trading")
+            result = trading.start_stage_run(instance_id, stage)
+            trading.operator_auth.audit(
+                operator, action="legacy_stage_run_start", result="ok",
+                instance_id=instance_id, config_hash=result["config_hash"], details={"stage": stage},
             )
+            return _jsonable(result)
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
     @app.post("/api/trading/stage-runs/{run_id}/finish")
-    def trading_stage_run_finish(run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def trading_stage_run_finish(
+        run_id: str,
+        payload: dict[str, Any],
+        request: Request,
+        response: Response,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
         try:
-            return _jsonable(
-                _engine(app).get_system("trading").finish_stage_run(run_id, payload)
+            _deprecated(response, "/api/trading/deployments/{id}/stop")
+            operator = _trading_operator(app, request, authorization, reason="legacy stage-run finish")
+            trading = _engine(app).get_system("trading")
+            result = trading.finish_stage_run(run_id, payload)
+            trading.operator_auth.audit(
+                operator, action="legacy_stage_run_finish", result="ok",
+                instance_id=result["instance_id"], config_hash=result["config_hash"],
+                details={"run_id": run_id},
             )
+            return _jsonable(result)
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
     @app.post("/api/trading/stage-runs/{instance_id}/{stage}/evaluate")
-    def trading_stage_run_evaluate(instance_id: str, stage: str) -> dict[str, Any]:
+    def trading_stage_run_evaluate(
+        instance_id: str,
+        stage: str,
+        request: Request,
+        response: Response,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
         try:
-            return _jsonable(
-                _engine(app).get_system("trading").evaluate_stage(instance_id, stage)
+            _deprecated(response, f"/api/trading/deployments/{instance_id}/stage-runs")
+            operator = _trading_operator(app, request, authorization, reason="legacy stage evaluation")
+            trading = _engine(app).get_system("trading")
+            result = trading.evaluate_stage(instance_id, stage)
+            current = trading.store.get_instance(instance_id)
+            trading.operator_auth.audit(
+                operator, action="legacy_stage_run_evaluate", result="ok" if result["passed"] else "rejected",
+                instance_id=instance_id, config_hash=current["config_hash"], details=result,
             )
+            return _jsonable(result)
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
@@ -1098,24 +1515,44 @@ def create_app(
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
+    @app.get("/api/trading/audit-events")
+    def trading_audit_events(limit: int = 200) -> dict[str, Any]:
+        try:
+            return _jsonable({
+                "events": _engine(app).get_system("trading").audit_events(limit=limit)
+            })
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
     @app.post("/api/trading/kill-switches/{scope_type}/{scope_id}/{action}")
     def trading_kill_switch(
         scope_type: str,
         scope_id: str,
         action: str,
+        request: Request,
         payload: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         try:
             if action not in {"engage", "release"}:
                 raise ValueError("kill-switch action must be engage or release")
-            return _jsonable(
-                _engine(app).get_system("trading").set_kill_switch(
+            reason = str((payload or {}).get("reason") or "").strip()
+            if not reason:
+                raise ValueError("kill-switch changes require an operator reason")
+            operator = _trading_operator(
+                app, request, authorization, reason=reason,
+            )
+            trading = _engine(app).get_system("trading")
+            result = trading.set_kill_switch(
                     scope_type,
                     scope_id,
                     active=action == "engage",
-                    reason=str((payload or {}).get("reason") or ""),
+                    reason=reason,
                 )
+            trading.operator_auth.audit(
+                operator, action=f"kill_switch_{action}", result="ok", details=result,
             )
+            return _jsonable(result)
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
@@ -2054,8 +2491,10 @@ def create_app(
             raise _api_error(exc) from exc
 
     @app.post("/api/live/daemon/strategy/status")
-    def live_daemon_strategy_status(payload: dict[str, Any]) -> dict[str, Any]:
+    def live_daemon_strategy_status(payload: dict[str, Any], response: Response) -> dict[str, Any]:
         try:
+            _deprecated(response, "/api/trading/deployments/{id}/status")
+            _record_legacy_entrypoint(app, "/api/live/daemon/strategy/status")
             return _jsonable(
                 _live_module().live_daemon_strategy_status(
                     state_dir=payload.get("state_dir"),
@@ -2067,8 +2506,10 @@ def create_app(
             raise _api_error(exc) from exc
 
     @app.post("/api/live/daemon/strategy/start")
-    def live_daemon_strategy_start(payload: dict[str, Any]) -> dict[str, Any]:
+    def live_daemon_strategy_start(payload: dict[str, Any], response: Response) -> dict[str, Any]:
         try:
+            _deprecated(response, "/api/trading/deployments/{id}/start")
+            _record_legacy_entrypoint(app, "/api/live/daemon/strategy/start")
             return _jsonable(
                 _live_module().live_daemon_strategy_start(
                     timing_strategy=str(payload.get("timing_strategy") or payload.get("strategy") or ""),
@@ -2089,8 +2530,10 @@ def create_app(
             raise _api_error(exc) from exc
 
     @app.post("/api/live/daemon/strategy/pause")
-    def live_daemon_strategy_pause(payload: dict[str, Any]) -> dict[str, Any]:
+    def live_daemon_strategy_pause(payload: dict[str, Any], response: Response) -> dict[str, Any]:
         try:
+            _deprecated(response, "/api/trading/deployments/{id}/pause")
+            _record_legacy_entrypoint(app, "/api/live/daemon/strategy/pause")
             return _jsonable(
                 _live_module().live_daemon_strategy_pause(
                     state_dir=payload.get("state_dir"),
@@ -2102,8 +2545,10 @@ def create_app(
             raise _api_error(exc) from exc
 
     @app.post("/api/live/daemon/strategy/resume")
-    def live_daemon_strategy_resume(payload: dict[str, Any]) -> dict[str, Any]:
+    def live_daemon_strategy_resume(payload: dict[str, Any], response: Response) -> dict[str, Any]:
         try:
+            _deprecated(response, "/api/trading/deployments/{id}/resume")
+            _record_legacy_entrypoint(app, "/api/live/daemon/strategy/resume")
             return _jsonable(
                 _live_module().live_daemon_strategy_resume(
                     state_dir=payload.get("state_dir"),
@@ -2116,8 +2561,10 @@ def create_app(
             raise _api_error(exc) from exc
 
     @app.post("/api/live/daemon/strategy/stop")
-    def live_daemon_strategy_stop(payload: dict[str, Any]) -> dict[str, Any]:
+    def live_daemon_strategy_stop(payload: dict[str, Any], response: Response) -> dict[str, Any]:
         try:
+            _deprecated(response, "/api/trading/deployments/{id}/stop")
+            _record_legacy_entrypoint(app, "/api/live/daemon/strategy/stop")
             return _jsonable(
                 _live_module().live_daemon_strategy_stop(
                     state_dir=payload.get("state_dir"),

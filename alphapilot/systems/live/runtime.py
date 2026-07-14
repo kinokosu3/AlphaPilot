@@ -549,12 +549,32 @@ class LiveRuntime:
         blocks = self._manual_route_blocks(context)
         if blocks:
             reason = ", ".join(f"{item['scope_type']}:{item['scope_id']}" for item in blocks)
-            self.engine.ledger.record(
+            self.engine.ledger.record_event(
                 "blocked",
                 {
                     "origin": "manual",
                     "rule": "kill_switch",
                     "reason": f"route blocked by {reason}",
+                },
+                reference=request.reference,
+            )
+            return None
+        account = self.engine.oms.account
+        writer_lookup = getattr(self.execution_journal, "active_live_writer", None)
+        writer = (
+            writer_lookup(str(account.account_id))
+            if callable(writer_lookup) and account is not None else None
+        )
+        if writer is not None and request.is_buy:
+            self.engine.ledger.record_event(
+                "blocked",
+                {
+                    "origin": "manual",
+                    "rule": "automated_writer_lock",
+                    "reason": (
+                        "ordinary manual buys are disabled while LIVE writer "
+                        f"{writer['instance_id']} owns this account"
+                    ),
                 },
                 reference=request.reference,
             )

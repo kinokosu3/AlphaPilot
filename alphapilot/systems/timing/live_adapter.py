@@ -18,12 +18,25 @@ is the runner's concern, mirroring the backtest's next-bar-open ``shift(1)``.
 from __future__ import annotations
 
 from collections import deque
+from typing import Any, Protocol
 
 import pandas as pd
 
-from alphapilot.systems.live.bars import Bar
-from alphapilot.systems.live.types import normalize_symbol, symbol_key
 from alphapilot.systems.timing.base import OrderIntent, TimingContext, TimingStrategy
+from alphapilot.systems.trading.contracts import canonical_instrument
+
+
+class BarLike(Protocol):
+    datetime: Any
+    instrument: str
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+    amount: float
+
+    def as_row(self) -> dict[str, Any]: ...
 
 
 class BatchStrategyAdapter:
@@ -50,7 +63,7 @@ class BatchStrategyAdapter:
     def name(self) -> str:
         return getattr(self.strategy, "name", type(self.strategy).__name__)
 
-    def on_bar(self, bar: Bar) -> list[OrderIntent]:
+    def on_bar(self, bar: BarLike) -> list[OrderIntent]:
         """Feed one completed bar; return intents when the signal flips."""
         if self._stopped:
             return []
@@ -109,11 +122,9 @@ class BatchStrategyAdapter:
     def warmup(self, history: pd.DataFrame) -> None:
         self.warm_up(history)
 
-    def on_bars(self, completed_bars: list[Bar] | pd.DataFrame) -> list[OrderIntent]:
+    def on_bars(self, completed_bars: list[BarLike] | pd.DataFrame) -> list[OrderIntent]:
         bars = (
-            [Bar(**{key: row[key] for key in (
-                "datetime", "instrument", "open", "high", "low", "close", "volume", "amount"
-            ) if key in row}) for row in completed_bars.to_dict("records")]
+            [_FrameBar(row) for row in completed_bars.to_dict("records")]
             if isinstance(completed_bars, pd.DataFrame)
             else list(completed_bars)
         )
@@ -172,5 +183,16 @@ class BatchStrategyAdapter:
 
 
 def _instrument_key(value: str) -> str:
-    code, exchange = normalize_symbol(str(value))
-    return symbol_key(code, exchange)
+    return canonical_instrument(str(value))
+
+
+class _FrameBar:
+    def __init__(self, row: dict[str, Any]) -> None:
+        for key in ("datetime", "instrument", "open", "high", "low", "close", "volume", "amount"):
+            setattr(self, key, row.get(key, 0.0))
+
+    def as_row(self) -> dict[str, Any]:
+        return {
+            key: getattr(self, key)
+            for key in ("datetime", "instrument", "open", "high", "low", "close", "volume", "amount")
+        }

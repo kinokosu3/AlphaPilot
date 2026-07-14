@@ -21,7 +21,10 @@ class QlibModelSignalProvider:
     provider_uri: str | None = None
 
     def predict(self, date: str, *, start_date: str | None = None):
-        from alphapilot.systems.backtest.live.predict import predict_scores
+        # Compatibility facade; the implementation lives in the selection
+        # adapter so the trading core no longer depends on the old live-backtest
+        # package.
+        from alphapilot.systems.selection.predict import predict_scores
 
         return predict_scores(
             date,

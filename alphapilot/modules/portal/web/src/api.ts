@@ -1,9 +1,23 @@
 export type ApiError = { detail?: string };
 
+let operatorToken = "";
+
+export function setOperatorToken(token: string): void {
+  // Deliberately memory-only: never persist trading credentials in localStorage.
+  operatorToken = token.trim();
+}
+
+export function getOperatorToken(): string {
+  return operatorToken;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers = new Headers(init?.headers);
+  if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  if (operatorToken) headers.set("Authorization", `Bearer ${operatorToken}`);
   const res = await fetch(path, {
-    headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
-    ...init
+    ...init,
+    headers,
   });
   if (!res.ok) {
     let message = `${res.status} ${res.statusText}`;

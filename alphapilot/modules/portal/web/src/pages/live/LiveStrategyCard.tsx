@@ -1,7 +1,7 @@
 import type { Dispatch, SetStateAction } from "react";
 import { AsyncButton, StatusPill } from "../../components";
 import { useI18n } from "../../i18n";
-import type { JsonInputState, LiveDaemonStatus } from "./types";
+import type { LiveDaemonStatus } from "./types";
 
 type Props = {
   daemon?: LiveDaemonStatus | null;
@@ -10,9 +10,6 @@ type Props = {
   strategy: string;
   setStrategy: Dispatch<SetStateAction<string>>;
   strategyNames: string[];
-  freq: string;
-  setFreq: Dispatch<SetStateAction<string>>;
-  params: JsonInputState;
   initialCash: string;
   setInitialCash: Dispatch<SetStateAction<string>>;
   simulated: boolean;
@@ -20,6 +17,7 @@ type Props = {
   onStartDaemon: () => void | Promise<unknown>;
   onStrategyStart: () => void | Promise<unknown>;
   onStrategyPause: () => void | Promise<unknown>;
+  onStrategyReconcile: () => void | Promise<unknown>;
   onStrategyResume: () => void | Promise<unknown>;
   onStrategyStop: () => void | Promise<unknown>;
   onRefreshDaemon: () => void | Promise<unknown>;
@@ -49,9 +47,6 @@ export function LiveStrategyCard(props: Props) {
             {props.strategyNames.map((name) => <option value={name} key={name}>{name}</option>)}
           </select>
         </label>
-        <label className="field"><span>{t("liveTimingFreq")}</span>
-          <select value={props.freq} onChange={(event) => props.setFreq(event.target.value)}><option value="day">day</option><option value="min">min</option></select>
-        </label>
         {props.simulated && !props.daemon?.alive ? (
           <label className="field"><span>{t("liveInitCash")}</span><input value={props.initialCash} onChange={(event) => props.setInitialCash(event.target.value)} inputMode="decimal" /></label>
         ) : null}
@@ -61,14 +56,11 @@ export function LiveStrategyCard(props: Props) {
         <span><small>{t("liveRunnerPending")}</small><strong>{(runner?.pending_requests ?? 0) + (runner?.pending_intents ?? 0)}</strong></span>
         <span><small>{t("liveRunnerAlgo")}</small><StatusPill status={runner?.algo_armed ? "armed" : "idle"} /></span>
       </div>
-      {props.simulated ? <details className="live-advanced">
-        <summary>{t("liveAdvancedParams")}</summary>
-        <label className="field"><span>{t("liveTimingParams")}</span><textarea rows={5} value={props.params.raw} onChange={(event) => props.params.setRaw(event.target.value)} spellCheck={false} /></label>
-      </details> : null}
       <div className="row-actions live-primary-actions">
         {!props.daemon?.alive ? <AsyncButton onClick={props.onStartDaemon} disabled={!props.canStartDaemon}>{t("liveDaemonStart")}</AsyncButton> : null}
-        <AsyncButton onClick={props.onStrategyStart} disabled={!props.daemon?.running || !props.strategy.trim() || Boolean(runner?.active)}>{t("liveStrategyStart")}</AsyncButton>
+        <AsyncButton onClick={props.onStrategyStart} disabled={!props.strategy.trim() || Boolean(runner?.active)}>{t("liveStrategyStart")}</AsyncButton>
         <AsyncButton className="button ghost" onClick={props.onStrategyPause} disabled={!props.daemon?.running || !runner?.active}>{t("liveStrategyPause")}</AsyncButton>
+        <AsyncButton className="button ghost" onClick={props.onStrategyReconcile} disabled={!props.daemon?.running || !runner?.reconcile_required}>对账</AsyncButton>
         <AsyncButton className="button ghost" onClick={props.onStrategyResume} disabled={!props.daemon?.running || !runner?.paused}>{t("liveStrategyResume")}</AsyncButton>
         <AsyncButton className="button danger" onClick={props.onStrategyStop} disabled={!props.daemon?.running || !runner?.enabled}>{t("liveStrategyStop")}</AsyncButton>
       </div>

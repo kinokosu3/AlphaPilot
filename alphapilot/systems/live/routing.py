@@ -57,7 +57,7 @@ class AutomatedOrderRouter:
         return self.engine.submit(request, origin="automated")
 
     def _record_block(self, request: Any, decision: RouteAuthorization) -> None:
-        self.engine.ledger.record(
+        self.engine.ledger.record_event(
             "blocked",
             {
                 "origin": "automated",

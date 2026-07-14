@@ -45,8 +45,19 @@ class TimingModule(BaseModule):
     def _system(self):
         return self.context.system("timing")
 
+    def _deprecated(self, command: str) -> None:
+        print(
+            f"DEPRECATED: {command} is a compatibility command; "
+            "use trading_* instance commands for new workflows."
+        )
+        try:
+            self.context.system("trading").store.record_legacy_usage(f"CLI {command}")
+        except (AttributeError, KeyError):
+            pass
+
     def timing_strategies(self) -> list[dict[str, Any]]:
         """List built-in timing strategies and default parameters."""
+        self._deprecated("timing_strategies")
         rows = self._system().list_strategies()
         for row in rows:
             print(f"{row['name']}: {row['description']} defaults={row['defaults']}")
@@ -69,6 +80,7 @@ class TimingModule(BaseModule):
         output: str | None = None,
     ) -> dict[str, Any]:
         """Generate timing signals from local CSV bars."""
+        self._deprecated("timing_signal")
         req = TimingBacktestRequest(
             strategy_name=strategy_name,
             symbols=_parse_symbols(symbols),
@@ -120,6 +132,7 @@ class TimingModule(BaseModule):
         output_dir: str | None = None,
     ) -> dict[str, Any]:
         """Run a long-only timing backtest and write artifacts."""
+        self._deprecated("timing_backtest")
         req = TimingBacktestRequest(
             strategy_name=strategy_name,
             symbols=_parse_symbols(symbols),

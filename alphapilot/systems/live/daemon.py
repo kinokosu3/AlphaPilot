@@ -680,6 +680,8 @@ def _apply_command(
             runner = _require_runner(runner_holder)
             result["message"] = "strategy_resumed"
             result["runner_status"] = runner.resume()
+            if runtime.engine.runmode.halted:
+                runtime.engine.resume()
         elif action == "strategy_stop":
             runner = _require_runner(runner_holder)
             result["message"] = "strategy_stopped"
@@ -907,11 +909,37 @@ def _build_timing_runner(
         timing_freq = str(config.get("frequency") or timing_freq)
         symbols = list(config.get("universe") or symbols)
         definition = trading.registry.get(timing_strategy)
+        if runtime is not None and bar_source is not None:
+            from alphapilot.systems.live.instance_runner import StrategyInstanceRunner
+            from alphapilot.systems.trading.data_adapters import TimingHistoricalDataAdapter
+
+            instance = StrategyInstanceConfig.from_dict(config)
+            runner = StrategyInstanceRunner(
+                runtime=runtime,
+                trading=trading,
+                instance=instance,
+                historical_data=TimingHistoricalDataAdapter(
+                    kernel_engine.get_system("timing"),
+                    data_dir=str(instance.data_policy.get("data_dir") or "") or None,
+                ),
+                bar_source=bar_source,
+                bar_seconds=bar_seconds,
+            )
+            runner.start()
+            return runner
         strategy = trading.registry.create(timing_strategy, timing_params)
     elif kernel_engine is not None and kernel_engine.has_system("trading"):
         if engine.config.mode in {RunMode.LIVE, RunMode.SHADOW}:
             raise ValueError("legacy strategy_name routing is disabled in LIVE; use a promoted instance_id")
         trading = kernel_engine.get_system("trading")
+        trading.store.record_legacy_usage(
+            "daemon --timing-strategy",
+            {
+                "strategy": timing_strategy,
+                "frequency": timing_freq,
+                "mode": str(engine.config.mode),
+            },
+        )
         definition = trading.registry.get(timing_strategy)
         strategy = trading.registry.create(timing_strategy, timing_params or {})
     else:
@@ -1217,6 +1245,7 @@ def run_daemon(
         ledger_dir=str(cfg.ledger_dir),
         state_dir=str(cfg.state_dir),
         runtime_id=runtime_id,
+        require_exchange_calendar=bool(strategy_instance_id),
     )
     meta = {
         "pid": os.getpid(),

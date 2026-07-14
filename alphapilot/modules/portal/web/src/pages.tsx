@@ -1,4 +1,4 @@
-import { api, Factor, Job, JobProgress, qs, Schedule } from "./api";
+import { api, Factor, getOperatorToken, Job, JobProgress, qs, Schedule, setOperatorToken } from "./api";
 import { Alert, AsyncButton, DataTable, DynamicForm, HybridJsonEditor, InfoDot, JobsPanel, JsonTextArea, PageTitle, PanelHelp, ProgressBar, RefreshButton, Spinner, StatusPill, Tabs, Tooltip, useConfirm } from "./components";
 import { BacktestDetail, BacktestDetailData, LeaderboardPanel } from "./backtestDetail";
 import { useAsync, useJsonInput, useLatestRequest, useParamForm } from "./hooks";
@@ -435,7 +435,40 @@ export function BacktestPage() {
 
 export function TimingPage() {
   const { t } = useI18n();
-  const strategies = useAsync(() => api.get<TimingStrategiesPayload>("/api/timing/strategies"), []);
+  const strategies = useAsync(async () => {
+    const payload = await api.get<{ definitions: Array<Record<string, unknown>> }>("/api/trading/strategy-definitions");
+    const rows = payload.definitions
+      .filter((item) => item.signal_kind === "instrument_timing")
+      .map((item) => {
+        const schema = (item.parameter_schema || {}) as { properties?: Record<string, { default?: unknown }> };
+        const defaults = Object.fromEntries(Object.entries(schema.properties || {})
+          .filter(([, spec]) => spec.default !== undefined)
+          .map(([key, spec]) => [key, spec.default]));
+        return {
+          name: String(item.strategy_id || ""),
+          description: String(item.description || ""),
+          defaults,
+          parameter_schema: item.parameter_schema as TimingStrategiesPayload["strategies"][number]["parameter_schema"],
+          required_history: Number(item.required_history || 1),
+          version: String(item.version || ""),
+          source: String(item.source || ""),
+          code_hash: String(item.code_hash || ""),
+        };
+      });
+    return {
+      strategies: rows,
+      names: rows.map((item) => item.name),
+      definitions: payload.definitions,
+    } as TimingStrategiesPayload & { definitions: Array<Record<string, unknown>> };
+  }, []);
+  const policyDefinitions = useAsync(
+    () => api.get<{ definitions: Array<Record<string, unknown>> }>("/api/trading/portfolio-policy-definitions"),
+    [],
+  );
+  const researchAssets = useAsync(
+    () => api.get<{ strategies?: Array<Record<string, unknown>>; names?: string[] }>("/api/strategies"),
+    [],
+  );
   const specs = useMemo(
     () => timingBacktestSpecs(strategies.data?.names || [], strategies.data?.strategies || []),
     [strategies.data],
@@ -452,6 +485,11 @@ export function TimingPage() {
     [],
   );
   const [newInstanceId, setNewInstanceId] = useState("");
+  const [selectedInstanceId, setSelectedInstanceId] = useState("");
+  const [operatorToken, setOperatorTokenValue] = useState(getOperatorToken());
+  const [researchInstanceId, setResearchInstanceId] = useState("");
+  const [researchAsset, setResearchAsset] = useState("");
+  const [researchUniverse, setResearchUniverse] = useState("");
 
   const selectedStrategy = useMemo(() => {
     const name = String(form.values.strategy_name || "boll_mean_reversion");
@@ -469,17 +507,36 @@ export function TimingPage() {
   function previewSignals() {
     void run(async () => {
       const payload = parseTimingPayload();
-      const result = await api.post<TimingSignalPayload>("/api/timing/signal", payload);
-      setSignalPreview(result);
+      if (!selectedInstanceId) throw new Error("请先选择策略实例");
+      const result = await api.post<{
+        signal: { as_of: string; payload: { scores?: Record<string, number>; states?: Record<string, string> } };
+      }>(`/api/trading/strategy-instances/${selectedInstanceId}/preview`, payload);
+      const scores = result.signal.payload.scores || {};
+      const states = result.signal.payload.states || {};
+      const rows = Object.keys({ ...scores, ...states }).sort().map((instrument) => ({
+        datetime: result.signal.as_of,
+        instrument,
+        signal: states[instrument] === "long" ? 1 : 0,
+        score: scores[instrument] ?? 0,
+        state: states[instrument] || "",
+      }));
+      setSignalPreview({
+        strategy_name: selectedStrategy?.name || "",
+        signals: { columns: ["datetime", "instrument", "signal", "score", "state"], rows, row_count: rows.length },
+      });
     }, t("timingSignalReady"));
   }
 
   function startBacktest() {
     void run(async () => {
       const payload = parseTimingPayload();
-      const job = await api.post<Job>("/api/timing/backtest", payload);
+      if (!selectedInstanceId) throw new Error("请先选择策略实例");
+      const runRecord = await api.post<{ run_id: string; status: string }>(
+        `/api/trading/strategy-instances/${selectedInstanceId}/backtest-runs`, payload,
+      );
+      const job: Job = { job_id: runRecord.run_id, kind: "trading_replay", status: runRecord.status };
       setActiveJob(job);
-      setProgress(job.progress || null);
+      setProgress({ job_id: runRecord.run_id, status: runRecord.status, percent: 0, stage: runRecord.status });
       setDetail(null);
     }, t("started"));
   }
@@ -497,10 +554,10 @@ export function TimingPage() {
         universe: payload.symbols || [],
         frequency: payload.freq || "day",
         data_policy: {
-          adjust_mode: payload.adjust_mode,
-          execution_adjust_mode: payload.execution_adjust_mode,
+          feature_adjustment: payload.adjust_mode || "backward",
         },
       });
+      setSelectedInstanceId(newInstanceId.trim());
       setNewInstanceId("");
       await instances.refresh();
     }, "策略实例已保存");
@@ -513,22 +570,67 @@ export function TimingPage() {
     }, "策略实例校验完成");
   }
 
+  function importResearchAsset() {
+    void run(async () => {
+      if (!researchInstanceId.trim() || !researchAsset.trim()) {
+        throw new Error("实例 ID 和研究资产均为必填项");
+      }
+      await api.post("/api/trading/strategy-instances/from-research-asset", {
+        instance_id: researchInstanceId.trim(),
+        strategy_name: researchAsset.trim(),
+        universe: researchUniverse.split(/[\s,，]+/).map((item) => item.trim()).filter(Boolean),
+        reason: "Portal research asset snapshot",
+      });
+      setSelectedInstanceId(researchInstanceId.trim());
+      setResearchInstanceId("");
+      await instances.refresh();
+    }, "研究资产已快照为不可变选股实例");
+  }
+
   useEffect(() => {
-    if (!activeJob?.job_id || activeJob.status !== "running") return;
+    if (!activeJob?.job_id || !["queued", "running"].includes(activeJob.status)) return;
     const jobId = activeJob.job_id;
     let alive = true;
     let timer: number | undefined;
     async function poll() {
       let terminal = false;
       try {
-        const next = await api.get<JobProgress>(`/api/jobs/${jobId}/progress`);
+        const runRecord = await api.get<{
+          run_id: string; status: string; result?: Record<string, unknown>; artifact_dir?: string;
+        }>(`/api/trading/backtest-runs/${jobId}`);
+        const next: JobProgress = {
+          job_id: jobId,
+          status: runRecord.status,
+          percent: ["completed", "failed", "cancelled"].includes(runRecord.status) ? 100 : 50,
+          stage: runRecord.status,
+          message: runRecord.status,
+        };
         if (!alive) return;
         setProgress(next);
-        if (next.status === "succeeded") {
-          const loaded = await api.get<TimingDetailPayload>(`/api/timing/jobs/${jobId}/detail`);
-          if (alive) setDetail(loaded);
+        if (next.status === "completed") {
+          const loaded = await api.get<{
+            artifact_dir: string;
+            result: Record<string, unknown>;
+            detail?: { signals?: Array<Record<string, unknown>>; orders?: Array<Record<string, unknown>>; equity?: Array<Record<string, unknown>>; positions?: Array<Record<string, unknown>> };
+          }>(`/api/trading/backtest-runs/${jobId}/detail`);
+          const table = (rows: Array<Record<string, unknown>> = []) => ({
+            rows,
+            columns: [...new Set(rows.flatMap((row) => Object.keys(row)))],
+            row_count: rows.length,
+          });
+          const artifacts = loaded.detail || {};
+          const mapped: TimingDetailPayload = {
+            job: { job_id: jobId, kind: "trading_replay", status: "completed" },
+            summary: { ...loaded.result, total_return: loaded.result.return },
+            artifact_dir: loaded.artifact_dir,
+            signals: table(artifacts.signals),
+            trades: table(artifacts.orders),
+            equity_curve: table((artifacts.equity || []).map((row) => ({ ...row, datetime: row.session }))),
+            positions: table((artifacts.positions || []).map((row) => ({ ...row, datetime: row.session, amount: row.volume }))),
+          };
+          if (alive) setDetail(mapped);
         }
-        terminal = ["succeeded", "failed", "cancelled", "lost"].includes(String(next.status));
+        terminal = ["completed", "failed", "cancelled"].includes(String(next.status));
         if (!alive) return;
         setActiveJob((current) => current && current.job_id === jobId
           ? { ...current, status: String(next.status || current.status), progress: next }
@@ -557,6 +659,14 @@ export function TimingPage() {
   return (
     <>
       <PageTitle title={t("timing")} subtitle={t("timingSubtitle")} />
+      <section className="panel inset">
+        <label className="field"><span>操作员令牌（仅保存在当前页面会话内存）</span>
+          <input type="password" value={operatorToken} onChange={(event) => {
+            setOperatorTokenValue(event.target.value);
+            setOperatorToken(event.target.value);
+          }} placeholder="apop_…" autoComplete="off" />
+        </label>
+      </section>
       <div className="grid side">
         <section className="panel">
           <div className="panel-head compact">
@@ -616,6 +726,12 @@ export function TimingPage() {
         <div className="row-actions">
           <input value={newInstanceId} onChange={(event) => setNewInstanceId(event.target.value)} placeholder="实例 ID，例如 ma_5_20" />
           <button className="button" disabled={busy} onClick={createStrategyInstance}>保存当前参数为实例</button>
+          <label className="field"><span>运行实例</span>
+            <select value={selectedInstanceId} onChange={(event) => setSelectedInstanceId(event.target.value)}>
+              <option value="">选择用于预览/回测的实例</option>
+              {(instances.data?.instances || []).map((item) => <option key={item.instance_id} value={item.instance_id}>{item.instance_id}</option>)}
+            </select>
+          </label>
         </div>
         <div className="table-wrap">
           <table>
@@ -630,6 +746,44 @@ export function TimingPage() {
           </table>
         </div>
       </section>
+
+      <div className="grid two">
+        <section className="panel">
+          <div className="panel-head compact"><div><h2>策略与政策定义</h2><span className="muted">定义只描述信号；政策负责把信号转换为目标权重。</span></div></div>
+          <DataTable
+            rows={(strategies.data as (TimingStrategiesPayload & { definitions?: Array<Record<string, unknown>> }) | undefined)?.definitions || []}
+            empty="暂无策略定义"
+            columns={[
+              { key: "strategy_id", label: "策略 ID" },
+              { key: "signal_kind", label: "信号类型" },
+              { key: "version", label: "版本" },
+              { key: "provider_api_version", label: "Provider API" },
+              { key: "required_history", label: "预热 Bar", align: "right" },
+            ]}
+          />
+          <DataTable
+            rows={policyDefinitions.data?.definitions || []}
+            empty="暂无组合政策"
+            columns={[
+              { key: "policy_id", label: "政策 ID" },
+              { key: "version", label: "版本" },
+              { key: "description", label: "说明", ellipsis: true },
+            ]}
+          />
+        </section>
+        <section className="panel">
+          <div className="panel-head compact"><div><h2>研究资产导入</h2><span className="muted">模型和因子会复制到不可变 artifact；不接受任意上传路径。</span></div></div>
+          <div className="dynamic-form cols-1">
+            <label>实例 ID<input value={researchInstanceId} onChange={(event) => setResearchInstanceId(event.target.value)} placeholder="qlib_topk_demo" /></label>
+            <label>研究策略资产<select value={researchAsset} onChange={(event) => setResearchAsset(event.target.value)}>
+              <option value="">选择研究资产</option>
+              {(researchAssets.data?.names || (researchAssets.data?.strategies || []).map((item) => String(item.strategy_name || ""))).filter(Boolean).map((name) => <option key={name} value={name}>{name}</option>)}
+            </select></label>
+            <label>股票池（可选覆盖）<textarea value={researchUniverse} onChange={(event) => setResearchUniverse(event.target.value)} rows={3} placeholder="600000.SH, 000001.SZ" /></label>
+          </div>
+          <button className="button primary" disabled={busy} onClick={importResearchAsset}>创建不可变选股实例</button>
+        </section>
+      </div>
 
       {signalPreview ? (
         <section className="panel">

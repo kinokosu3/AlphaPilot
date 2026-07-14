@@ -19,7 +19,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Callable
 
-from alphapilot.systems.live.config import LiveConfig, RunMode
+from alphapilot.systems.live.config import LiveConfig, RunMode, requires_live_market_safety
 from alphapilot.systems.live.events import LiveEvent, LiveEventBus
 from alphapilot.systems.live.fsm.connection_fsm import ConnectionMachine, ConnectionState
 from alphapilot.systems.live.fsm.runmode_fsm import RunModeMachine
@@ -64,7 +64,12 @@ class LiveEngine:
         self.oms = OMS()
         self.runmode = RunModeMachine(config.mode)
         self.connection = ConnectionMachine()
-        self.session = SessionClock(now_fn or datetime.now, is_trading_day_fn)
+        calendar = is_trading_day_fn
+        if calendar is None and requires_live_market_safety(config.mode):
+            # Direct engine/runtime construction must not restore the historical
+            # "every date is tradable" fallback for a real account.
+            calendar = lambda _dt: False
+        self.session = SessionClock(now_fn or datetime.now, calendar)
         self.ledger = ledger or Ledger(config.ledger_dir)
         self.events = event_bus or LiveEventBus()
         self._event_now = getattr(self.ledger, "_now_fn", datetime.now)

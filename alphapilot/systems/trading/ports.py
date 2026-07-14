@@ -5,7 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol, Sequence
+
+from alphapilot.systems.trading.contracts import (
+    AccountSnapshot,
+    CompletedBar,
+    InstrumentMetadata,
+    TradableQuote,
+    ExecutionChild,
+)
 
 
 class RouteOrigin(str, Enum):
@@ -50,6 +58,59 @@ class AutomatedOrderRoutePort(Protocol):
     def submit(self, request: Any) -> str | None: ...
 
 
+class HistoricalDataPort(Protocol):
+    def load_completed_bars(
+        self,
+        *,
+        instruments: Sequence[str],
+        start: str | None,
+        end: str | None,
+        frequency: str,
+        adjustment: str,
+    ) -> list[CompletedBar]: ...
+
+
+class CompletedBarPort(Protocol):
+    def add_completed_bar_listener(
+        self,
+        frequency: str,
+        listener: Callable[[CompletedBar], None],
+    ) -> None: ...
+
+    def remove_completed_bar_listener(
+        self,
+        frequency: str,
+        listener: Callable[[CompletedBar], None],
+    ) -> None: ...
+
+
+class CalendarPort(Protocol):
+    def is_trading_session(self, value: str) -> bool: ...
+    def next_trading_session(self, value: str) -> str: ...
+
+
+class InstrumentMetadataPort(Protocol):
+    def get_instruments(self, instruments: Sequence[str]) -> dict[str, InstrumentMetadata]: ...
+
+
+class AccountSnapshotPort(Protocol):
+    def account_snapshot(self) -> AccountSnapshot: ...
+    def quotes(self, instruments: Sequence[str]) -> dict[str, TradableQuote]: ...
+
+
+class ExecutionRoutePort(Protocol):
+    """Trusted execution boundary; providers never receive this port."""
+
+    def submit_child(self, child: ExecutionChild) -> str | None: ...
+    def child_statuses(self, references: Sequence[str]) -> dict[str, str]: ...
+    def child_fills(self, references: Sequence[str]) -> list[dict[str, Any]]: ...
+    def cancel_child(self, reference: str) -> bool: ...
+
+
+class StrategyRuntimeFactoryPort(Protocol):
+    def create_runtime(self, instance_id: str, runtime: Any) -> Any: ...
+
+
 @dataclass(frozen=True)
 class RuntimeCommandResult:
     ok: bool
@@ -72,4 +133,3 @@ class RuntimeControlPort(Protocol):
     def reconcile(self, instance: dict[str, Any]) -> RuntimeCommandResult: ...
     def resume(self, instance: dict[str, Any]) -> RuntimeCommandResult: ...
     def stop(self, instance: dict[str, Any]) -> RuntimeCommandResult: ...
-

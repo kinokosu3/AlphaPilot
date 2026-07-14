@@ -22,6 +22,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional
 
+from alphapilot.systems.trading.contracts import OrderStatus
+
 
 class Direction(str, Enum):
     """Order / position direction."""
@@ -72,27 +74,6 @@ class Product(str, Enum):
     INDEX = "index"
     OPTION = "option"
     FUTURES = "futures"
-
-
-class OrderStatus(str, Enum):
-    """Order lifecycle states — aligned with vn.py's ``Status`` (6 states).
-
-    ``SUBMITTED`` / ``FILLED`` are kept as **back-compat aliases** of
-    ``SUBMITTING`` / ``ALLTRADED`` so the pre-existing ``systems/timing`` code
-    that referenced the old 4-state enum keeps working unchanged.
-    """
-
-    SUBMITTING = "submitting"   # local, not yet acknowledged by the broker
-    NOTTRADED = "nottraded"     # accepted by the exchange, no fill yet
-    PARTTRADED = "parttraded"   # partially filled
-    ALLTRADED = "alltraded"     # fully filled
-    CANCELLED = "cancelled"     # cancelled (any remaining volume withdrawn)
-    REJECTED = "rejected"       # rejected by risk gate / broker / exchange
-
-    # --- back-compat aliases (old timing names) ---
-    SUBMITTED = "submitting"
-    FILLED = "alltraded"
-
 
 # Orders in these states are still "working" and may still fill or be cancelled.
 ACTIVE_STATUSES: frozenset[OrderStatus] = frozenset(

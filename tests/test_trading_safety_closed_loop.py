@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
@@ -329,6 +330,7 @@ def test_coordinator_does_not_publish_observed_state_before_daemon_confirmation(
     before = control.observed_before_command["start"]
     assert before["runtime"]["desired_state"] == "paused"
     assert before["runtime"]["observed_state"] == "ready"
+    assert before["runtime"]["runtime_id"]
     assert before["instance"]["lifecycle"] == "ready"
 
 
@@ -596,6 +598,75 @@ def test_versionless_database_migrates_once_with_backup(tmp_path: Path) -> None:
         assert {"deployment_runtime", "stage_runs", "stage_run_sessions", "route_blocks"} <= tables
     StrategyRuntimeStore(path)
     assert len(list(tmp_path.glob("runtime.sqlite3.backup-v1-*"))) == 1
+
+
+def test_v4_migration_rehashes_instances_and_invalidates_old_evidence(tmp_path: Path) -> None:
+    path = tmp_path / "runtime.sqlite3"
+    _make_v1_database(path)
+    legacy_hash_payload = {
+        "strategy_id": "dual_ma",
+        "strategy_version": "1.0.0",
+        "params": {"short_window": 5, "long_window": 20},
+        "universe": ["600000.SSE"],
+        "frequency": "day",
+        "data_policy": {},
+        "portfolio_policy": {},
+        "strategy_code_hash": "",
+        "model_hash": "",
+    }
+    legacy_hash = hashlib.sha256(json.dumps(
+        legacy_hash_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    legacy_config = {
+        "instance_id": "legacy-live",
+        **legacy_hash_payload,
+        "deployment_level": "live",
+        "config_hash": legacy_hash,
+    }
+    with sqlite3.connect(path) as db:
+        db.execute(
+            "INSERT INTO strategy_instances VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "legacy-live", "dual_ma", "1.0.0", json.dumps(legacy_config),
+                legacy_hash, "running", "live", "2026-07-14T00:00:00+00:00",
+            ),
+        )
+        db.execute(
+            "INSERT INTO stage_evidence VALUES (?, ?, ?, ?, ?)",
+            ("legacy-live", "shadow", 1, "{}", "2026-07-14T00:00:00+00:00"),
+        )
+        db.commit()
+
+    store = StrategyRuntimeStore(path)
+    migrated = store.get_instance("legacy-live")
+
+    assert migrated["config_hash"] != legacy_hash
+    assert migrated["config"]["artifact_binding"] == {}
+    assert migrated["deployment_level"] == "replay"
+    assert migrated["lifecycle"] == "validated"
+    assert store.deployment("legacy-live")["evidence"] == []
+    runtime = store.get_runtime_state("legacy-live")
+    assert runtime["binding_active"] is False
+    assert runtime["deployment_level"] == "replay"
+
+
+def test_corrupted_instance_projection_fails_closed(tmp_path: Path) -> None:
+    store = StrategyRuntimeStore(tmp_path / "runtime.sqlite3")
+    created = _create(store)
+    with sqlite3.connect(store.path) as db:
+        payload = dict(created["config"])
+        payload["params"] = {"short_window": 1, "long_window": 2}
+        db.execute(
+            "UPDATE strategy_instances SET config_json=? WHERE instance_id='alpha'",
+            (json.dumps(payload),),
+        )
+        db.commit()
+
+    with pytest.raises(RuntimeError, match="config is corrupted"):
+        store.get_instance("alpha")
 
 
 def test_failed_migration_preserves_v1_database_and_backup(tmp_path: Path, monkeypatch) -> None:

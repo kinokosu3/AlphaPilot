@@ -10,15 +10,28 @@ from alphapilot.systems.trading.domain import (
 )
 from alphapilot.systems.trading.contracts import (
     AccountSnapshot,
+    CompletedBar,
     CrossSectionalSignal,
+    ExecutionChild,
+    ExecutionPhase,
+    ExecutionPlan,
+    FeeSchedule,
+    InstrumentMetadata,
+    OperatorContext,
+    PortfolioContext,
+    PortfolioDecision,
     PortfolioInputs,
     PortfolioPolicy,
+    PriceAdjustment,
     SignalEnvelope,
     SignalKind,
     TargetPortfolio,
+    TargetWeights,
+    TradableQuote,
     TimingSignal,
 )
 from alphapilot.systems.trading.registry import StrategyRegistry
+from alphapilot.systems.trading.policy_registry import PortfolioPolicyRegistry
 from alphapilot.systems.trading.ports import RouteContext, RouteOrigin
 
 __all__ = [
@@ -30,12 +43,24 @@ __all__ = [
     "StrategyRegistry",
     "TargetWeights",
     "AccountSnapshot",
+    "CompletedBar",
     "CrossSectionalSignal",
+    "ExecutionChild",
+    "ExecutionPhase",
+    "ExecutionPlan",
+    "FeeSchedule",
+    "InstrumentMetadata",
+    "OperatorContext",
+    "PortfolioContext",
+    "PortfolioDecision",
     "PortfolioInputs",
     "PortfolioPolicy",
+    "PortfolioPolicyRegistry",
+    "PriceAdjustment",
     "SignalEnvelope",
     "SignalKind",
     "TargetPortfolio",
+    "TradableQuote",
     "TimingSignal",
     "RouteContext",
     "RouteOrigin",

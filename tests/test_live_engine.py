@@ -15,6 +15,7 @@ from alphapilot.systems.live.brokers.sim import SimBroker
 from alphapilot.systems.live.clock import SimulatedClock
 from alphapilot.systems.live.config import LiveConfig, RunMode
 from alphapilot.systems.live.engine import LiveEngine
+from alphapilot.systems.live.fsm.session_fsm import SessionState
 from alphapilot.systems.live.gateway import BrokerGateway
 from alphapilot.systems.live.ledger import Ledger
 from alphapilot.systems.live.types import Account, CancelRequest, Exchange, OrderRequest, OrderStatus, TickData
@@ -85,6 +86,22 @@ def test_paper_buy_end_to_end(tmp_path: Path) -> None:
     assert engine.oms.buying_power() == 90_000.0   # 100k - 1000*10
     assert engine.oms.get_order(order_id).status is OrderStatus.ALLTRADED
     assert {"connected", "submit", "order", "trade"} <= _kinds(engine)
+
+
+def test_direct_real_account_engine_without_calendar_fails_closed(tmp_path: Path) -> None:
+    broker = PaperBroker(cash=100_000.0, prices={KEY: 10.0})
+    cfg = LiveConfig(
+        mode=RunMode.LIVE,
+        broker="paper",
+        ledger_dir=tmp_path / "ledger-real-calendar",
+    )
+    engine = LiveEngine(
+        cfg,
+        broker,
+        now_fn=SimulatedClock(datetime(2026, 7, 1, 10, 0)),
+    )
+
+    assert engine.session.current_state() is SessionState.CLOSED
 
 
 def test_engine_separates_trade_and_quote_gateways(tmp_path: Path) -> None:

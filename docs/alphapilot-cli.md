@@ -16,6 +16,7 @@
 - [因子库管理](#因子库管理)
 - [日频交易信号](#日频交易信号)
 - [策略复测](#策略复测)
+- [策略实例、统一回测与部署](#策略实例统一回测与部署)
 - [AlphaForge 非 LLM 挖掘](#alphaforge-非-llm-挖掘)
 - [可选依赖与弃用命令](#可选依赖与弃用命令)
 - [附录：内部脚本](#附录内部脚本)
@@ -108,6 +109,12 @@ factor:            ["category_create", "category_delete", "category_list", "fact
 | 33 | `mine_rl` | alphaforge_search | PPO RL 因子挖掘 |
 | 34 | `strategy_backtest` | strategy_backtest | 从 strategy_zoo 复测策略 |
 | 35 | `strategy_backtest_list` | strategy_backtest | 列出已保存策略资产 |
+| 36 | `trading_definitions` / `trading_policies` | trading_cli | 列出可实例化策略和组合政策定义 |
+| 37 | `trading_instance_*` / `trading_preview` | trading_cli | 创建、导入、校验实例并预览类型化信号 |
+| 38 | `trading_backtest*` | trading_cli | 启动、查询和取消统一异步回放 |
+| 39 | `trading_promote` / `trading_authorize_live` | trading_cli | 分级晋升并签发一次性 LIVE approval |
+| 40 | `trading_start` / `pause` / `reconcile` / `resume` / `stop` | trading_cli | 控制已验证的正式实例部署 |
+| 41 | `trading_kill_switch` / `trading_audit` | trading_cli | 操作三级 kill switch 并查询审计日志 |
 | — | `pool_create` / `pool_list` / `pool_add` / … | stock_pool | 股票池增删改查（共 10 条，详见 `alphapilot modules`） |
 
 > **模块名说明**：`alphapilot modules` 输出中的模块名来自各类的 `name` 属性（如 `factor`），与 `pyproject.toml` entry-point 键名（如 `factor_cli`）可能不同，但 CLI 顶层命令名一致。
@@ -727,6 +734,56 @@ alphapilot strategy_backtest --strategy_name=my_strategy --mode=reuse_model
 ```bash
 alphapilot strategy_backtest_list
 ```
+
+---
+
+## 策略实例、统一回测与部署
+
+正式策略链路使用 `trading_*` 命令。规则择时和 Qlib 横截面选股各自创建实例，共享预览、
+回放、PAPER/SHADOW/LIVE 部署和恢复接口。部署命令只接受稳定 `instance_id`。
+
+常用入口：
+
+```bash
+# 发现定义和组合政策
+alphapilot trading_definitions
+alphapilot trading_policies
+
+# 查看实例并校验
+alphapilot trading_instances
+alphapilot trading_instance_validate --instance_id=ma_5_20
+
+# 预览信号、启动异步回放并查询状态
+alphapilot trading_preview --instance_id=ma_5_20 --options='{"data_dir":"./data"}'
+alphapilot trading_backtest --instance_id=ma_5_20 --options='{"data_dir":"./data"}'
+alphapilot trading_backtest_status --run_id=<run_id> --detail=True
+
+# 查询和控制部署
+alphapilot trading_status --instance_id=ma_5_20
+alphapilot trading_pause --instance_id=ma_5_20 --reason="operator pause"
+alphapilot trading_reconcile --instance_id=ma_5_20 --reason="broker reconciled"
+alphapilot trading_resume --instance_id=ma_5_20 --reason="manual resume"
+```
+
+实例创建时，`params`、`data_policy` 和 `portfolio_policy` 是 JSON 对象，`universe` 可使用
+逗号分隔标的。组合政策的版本和代码哈希由注册表补齐并绑定：
+
+```bash
+alphapilot trading_instance_create \
+  --instance_id=ma_5_20 \
+  --strategy_id=dual_ma \
+  --universe=600000.SSE,510300.SSE \
+  --params='{"short_window":5,"long_window":20}' \
+  --frequency=day \
+  --portfolio_policy='{"policy_id":"timing_fixed_exposure","params":{"target_percent":0.2}}'
+```
+
+`trading_operator_token` 创建的明文 token 只显示一次。LIVE 晋升还必须通过 PAPER/SHADOW
+证据、确认基准持仓并消费 `trading_authorize_live` 创建的短时 approval。自动 LIVE 默认由
+`ALPHAPILOT_AUTOMATED_LIVE_ENABLED=false` 禁用。
+
+完整契约、安全边界、API 和旧入口删除条件见
+[《策略到交易全链路》](strategy-trading-full-chain.md)。
 
 ---
 

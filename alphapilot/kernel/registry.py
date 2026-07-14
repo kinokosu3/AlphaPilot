@@ -145,6 +145,10 @@ def _register_builtin_defaults() -> None:
         "live",
         "alphapilot.modules.live.module.LiveModule",
     )
+    register_module(
+        "trading_cli",
+        "alphapilot.modules.trading.module.TradingModule",
+    )
 
 
 _register_builtin_defaults()

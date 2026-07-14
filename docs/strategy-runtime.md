@@ -1,5 +1,8 @@
 # 策略实例、注册与实盘部署
 
+本文重点说明注册、部署协调和安全闭环。完整的信号、组合、回放、D+1 执行状态机、正式
+API/CLI 和兼容迁移说明见[《策略到交易全链路》](strategy-trading-full-chain.md)。
+
 AlphaPilot 将“策略定义”和“策略实例”分开：`dual_ma` 是策略定义，`ma_5_20`
 和 `ma_20_60` 是两份参数、标的池和配置哈希不同的实例。策略只生成信号或账户目标，
 不能直接访问 Broker；所有订单统一经过账户 sizing、执行计划、OMS 和风控。
@@ -108,26 +111,29 @@ PAPER/SHADOW 启动时创建绑定当前 `config_hash` 的 stage run。runner �
 - `POST /api/trading/stage-runs/{run_id}/finish`
 - `POST /api/trading/stage-runs/{instance_id}/{paper|shadow}/evaluate`
 
-策略运行 SQLite 当前使用顺序 schema migration（schema v3）和 WAL。旧无版本数据库先生成
+策略运行 SQLite 当前使用顺序 schema migration（schema v5）和 WAL。旧无版本数据库先生成
 SQLite 在线备份，再在一个 `BEGIN IMMEDIATE` 事务内迁移；迁移失败会保留旧库并阻止交易系统
 启动，不会删除或静默重建数据库。LIVE 单账户单写者由部分唯一索引在数据库层保证。
 
-## 选股与择时组合契约（仅预留）
+## 选股与择时（各自已贯通，组合仅预留）
 
 公共 `trading.contracts` 已提供 `CROSS_SECTIONAL_SELECTION`、
 `INSTRUMENT_TIMING`、`MARKET_TIMING` 三类 `SignalEnvelope`，以及可并行承载三类输入的
 `PortfolioInputs` 和 `PortfolioPolicy` Protocol。这一层没有 `live` 依赖，也没有预设相乘、
 过滤、再归一化或牛熊切换算法。
 
-当前不会注册 composite 策略，也不能创建、回测或晋升组合实例；现有 `SignalRecord` 和
+规则择时实例与 `qlib_selection` 选股实例目前可以各自创建、预览、统一回放和按门禁晋升，
+但当前不会注册 composite 策略，也不能创建、回测或晋升组合实例；现有 `SignalRecord` 和
 `OrderIntent` 继续作为兼容契约。组合政策要等选股与择时算法研究完成后单独实现和验证。
 
 主要接口：
 
 - `GET /api/trading/strategy-definitions`
+- `GET /api/trading/portfolio-policy-definitions`
 - `GET|POST|PATCH /api/trading/strategy-instances`
 - `POST /api/trading/strategy-instances/{id}/validate`
-- `POST /api/trading/strategy-instances/{id}/backtest`
+- `POST /api/trading/strategy-instances/{id}/preview`
+- `POST /api/trading/strategy-instances/{id}/backtest-runs`
 - `GET /api/trading/deployments/{id}`
 - `POST /api/trading/deployments/{id}/promote`
 - `POST /api/trading/deployments/{id}/start|pause|reconcile|resume|stop|status`

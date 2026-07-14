@@ -165,8 +165,31 @@ function mockLiveFetch(options: { alive?: boolean; accountMetrics?: boolean; dae
         issues: [],
       });
     }
-    if (path === "/api/timing/strategies") {
-      return Response.json({ names: ["sma_filter", "boll_mean_reversion"], strategies: [] });
+    if (path === "/api/trading/strategy-instances") {
+      return Response.json({ instances: [
+        { instance_id: "paper_sma", strategy_id: "sma_filter", deployment_level: "paper", lifecycle: "paper", config_hash: "paper-hash" },
+        { instance_id: "live_sma", strategy_id: "sma_filter", deployment_level: "live", lifecycle: "live", config_hash: "live-hash" },
+      ] });
+    }
+    if (path === "/api/trading/deployments/live_sma") {
+      return Response.json({
+        instance: { instance_id: "live_sma", lifecycle: "running", deployment_level: "live", config_hash: "live-hash" },
+        runtime: {
+          desired_state: "running", observed_state: "running", account_id: "live-account",
+          broker: "emt", runner_heartbeat_at: "2026-07-06T10:02:03+08:00", reconcile_required: false,
+        },
+        stage_runs: [
+          { run_id: "paper-run", stage: "paper", status: "passed", trading_sessions: 20, config_hash: "live-hash" },
+          { run_id: "shadow-run", stage: "shadow", status: "passed", trading_sessions: 5, config_hash: "live-hash" },
+        ],
+        route_blocks: [],
+      });
+    }
+    if (path === "/api/trading/kill-switches") {
+      return Response.json({ kill_switches: [] });
+    }
+    if (path === "/api/trading/audit-events?limit=50") {
+      return Response.json({ events: [] });
     }
     if (path.startsWith("/api/live/runtime/state")) {
       return Response.json({ exists: true, state_path: "/tmp/state/runtime_state.json", state: daemonState });
@@ -263,7 +286,7 @@ function mockLiveFetch(options: { alive?: boolean; accountMetrics?: boolean; dae
         ok: true,
       });
     }
-    if (path === "/api/live/daemon/strategy/pause" && init?.method === "POST") {
+    if (path === "/api/trading/deployments/live_sma/pause" && init?.method === "POST") {
       return Response.json({ accepted: true, daemon: { ...daemonStatus, runner_status: { enabled: true, active: false, paused: true } } });
     }
     if (path === "/api/live/daemon/start" && init?.method === "POST") {
@@ -378,8 +401,9 @@ describe("LivePage", () => {
     await waitFor(() => expect(postedJson(fetchMock, "/api/live/daemon/submit-target")?.confirm_live).toBe(true));
     expect(postedJson(fetchMock, "/api/live/daemon/submit-target")?.route).toBe(true);
 
+    fireEvent.change(screen.getByLabelText("择时策略"), { target: { value: "live_sma" } });
     fireEvent.click(screen.getByRole("button", { name: "暂停策略" }));
-    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input) === "/api/live/daemon/strategy/pause")).toBe(true));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input) === "/api/trading/deployments/live_sma/pause")).toBe(true));
     fireEvent.click(screen.getByText("更多技术操作"));
     fireEvent.click(screen.getByRole("button", { name: "重连" }));
     await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input) === "/api/live/daemon/reconnect")).toBe(true));

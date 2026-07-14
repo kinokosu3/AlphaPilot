@@ -41,6 +41,7 @@ class TimingSystem(BaseSystem):
                     "code_hash": definition.code_hash,
                 }
                 for definition in self.context.engine.get_system("trading").registry.list()
+                if definition.signal_kind.value == "instrument_timing"
             ]
         return list_strategy_specs()
 
