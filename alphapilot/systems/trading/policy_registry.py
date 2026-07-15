@@ -170,6 +170,10 @@ def builtin_policy_definitions() -> list[PortfolioPolicyDefinition]:
                     "target_percent": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.2},
                     "cash_buffer": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.1},
                     "max_position_weight": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.3},
+                    "exposure_mode": {
+                        "type": "string",
+                        "enum": ["per_instrument", "equal_active_budget"],
+                    },
                 },
                 "additionalProperties": False,
             },

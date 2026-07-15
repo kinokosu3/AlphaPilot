@@ -26,6 +26,7 @@ from alphapilot.systems.live.fsm.runmode_fsm import RunModeMachine
 from alphapilot.systems.live.fsm.session_fsm import SessionClock
 from alphapilot.systems.live.gateway import BrokerGateway, QuoteGateway
 from alphapilot.systems.live.ledger import Ledger
+from alphapilot.systems.live.redaction import redact_secrets
 from alphapilot.systems.live.oms import OMS
 from alphapilot.systems.live.types import (
     Account,
@@ -174,7 +175,10 @@ class LiveEngine:
                 self.quote_gateway.connect(quote_setting)
         except Exception as exc:  # noqa: BLE001 - surface as connection error
             self.connection.transition(ConnectionState.ERROR)
-            self._audit("connect_error", {"error": str(exc)}, source=self.trade_gateway.name)
+            self._audit(
+                "connect_error", {"error": redact_secrets(str(exc))},
+                source=self.trade_gateway.name,
+            )
             raise
         self.connection.transition(ConnectionState.CONNECTED)
         self.connection.transition(ConnectionState.LOGGED_IN)
@@ -195,7 +199,9 @@ class LiveEngine:
             try:
                 gateway.close()
             except Exception as exc:  # noqa: BLE001 - close every channel best-effort
-                errors.append(f"{getattr(gateway, 'name', 'gateway')}: {exc}")
+                errors.append(redact_secrets(
+                    f"{getattr(gateway, 'name', 'gateway')}: {exc}"
+                ))
         if self.connection.state != ConnectionState.DISCONNECTED:
             self.connection.transition(ConnectionState.DISCONNECTED)
         payload: dict[str, Any] = {

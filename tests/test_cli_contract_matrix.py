@@ -24,9 +24,9 @@ def _fire_exit_code(commands, command: list[str]) -> tuple[int, str]:  # noqa: A
     return 0, output.getvalue()
 
 
-def test_all_115_cli_commands_have_help_and_inspectable_signatures(engine) -> None:  # noqa: ANN001
+def test_all_125_cli_commands_have_help_and_inspectable_signatures(engine) -> None:  # noqa: ANN001
     commands = engine.collect_commands()
-    assert len(commands) == 115
+    assert len(commands) == 125
     assert set(commands) == set(EXPECTED_CLI_COMMANDS)
 
     for name, command in sorted(commands.items()):

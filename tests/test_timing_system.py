@@ -36,6 +36,7 @@ def test_timing_system_loads_local_csv_and_generates_signals(engine, tmp_path: P
         start_date="2026-01-05",
         end_date="2026-01-20",
         data_dir=raw,
+        adjust_mode="none",
         strategy_params={"window": 3},
     )
     signals = timing.generate_signals(req)
@@ -55,6 +56,7 @@ def test_timing_backtest_writes_artifacts(engine, tmp_path: Path) -> None:
         strategy_name="dual_ma",
         symbols="000001",
         data_dir=raw,
+        adjust_mode="none",
         cash=100000,
         trade_unit=100,
         strategy_params={"short_window": 2, "long_window": 5},

@@ -35,7 +35,7 @@ AlphaPilot 是一个面向股票的量化研究与交易平台，覆盖数据准
 | 策略复测 | `alphapilot strategy_backtest` | 复用已沉淀的策略资产与模型继续验证 |
 | 日频信号 | `alphapilot daily_signals` | 按交易日推进持仓、生成单日调仓信号 |
 | 交易会话 | `alphapilot trade_session_create` | 将策略快照为可恢复的独立日频交易账户 |
-| 量化择时 | `alphapilot timing_backtest` | 技术指标信号预览、多仓/现金回测与择时结果产物 |
+| 量化择时 | `alphapilot trading_instance_create` / `trading_backtest` | 通过正式策略实例完成技术指标信号预览、统一回放和受控部署；`timing_*` 仅为 0.1.x 兼容入口 |
 | 模拟盘 / 实盘 | `alphapilot live_*` | `dry_run` / `paper` / `live` 运行模式、统一风控与 OMS、守护进程、恢复对账和审计账本；XTP Pro / EMT 通过可选插件接入 |
 | 统一门户 | `alphapilot portal` | 数据、因子、回测、择时、任务、通知和实盘控制集中到同一界面 |
 | 数据准备 | `alphapilot prepare_data` | baostock / tushare → Qlib 数据链路 |
@@ -252,10 +252,18 @@ alphapilot trade_session_create --strategy_name "<策略名>" --name demo_sessio
 alphapilot daily_signals --session demo_session
 ```
 
-或运行一次技术指标择时回测：
+或创建一个正式技术指标择时实例并运行统一回放：
 
 ```bash
-alphapilot timing_backtest --strategy_name dual_ma --symbols 000001 --strategy_params '{"short_window":5,"long_window":20}'
+alphapilot trading_instance_create \
+  --instance_id=ma_5_20 --strategy_id=dual_ma --universe=sh.600000 \
+  --params='{"short_window":5,"long_window":20}' --frequency=day \
+  --data_policy='{"feature_adjustment":"none","history_window":21,"data_version":"local-v1"}' \
+  --portfolio_policy='{"policy_id":"timing_fixed_exposure","params":{"target_percent":0.2}}'
+alphapilot trading_instance_validate --instance_id=ma_5_20
+alphapilot trading_backtest --instance_id=ma_5_20 \
+  --options='{"data_dir":"./data","adjust_mode":"none"}' --wait=True \
+  --output_dir=./results/ma_5_20
 ```
 
 ### 7. 体验模拟盘，再接入实盘（可选）
@@ -333,7 +341,9 @@ XTP Pro / EMT 的 SDK 绑定和 broker 插件属于可选、可能受许可约�
 
 | 日期 | 类型 | 功能/模块 | 目标 | 关键改动 | 影响入口 | 验证 | 状态/后续 |
 |------|------|-----------|------|----------|----------|------|-----------|
-| 2026-07-14 | 全链路重构 | 策略实例到交易执行 | 让规则择时和 Qlib 横截面选股分别共享可恢复的信号、组合、账户 sizing、回放和实盘执行链路 | 新增纯 trading contracts、v1/v2 provider 生命周期与隔离 worker、独立组合政策注册、不可变 Qlib 研究 artifact、D 日决策/D+1 sizing、统一 ReplayRuntime、卖出后买入执行状态机、账户边界、操作员 token/LIVE approval/审计、schema v5 迁移、正式 `/api/trading`/`trading_*` CLI 和 Portal 工作台；组合策略只预留接口 | `/api/trading/*`、`alphapilot trading_*`、Portal「择时/实盘」页、`docs/strategy-trading-full-chain.md` | 644 项后端测试、90 项 Portal 测试、typecheck 与生产构建通过 | 代码闭环完成；自动 LIVE 默认关闭，仍需 20 日 PAPER、5 日 SHADOW 和 XTP/EMT UAT 后才可受限试运行 |
+| 2026-07-15 | 实盘验收 | 全接口验收、Broker UAT v2 与旧入口删除门禁 | 以一次性完整等价验收和真实券商回报证明正式链路可替代旧入口，同时保持 LIVE 20/5 日门禁独立 | schema v8 保存 Git/核心代码/native SDK/插件哈希、两子订单累计金额和 callback 状态；增加只读预检、私有凭据包装器、泄漏扫描，并拆分 removal/live qualification | `/api/trading/{compatibility,removal-check,broker-uat-runs}`、`alphapilot trading_broker_uat_preflight`、`scripts/broker_uat_local.py` | 全量后端与 Portal、正式接口矩阵、OpenAPI/CLI、wheel、XTP/EMT 真实模拟 UAT | 只有 removal qualification 全绿才删除旧入口；自动 LIVE 仍需独立 20 PAPER 日、5 SHADOW 日、parity 与人工授权 |
+| 2026-07-14 | 迁移与验收 | 新链路等价、Broker UAT 与旧入口删除门禁 | 在不提前删除兼容入口的前提下证明正式链路等价、确定且可恢复 | timing 兼容入口转接正式 REPLAY；增加精确历史窗口、决策 provenance、REPLAY/SHADOW parity、qualification、XTP/EMT 共用 UAT harness、多环境调用证据、schema v6/v7 和 commit 绑定的发布验证；固定 0.2.0 Sunset | `/api/trading/{compatibility,parity-runs,broker-uat-runs}`、`alphapilot trading_{compatibility,removal_check,parity_*,qualification,broker_uat_*}`、`docs/strategy-trading-migration-0.2.md` | 全量测试、Portal coverage/typecheck/build、OpenAPI/CLI、依赖边界、变更行覆盖率和 wheel smoke 必须由发布脚本在干净 commit 上生成报告 | 正式替代与兼容演练工具已落地；后续由 v8 验收门禁决定删除，20/5 日仅约束自动 LIVE |
+| 2026-07-14 | 全链路重构 | 策略实例到交易执行 | 让规则择时和 Qlib 横截面选股分别共享可恢复的信号、组合、账户 sizing、回放和实盘执行链路 | 新增纯 trading contracts、v1/v2 provider 生命周期与隔离 worker、独立组合政策注册、不可变 Qlib 研究 artifact、D 日决策/D+1 sizing、统一 ReplayRuntime、卖出后买入执行状态机、账户边界、操作员 token/LIVE approval/审计、schema v5 起始迁移、正式 `/api/trading`/`trading_*` CLI 和 Portal 工作台；组合策略只预留接口 | `/api/trading/*`、`alphapilot trading_*`、Portal「择时/实盘」页、`docs/strategy-trading-full-chain.md` | 后端与 Portal 回归、typecheck 和生产构建 | 代码闭环完成；自动 LIVE 默认关闭，仍需 20 日 PAPER、5 日 SHADOW 和 XTP/EMT UAT 后才可受限试运行 |
 | 2026-07-14 | 安全重构 | 策略运行安全闭环 | 让自动策略只有在部署状态、daemon 实况、账户绑定和恢复对账一致时才可路由 | 新增 `DeploymentCoordinator`、daemon control port、全绑定自动路由授权、实例/账户/全局 kill switch、真实数据但不可路由的 SHADOW、按配置哈希绑定的 PAPER/SHADOW stage evidence、SQLite v3 顺序迁移与备份；预留并行选股/个股择时/市场择时公共契约但不实现组合算法 | `/api/trading/deployments/*`、`/api/trading/stage-runs/*`、`/api/trading/kill-switches/*`、`alphapilot live_daemon_start --strategy-instance-id`、`docs/strategy-runtime.md` | 全量后端、Portal 前端和新增安全/迁移回归 | 完成首个安全闭环里程碑；仍需执行状态机、真实券商 UAT 和连续 PAPER/SHADOW 运行证据后才可小规模实盘 |
 | 2026-07-10 | 重构 | 实盘券商/行情插件 | 将券商 SDK 与 AlphaPilot 核心解耦，支持可发现、可安装和可卸载的实盘接入 | 将 XTP Pro 和 EMT 重构为 `alphapilot.live.plugins` entry point 插件，交易/行情通道可分别配置；新增插件发现、可用性检查及 `live_plugins` 入口 | `alphapilot live_plugins` / `live_brokers` / `live_quote_providers`；Portal「实盘」页；`docs/live-xtp.md`；`docs/live-plugins.md` | 新增插件安装与注册表测试，并覆盖 CLI、Portal 和 gateway 回归 | 仍在开发；需在目标券商环境持续验证连接、恢复和实盘安全控制 |
 | 2026-07-07 | 新增 | 模拟盘/实盘交易系统 | 打通从研究信号到模拟盘/实盘执行的统一交易层，并通过显式风控与确认流程约束真实资金操作 | 新增 `live` system/module，支持 paper、dry-run、live 模式；新增券商注册表与实盘适配；新增运行时预检查、连接、状态查询、手动下单、目标组合提交、守护进程生命周期控制、策略启动/暂停/恢复/停止、风控状态、追加式账本事件、恢复辅助能力，以及 Portal 实盘 API/UI 集成 | `alphapilot live_*` CLI；Portal「实盘」页；`/api/live/*`；`docs/live-xtp.md`；`Dockerfile.live` | 新增并扩展 live engine/runtime/risk/registry/strategy-runner/daemon/recovery/events 测试，以及 Portal live API/前端覆盖 | 仍在开发；后续继续验证券商侧行为、生产恢复、账户安全限制与实盘运行稳定性 |

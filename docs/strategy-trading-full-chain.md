@@ -66,6 +66,8 @@ OMS -> Risk -> Broker
 - `InstrumentMetadata`：交易单位、最小价格步长、资产类型和 T+0/T+1 元数据。
 - `SignalEnvelope`：包含信号类型、来源实例、时点、有效期、数据/模型版本。
 - `PortfolioDecision`：D 日信号及目标权重，绑定 D+1 生效交易日和配置哈希。
+- `DecisionProvenance`：绑定精确历史窗口、历史哈希、provider 前后状态哈希、信号/权重哈希，
+  以及策略代码、模型、数据和政策版本。
 - `AccountSnapshot`、`TargetPortfolio`：不可变账户真值和目标股数。
 - `FeeSchedule`：买卖费率、最低费用和单笔拆单上限；sizing 会按实际拆单数量预留最低费用。
 - `ExecutionPlan`：阶段、稳定子订单引用、问题列表和恢复版本。
@@ -74,6 +76,11 @@ OMS -> Risk -> Broker
 数据口径被强制分开：策略特征可按实例声明使用复权数据；成交、估值和目标股数只能
 使用不复权可交易价格。日期、标的、数据版本、交易日历或 Bar 完成状态不一致时，实例
 保持预热或阻断决策，不能静默混用数据。
+
+`data_policy.history_window` 是不可变实例配置的一部分。每个标的只向 provider 传入最后
+`history_window` 根完整 Bar；标的数量、最新时间和非空数据版本必须一致。provider 仅在首次创建
+时执行 `initialize + warmup`，checkpoint 恢复只执行 `restore`。同一 `as_of` 和历史哈希的重放
+直接复用已保存决策；同一 `as_of` 出现不同历史哈希时 fail closed，不能覆盖原决策。
 
 ## 策略定义与实例
 
@@ -271,6 +278,9 @@ Portal 只在当前浏览器会话内存中保存 token，不写入持久化 loc
   `strategy-instances/{id}/backtest-runs`、`backtest-runs/{run_id}`；
 - 部署：`deployments/{id}/promote|authorize-live|start|pause|reconcile|resume|stop|status`；
 - 运行证据与控制：`deployments/{id}/stage-runs`、`kill-switches`、`audit-events`。
+- 一致性与资格：`deployments/{id}/parity-runs`、`parity-runs/{run_id}`、
+  `deployments/{id}/qualification`；
+- 迁移与券商 UAT：`compatibility`、只读 `broker-uat-runs`。
 
 同步 `POST .../{id}/backtest` 和泛化 `POST .../deployments/{id}/{action}` 仅保留兼容，新增
 调用应使用异步 backtest-run 和显式生命周期路由。
@@ -281,12 +291,13 @@ Portal 只在当前浏览器会话内存中保存 token，不写入持久化 loc
 
 ## 持久化和恢复
 
-trading runtime SQLite 当前 schema 版本为 v5，使用 WAL 和顺序 migration。升级前创建在线
+trading runtime SQLite 当前 schema 版本为 v8，使用 WAL 和顺序 migration。升级前创建在线
 备份，迁移在单事务中执行；迁移失败会保留原库并阻止自动路由，不会静默重建。
 
 数据库保存实例、artifact manifest、信号、决策、异步回测、执行阶段/尝试、子订单、成交
-对账、runtime desired/observed state、stage run、路由阻断、操作员 token、LIVE approval、
-基准持仓、审计事件和旧入口调用计数。稳定 decision/order 引用有唯一约束。
+对账、runtime desired/observed state、stage run、决策观测/parity、路由阻断、操作员 token、
+LIVE approval、Broker UAT、基准持仓、审计事件和逐环境旧入口调用证据。稳定 decision/order
+引用以及 UAT 的真实委托引用有唯一约束。
 
 启动恢复顺序固定为：读取检查点和执行日志，查询 Broker 账户/持仓/委托/成交，修复本地
 投影并检测差异；差异未解决时维持暂停并阻断路由。
@@ -296,7 +307,8 @@ trading runtime SQLite 当前 schema 版本为 v5，使用 WAL 和顺序 migrati
 本轮不删除旧入口：
 
 - `/api/timing/*` 和 `timing_*` CLI 是新能力迁移期间的兼容入口；API 返回标准弃用信息并
-  记录调用量。
+  记录入口、环境、客户端和来源。它们已转接正式 registry、决策管线和 ReplayRuntime，临时
+  实例只能 REPLAY，不能产生部署证据。
 - `/api/live/daemon/strategy/*` 不再由 Portal 调用，但内部 daemon 控制命令仍保留。
 - daemon 的 strategy-name 参数只保留 PAPER 兼容并记录调用量。
 - `/api/strategies/*`、`strategy_create`、`strategy_backtest` 仍是研究资产接口，不等同于
@@ -305,19 +317,26 @@ trading runtime SQLite 当前 schema 版本为 v5，使用 WAL 和顺序 migrati
 
 某个旧公开入口只有同时满足以下条件才可在单独破坏性版本删除：
 
-1. 正式 API/CLI 已具备功能等价能力；
-2. Portal 和第一方 CLI 已零调用；
-3. 遥测显示至少一个稳定发布周期且连续 30 天无外部调用；
-4. 已发布 `Deprecation`、`Link`/替代入口和明确 Sunset 通知；
-5. 兼容测试已转为迁移测试，并有回滚方案。
+1. 每个旧用例通过新链路一次性完整语义等价矩阵，Portal、CLI、后台 job 和生产源码无旧引用；
+2. 所有受控环境从 migration cutoff 起，在仅使用正式新入口的验收周期内旧调用为零；
+3. XTP 和 EMT 的真实 UAT v2 证据均有效，且没有 legacy runner/job、活动 UAT 委托、未导入
+   历史结果或未解决对账差异；
+4. 固定发布脚本在待发布的干净 commit 上通过后端、Portal、OpenAPI、CLI、依赖边界、
+   变更行覆盖率和 wheel smoke，并生成不可篡改的 release report；
+5. `trading_removal_check` 的 commit、schema、UAT 和核心代码证据哈希与待发布代码完全一致。
+
+旧入口删除门禁不等待 20 个 PAPER 日或 5 个 SHADOW 日；这两个门槛仍只约束自动策略晋升
+LIVE。任何删除检查失败都必须推迟 0.2.0，不能通过环境变量或人工勾选绕过。详细演练与删除
+步骤见[《0.2.0 策略链路迁移、券商 UAT 与旧入口删除手册》](strategy-trading-migration-0.2.md)。
 
 研究资产接口与人工恢复入口不能因为名称“旧”就一并删除；它们承担不同职责。
 
 ## 验证状态与上线门槛
 
-当前代码闭环由 644 项后端测试、90 项 Portal 测试、TypeScript 类型检查、生产构建、
-依赖边界、两类策略黄金链路、D/D+1、行情口径、部分成交、重启、SHADOW 禁路由、授权、
-kill switch 和 SQLite 迁移测试覆盖。
+代码闭环由全量后端测试、Portal coverage/typecheck/build、OpenAPI/CLI 快照、依赖边界、
+两类策略黄金链路、D/D+1、行情口径、部分成交、重启、SHADOW 禁路由、授权、kill switch、
+SQLite v5→v6→v7→v8 迁移和 wheel smoke 共同验证。最终结果必须由固定发布脚本生成并绑定精确
+commit，文档中的历史测试数量不能替代发布报告。
 
 仍需在目标环境完成以下外部工作，才能称为“小规模实盘试运行”：
 

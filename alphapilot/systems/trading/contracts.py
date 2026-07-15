@@ -88,6 +88,16 @@ class CompletedBar:
             raise ValueError("strategy input bars must be complete")
         if min(float(self.open), float(self.high), float(self.low), float(self.close)) <= 0:
             raise ValueError("completed bar prices must be positive")
+        if str(self.frequency).lower() == "day":
+            # A daily bar represents one completed exchange session, not the
+            # wall-clock instant at which a particular feed published it.
+            # Canonicalising here keeps REPLAY/PAPER/SHADOW history hashes equal.
+            session = str(self.datetime)[:10]
+            try:
+                datetime.fromisoformat(session)
+            except ValueError as exc:
+                raise ValueError("daily completed bar datetime must contain an ISO date") from exc
+            object.__setattr__(self, "datetime", session)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -390,6 +400,61 @@ class PortfolioPolicy(Protocol):
 
 
 @dataclass(frozen=True)
+class DecisionProvenance:
+    """Deterministic inputs and lifecycle state behind one decision.
+
+    Hashes intentionally use canonical JSON rather than Python object hashes so
+    observations can be compared across processes and runtime modes.
+    """
+
+    history_hash: str = ""
+    history_window: int = 0
+    history_counts: Mapping[str, int] = field(default_factory=dict)
+    provider_state_before_hash: str = ""
+    provider_state_after_hash: str = ""
+    signal_hash: str = ""
+    weights_hash: str = ""
+    policy_id: str = ""
+    policy_version: str = ""
+    data_version: str = ""
+    model_version: str = ""
+    strategy_code_hash: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **asdict(self),
+            "history_counts": {
+                str(key): int(value) for key, value in self.history_counts.items()
+            },
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any] | None) -> "DecisionProvenance":
+        payload = data or {}
+        return cls(
+            history_hash=str(payload.get("history_hash") or ""),
+            history_window=int(payload.get("history_window") or 0),
+            history_counts={
+                str(key): int(value)
+                for key, value in (payload.get("history_counts") or {}).items()
+            },
+            provider_state_before_hash=str(
+                payload.get("provider_state_before_hash") or ""
+            ),
+            provider_state_after_hash=str(
+                payload.get("provider_state_after_hash") or ""
+            ),
+            signal_hash=str(payload.get("signal_hash") or ""),
+            weights_hash=str(payload.get("weights_hash") or ""),
+            policy_id=str(payload.get("policy_id") or ""),
+            policy_version=str(payload.get("policy_version") or ""),
+            data_version=str(payload.get("data_version") or ""),
+            model_version=str(payload.get("model_version") or ""),
+            strategy_code_hash=str(payload.get("strategy_code_hash") or ""),
+        )
+
+
+@dataclass(frozen=True)
 class PortfolioDecision:
     decision_id: str
     instance_id: str
@@ -402,12 +467,14 @@ class PortfolioDecision:
     data_version: str = ""
     model_version: str = ""
     strategy_code_hash: str = ""
+    provenance: DecisionProvenance = field(default_factory=DecisionProvenance)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             **asdict(self),
             "signal": self.signal.to_dict(),
             "target_weights": asdict(self.target_weights),
+            "provenance": self.provenance.to_dict(),
         }
 
     @classmethod
@@ -430,6 +497,7 @@ class PortfolioDecision:
             data_version=str(data.get("data_version") or ""),
             model_version=str(data.get("model_version") or ""),
             strategy_code_hash=str(data.get("strategy_code_hash") or ""),
+            provenance=DecisionProvenance.from_dict(data.get("provenance")),
         )
 
 

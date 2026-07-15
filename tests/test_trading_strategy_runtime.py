@@ -291,12 +291,14 @@ def test_legacy_paper_daemon_strategy_is_adapted_to_authorized_temporary_instanc
         runtime=runtime,
     )
     trading = engine.get_system("trading")
-    temporary = trading.store.get_instance("legacy-dual_ma-day")
+    temporary_id = runner.status()["instance_id"]
+    assert temporary_id.startswith("legacy-paper-dual_ma-")
+    temporary = trading.store.get_instance(temporary_id)
     assert temporary["deployment_level"] == "paper"
-    assert trading.store.get_active_stage_run("legacy-dual_ma-day", stage="paper") is not None
+    assert trading.store.get_active_stage_run(temporary_id, stage="paper") is not None
 
     trading.store.transition_runtime(
-        "legacy-dual_ma-day",
+        temporary_id,
         lifecycle="running",
         desired_state="running",
         observed_state="running",
@@ -308,7 +310,7 @@ def test_legacy_paper_daemon_strategy_is_adapted_to_authorized_temporary_instanc
         100,
         10.0,
         reference=(
-            f"legacy-dual_ma-day:{temporary['config_hash']}:"
+            f"{temporary_id}:{temporary['config_hash']}:"
             "decision:600000.SSE:B:0"
         ),
     )
@@ -316,5 +318,78 @@ def test_legacy_paper_daemon_strategy_is_adapted_to_authorized_temporary_instanc
 
     assert runner.route_port.last_authorization is not None
     assert runner.route_port.last_authorization.allowed is True
+    runner.stop()
+    runtime.close()
+
+
+def test_real_daemon_legacy_paper_name_uses_formal_instance_runner(
+    engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import datetime, timedelta
+
+    from alphapilot.systems.live.daemon import _build_timing_runner
+    from alphapilot.systems.live.instance_runner import StrategyInstanceRunner
+    from alphapilot.systems.trading.contracts import CompletedBar, PriceAdjustment
+
+    class History:
+        def with_data_dir(self, _data_dir):  # noqa: ANN001, ANN201
+            return self
+
+        def load_completed_bars(self, **_kwargs):  # noqa: ANN003, ANN201
+            start = datetime(2026, 5, 1)
+            return [
+                CompletedBar(
+                    datetime=(start + timedelta(days=index)).isoformat(),
+                    instrument="600000.SSE",
+                    open=10 + index * 0.01,
+                    high=10.2 + index * 0.01,
+                    low=9.8 + index * 0.01,
+                    close=10 + index * 0.01,
+                    volume=10_000,
+                    amount=100_000,
+                    frequency="day",
+                    adjustment=PriceAdjustment.BACKWARD,
+                    data_version="formal-history-v1",
+                )
+                for index in range(30)
+            ]
+
+    class BarSource:
+        def __init__(self) -> None:
+            self.listeners = []
+
+        def add_bar_listener(self, interval, listener):  # noqa: ANN001, ANN201
+            self.listeners.append((interval, listener))
+
+        def remove_bar_listener(self, interval, listener):  # noqa: ANN001, ANN201
+            self.listeners.remove((interval, listener))
+
+    live = engine.get_system("live")
+    runtime = live.create_runtime(mode="paper", broker="paper", trade_broker="paper")
+    runtime.connect(paper_cash=100_000)
+    trading = engine.get_system("trading")
+    monkeypatch.setattr(trading, "historical_data", History())
+    bar_source = BarSource()
+
+    runner = _build_timing_runner(
+        runtime.engine,
+        ["600000"],
+        timing_strategy="dual_ma",
+        timing_params={"short_window": 5, "long_window": 20, "target_percent": 0.2},
+        timing_freq="day",
+        bar_seconds=60,
+        min_bars=30,
+        window=250,
+        kernel_engine=engine,
+        state_dir=runtime.config.state_dir,
+        runtime=runtime,
+        bar_source=bar_source,
+    )
+
+    assert isinstance(runner, StrategyInstanceRunner)
+    assert runner.status()["required_history"] == 21
+    assert runner.status()["available_history"] == 21
+    assert bar_source.listeners
     runner.stop()
     runtime.close()

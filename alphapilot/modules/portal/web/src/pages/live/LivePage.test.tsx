@@ -171,6 +171,14 @@ function mockLiveFetch(options: { alive?: boolean; accountMetrics?: boolean; dae
         { instance_id: "live_sma", strategy_id: "sma_filter", deployment_level: "live", lifecycle: "live", config_hash: "live-hash" },
       ] });
     }
+    if (path === "/api/trading/broker-uat-runs") {
+      return Response.json({ runs: [{
+        run_id: "uat-xtp-1", broker: "xtp", environment: "protected-test-account",
+        status: "restart_required", current_step: "process_restart_required",
+        symbol: "600000.SSE", sdk_version: "9.9",
+        evidence: { expires_at: "2026-10-01T00:00:00+00:00" },
+      }] });
+    }
     if (path === "/api/trading/deployments/live_sma") {
       return Response.json({
         instance: { instance_id: "live_sma", lifecycle: "running", deployment_level: "live", config_hash: "live-hash" },
@@ -351,6 +359,8 @@ describe("LivePage", () => {
     expect(drawer).toHaveAttribute("aria-modal", "true");
     expect(screen.getByText("风控与恢复")).toBeInTheDocument();
     expect(screen.getAllByText("alphapilot-broker-emt").length).toBeGreaterThanOrEqual(1);
+    expect(await screen.findByText("protected-test-account")).toBeInTheDocument();
+    expect(screen.getByText("process_restart_required")).toBeInTheDocument();
     fireEvent.keyDown(document, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "连接与诊断" })).not.toBeInTheDocument());
 

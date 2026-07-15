@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import os
 import json
+import hashlib
+import socket
+import csv
+from datetime import datetime, timezone
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 import uuid
 from typing import TYPE_CHECKING, Any
 
-import pandas as pd
-
 from alphapilot.kernel.base import BaseSystem
+from alphapilot.kernel.registry import builtin_strategy_definitions
 from alphapilot.systems.trading.domain import LifecycleState, StrategyInstanceConfig
 from alphapilot.systems.trading.artifacts import ResearchArtifactSnapshotter, verify_artifact_binding
 from alphapilot.systems.trading.authorization import AutomatedRouteAuthorizer
@@ -34,14 +37,23 @@ from alphapilot.systems.trading.contracts import (
     canonical_instrument,
 )
 from alphapilot.systems.trading.data_adapters import (
+    LocalHistoricalDataAdapter,
     SequenceCalendar,
-    completed_bars_from_frame,
-    instrument_metadata_from_frame,
-    tradable_quotes_from_frame,
 )
 from alphapilot.systems.trading.replay import ReplayConfig, ReplayRuntime
 from alphapilot.systems.trading.store import StrategyRuntimeStore
 from alphapilot.systems.trading.operators import OperatorAuthService
+from alphapilot.systems.trading.compatibility import (
+    ENVIRONMENT_REPORT_SCHEMA,
+    RemovalReadinessService,
+    compatibility_environment_report_hash,
+    register_manifest as register_compatibility_manifest,
+    validate_compatibility_environment_report,
+)
+from alphapilot.systems.trading.parity import (
+    DecisionParityService,
+    DeploymentQualificationService,
+)
 
 if TYPE_CHECKING:
     from alphapilot.kernel.context import Context
@@ -52,22 +64,45 @@ def _option(payload: dict[str, Any], key: str, default: Any) -> Any:
     return default if value is None or value == "" else value
 
 
+def _utc_timestamp(value: str) -> datetime | None:
+    try:
+        candidate = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if candidate.tzinfo is None:
+        candidate = candidate.replace(tzinfo=timezone.utc)
+    return candidate.astimezone(timezone.utc)
+
+
+def _latest_cutoff(values: list[str]) -> str:
+    parsed = [item for value in values if (item := _utc_timestamp(value)) is not None]
+    return max(parsed).isoformat(timespec="seconds") if parsed else ""
+
+
 class TradingStrategySystem(BaseSystem):
     name = "trading"
 
     def setup(self, context: "Context") -> None:
         self.context = context
         local_root = os.getenv("ALPHAPILOT_STRATEGY_DIR") or str(Path.cwd() / "strategies")
-        from alphapilot.systems.selection.definitions import strategy_definitions as selection_definitions
-        from alphapilot.systems.timing.definitions import strategy_definitions as timing_definitions
-
         self.registry = StrategyRegistry(local_root=local_root).discover(
-            builtin_contributions=[*timing_definitions(), *selection_definitions()],
+            builtin_contributions=builtin_strategy_definitions(),
         )
         policy_root = os.getenv("ALPHAPILOT_PORTFOLIO_POLICY_DIR") or str(Path.cwd() / "policies")
         self.policy_registry = PortfolioPolicyRegistry(local_root=policy_root).discover()
+        self.historical_data = LocalHistoricalDataAdapter(context)
+        self.historical_execution_data = self.historical_data
         live = context.engine.get_system("live")
         self.store = StrategyRuntimeStore(Path(live.config.state_dir) / "strategy_runtime.sqlite3")
+        configured_environment = str(os.getenv("ALPHAPILOT_ENVIRONMENT_ID") or "").strip()
+        environment_material = configured_environment or (
+            f"{socket.gethostname()}:{Path(live.config.state_dir).expanduser().resolve()}"
+        )
+        self.compatibility_environment_id = hashlib.sha256(
+            environment_material.encode("utf-8")
+        ).hexdigest()[:24]
+        self.store.register_compatibility_environment(self.compatibility_environment_id)
+        register_compatibility_manifest(self.store)
         self.artifact_snapshotter = ResearchArtifactSnapshotter(
             Path(live.config.state_dir) / "strategy_artifacts",
             strategy_system=context.engine.get_system("strategy"),
@@ -83,6 +118,13 @@ class TradingStrategySystem(BaseSystem):
         )
         self._rebind_definition_hashes()
         self.route_authorizer = AutomatedRouteAuthorizer(self.store)
+        self.parity_service = DecisionParityService(self.store)
+        self.qualification_service = DeploymentQualificationService(self.store)
+        self.removal_readiness_service = RemovalReadinessService(
+            self.store,
+            repository_root=Path.cwd(),
+        )
+        self.broker_uat_harness = live.broker_uat_harness(self.store)
         self.deployment_coordinator = DeploymentCoordinator(
             self.store,
             live.runtime_control(),
@@ -110,28 +152,50 @@ class TradingStrategySystem(BaseSystem):
     def list_instances(self) -> list[dict[str, Any]]:
         return self.store.list_instances()
 
-    def create_instance(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def build_instance_config(self, payload: dict[str, Any]) -> StrategyInstanceConfig:
+        """Normalize and validate an instance without choosing a persistence adapter."""
+
         definition = self.registry.get(str(payload.get("strategy_id") or ""))
+        strategy_params = dict(payload.get("params") or {})
+        legacy_target = None
+        if definition.signal_kind == SignalKind.INSTRUMENT_TIMING:
+            legacy_target = strategy_params.pop("target_percent", None)
+        normalized_payload = {**payload, "params": strategy_params}
         portfolio_policy = dict(payload.get("portfolio_policy") or {})
         if not portfolio_policy:
-            portfolio_policy = self._default_portfolio_policy(definition.signal_kind, payload)
+            policy_payload = dict(normalized_payload)
+            if legacy_target is not None:
+                policy_payload["target_percent"] = legacy_target
+            portfolio_policy = self._default_portfolio_policy(
+                definition.signal_kind,
+                policy_payload,
+            )
         else:
+            if legacy_target is not None:
+                policy_params = dict(portfolio_policy.get("params") or {})
+                policy_params.setdefault("target_percent", float(legacy_target))
+                portfolio_policy["params"] = policy_params
             portfolio_policy = self._bind_portfolio_policy(
                 portfolio_policy,
                 definition.signal_kind,
             )
         binding = dict(payload.get("artifact_binding") or {})
+        data_policy = dict(
+            payload.get("data_policy")
+            or {"feature_adjustment": str(payload.get("adjust_mode") or "backward")}
+        )
+        data_policy.setdefault(
+            "history_window",
+            resolve_required_history(definition, strategy_params),
+        )
         config = StrategyInstanceConfig(
             instance_id=str(payload.get("instance_id") or ""),
             strategy_id=definition.strategy_id,
             strategy_version=str(payload.get("strategy_version") or definition.version),
-            params=dict(payload.get("params") or {}),
+            params=strategy_params,
             universe=tuple(payload.get("universe") or ()),
             frequency=str(payload.get("frequency") or "day"),
-            data_policy=dict(
-                payload.get("data_policy")
-                or {"feature_adjustment": str(payload.get("adjust_mode") or "backward")}
-            ),
+            data_policy=data_policy,
             portfolio_policy=portfolio_policy,
             strategy_code_hash=definition.code_hash,
             model_hash=str(payload.get("model_hash") or binding.get("model_hash") or ""),
@@ -145,6 +209,10 @@ class TradingStrategySystem(BaseSystem):
                 snapshot_root=self.artifact_snapshotter.root,
                 expected_instance_id=config.instance_id,
             )
+        return config
+
+    def create_instance(self, payload: dict[str, Any]) -> dict[str, Any]:
+        config = self.build_instance_config(payload)
         return self.store.create_instance(config)
 
     def create_instance_from_research_asset(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -202,17 +270,55 @@ class TradingStrategySystem(BaseSystem):
             key: value for key, value in payload.items()
             if key in {"params", "universe", "frequency", "data_policy", "portfolio_policy"}
         }
+        next_params = dict(
+            safe_payload.get("params")
+            if "params" in safe_payload else current["config"].get("params") or {}
+        )
+        legacy_target = None
+        if definition.signal_kind == SignalKind.INSTRUMENT_TIMING:
+            legacy_target = next_params.pop("target_percent", None)
+            if "params" in safe_payload:
+                safe_payload["params"] = next_params
         if "portfolio_policy" in safe_payload:
+            policy_request = dict(safe_payload["portfolio_policy"] or {})
+            if legacy_target is not None:
+                policy_params = dict(policy_request.get("params") or {})
+                policy_params.setdefault("target_percent", float(legacy_target))
+                policy_request["params"] = policy_params
             safe_payload["portfolio_policy"] = self._bind_portfolio_policy(
-                dict(safe_payload["portfolio_policy"] or {}),
+                policy_request,
                 definition.signal_kind,
             )
+        elif legacy_target is not None:
+            policy_request = dict(current["config"].get("portfolio_policy") or {})
+            policy_params = dict(policy_request.get("params") or {})
+            policy_params["target_percent"] = float(legacy_target)
+            policy_request["params"] = policy_params
+            safe_payload["portfolio_policy"] = self._bind_portfolio_policy(
+                policy_request,
+                definition.signal_kind,
+            )
+        next_data_policy = dict(
+            safe_payload.get("data_policy")
+            if "data_policy" in safe_payload else current["config"].get("data_policy") or {}
+        )
+        resolved_history = resolve_required_history(definition, next_params)
+        if "params" in safe_payload and "data_policy" not in safe_payload:
+            # Re-resolve the generated default when strategy parameters change;
+            # an explicitly supplied data_policy remains an immutable operator choice.
+            next_data_policy["history_window"] = resolved_history
+        else:
+            next_data_policy.setdefault("history_window", resolved_history)
+        safe_payload["data_policy"] = next_data_policy
         safe_payload["strategy_code_hash"] = definition.code_hash
         return self.store.update_instance(instance_id, safe_payload)
 
-    def validate_instance(self, instance_id: str) -> dict[str, Any]:
-        row = self.store.get_instance(instance_id)
-        config = StrategyInstanceConfig.from_dict(row["config"])
+    def validate_instance_config(
+        self,
+        config: StrategyInstanceConfig,
+    ) -> dict[str, Any]:
+        """Validate a normalized config without reading or mutating persistence."""
+
         definition = self.registry.get(config.strategy_id)
         errors = validate_parameters(definition.parameter_schema, config.params)
         if config.strategy_version != definition.version:
@@ -223,6 +329,12 @@ class TradingStrategySystem(BaseSystem):
             errors.append("strategy code hash changed; update the instance before validation")
         if config.frequency not in definition.supported_frequencies:
             errors.append(f"frequency {config.frequency!r} is not supported")
+        required_history = resolve_required_history(definition, config.params)
+        history_window = int(config.data_policy.get("history_window") or 0)
+        if history_window < required_history:
+            errors.append(
+                f"data_policy.history_window must be >= {required_history} for this instance"
+            )
         if not config.universe:
             errors.append("universe must not be empty")
         if config.deployment_level not in definition.deployable_modes:
@@ -270,8 +382,23 @@ class TradingStrategySystem(BaseSystem):
             }
             if set(config.universe) != bound_universe:
                 errors.append("instance universe does not match the immutable research artifact")
-        if errors:
-            return {"ok": False, "errors": errors, "instance": row}
+        live = self.context.engine.get_system("live")
+        deployment_errors = self._deployment_policy_errors(config, live.config.risk)
+        return {
+            "ok": not errors,
+            "errors": errors,
+            "deployment_ready": not deployment_errors,
+            "deployment_errors": deployment_errors,
+            "required_history": required_history,
+            "history_window": history_window,
+        }
+
+    def validate_instance(self, instance_id: str) -> dict[str, Any]:
+        row = self.store.get_instance(instance_id)
+        config = StrategyInstanceConfig.from_dict(row["config"])
+        validation = self.validate_instance_config(config)
+        if not validation["ok"]:
+            return {**validation, "instance": row}
         if row["lifecycle"] in {
             LifecycleState.CREATED.value,
             LifecycleState.VALIDATED.value,
@@ -290,15 +417,9 @@ class TradingStrategySystem(BaseSystem):
             updated = self.store.get_instance(instance_id)
         else:
             updated = row
-        live = self.context.engine.get_system("live")
-        deployment_errors = self._deployment_policy_errors(config, live.config.risk)
         return {
-            "ok": True,
-            "errors": [],
-            "deployment_ready": not deployment_errors,
-            "deployment_errors": deployment_errors,
+            **validation,
             "instance": updated,
-            "required_history": resolve_required_history(definition, config.params),
         }
 
     def backtest_instance(self, instance_id: str, payload: dict[str, Any]) -> Any:
@@ -310,31 +431,30 @@ class TradingStrategySystem(BaseSystem):
         if not validation["ok"]:
             raise ValueError("; ".join(validation["errors"]))
         config = StrategyInstanceConfig.from_dict(validation["instance"]["config"])
-        timing = self.context.engine.get_system("timing")
         adjustment = str(
             payload.get("adjust_mode")
             or config.data_policy.get("feature_adjustment")
             or "backward"
         )
-        frame = timing.load_bars(
-            symbols=list(config.universe),
-            start_date=payload.get("start_date"),
-            end_date=payload.get("calendar_end_date"),
-            freq=config.frequency,
-            data_dir=payload.get("data_dir"),
-            adjust_mode=adjustment,
+        bars = self.historical_data.load_completed_bars(
+            instruments=list(config.universe),
+            start=payload.get("start_date"),
+            end=payload.get("calendar_end_date"),
+            frequency=config.frequency,
+            data_dir=payload.get("data_dir") or config.data_policy.get("data_dir"),
+            adjustment=adjustment,
         )
-        sessions = sorted({pd.Timestamp(value).date().isoformat() for value in frame["datetime"]})
+        sessions = sorted({str(bar.datetime)[:10] for bar in bars})
         if len(sessions) < 2:
             raise ValueError("signal preview requires an explicit next trading session")
         as_of = str(payload.get("as_of") or payload.get("end_date") or sessions[-2])[:10]
-        evaluation_frame = frame[pd.to_datetime(frame["datetime"]).dt.date <= pd.Timestamp(as_of).date()]
-        bars = completed_bars_from_frame(
-            evaluation_frame,
-            frequency=config.frequency,
-            adjustment=PriceAdjustment(adjustment),
-            data_version=str(config.data_policy.get("data_version") or ""),
-        )
+        bars = [bar for bar in bars if str(bar.datetime)[:10] <= as_of]
+        configured_version = str(config.data_policy.get("data_version") or "")
+        if configured_version:
+            bars = [
+                type(bar).from_dict({**bar.to_dict(), "data_version": configured_version})
+                for bar in bars
+            ]
         account_payload = dict(payload.get("account") or {})
         account = AccountSnapshot(
             account_id=str(account_payload.get("account_id") or "preview"),
@@ -395,6 +515,22 @@ class TradingStrategySystem(BaseSystem):
                 path = root / f"{name}.json"
                 if path.is_file():
                     artifacts[name] = json.loads(path.read_text(encoding="utf-8"))
+            if run.get("origin") == "legacy_import":
+                for name, filename in (
+                    ("signals", "signals.csv"),
+                    ("fills", "trades.csv"),
+                    ("positions", "positions.csv"),
+                    ("equity", "equity_curve.csv"),
+                ):
+                    path = root / filename
+                    if name not in artifacts and path.is_file():
+                        with path.open("r", encoding="utf-8-sig", newline="") as stream:
+                            artifacts[name] = list(csv.DictReader(stream))
+                migration = root / "compatibility_migration.json"
+                if migration.is_file():
+                    artifacts["compatibility_migration"] = json.loads(
+                        migration.read_text(encoding="utf-8")
+                    )
             run["detail"] = artifacts
         return run
 
@@ -446,46 +582,41 @@ class TradingStrategySystem(BaseSystem):
         if not validation["ok"]:
             raise ValueError("; ".join(validation["errors"]))
         config = StrategyInstanceConfig.from_dict(validation["instance"]["config"])
-        timing = self.context.engine.get_system("timing")
         feature_adjustment = str(
             payload.get("adjust_mode")
             or config.data_policy.get("feature_adjustment")
             or "backward"
         )
-        common = {
-            "symbols": list(config.universe),
-            "start_date": payload.get("start_date"),
-            "end_date": payload.get("end_date"),
-            "freq": config.frequency,
-            "data_dir": payload.get("data_dir"),
-        }
-        feature_frame = timing.load_bars(**common, adjust_mode=feature_adjustment)
-        raw_data_dir = payload.get("execution_data_dir") or payload.get("data_dir")
-        raw_frame = timing.load_bars(
-            **{**common, "data_dir": raw_data_dir},
-            adjust_mode="none",
-        )
-        feature_bars = completed_bars_from_frame(
-            feature_frame,
+        data_dir = payload.get("data_dir") or config.data_policy.get("data_dir")
+        feature_bars = self.historical_data.load_completed_bars(
+            instruments=list(config.universe),
+            start=payload.get("start_date"),
+            end=payload.get("end_date"),
             frequency=config.frequency,
-            adjustment=PriceAdjustment(feature_adjustment),
-            data_version=str(config.data_policy.get("data_version") or ""),
+            adjustment=feature_adjustment,
+            data_dir=data_dir,
         )
-        raw_bars = completed_bars_from_frame(
-            raw_frame,
+        configured_version = str(config.data_policy.get("data_version") or "")
+        if configured_version:
+            feature_bars = [
+                type(bar).from_dict({**bar.to_dict(), "data_version": configured_version})
+                for bar in feature_bars
+            ]
+        execution_slice = self.historical_execution_data.load_execution_slice(
+            instruments=list(config.universe),
+            start=payload.get("start_date"),
+            end=payload.get("end_date"),
             frequency=config.frequency,
-            adjustment=PriceAdjustment.NONE,
-        )
-        raw_data_version = str(payload.get("execution_data_version") or "")
-        quote_overrides = tradable_quotes_from_frame(
-            raw_frame,
-            frequency=config.frequency,
-            data_version=raw_data_version,
-        )
-        derived_metadata = instrument_metadata_from_frame(
-            raw_frame,
+            data_dir=(
+                payload.get("execution_data_dir")
+                or config.data_policy.get("execution_data_dir")
+                or data_dir
+            ),
             default_lot_size=int(_option(payload, "trade_unit", 100)),
         )
+        raw_bars = list(execution_slice.bars)
+        quote_overrides = dict(execution_slice.quotes)
+        derived_metadata = dict(execution_slice.instruments)
         result = ReplayRuntime(
             strategy_registry=self.registry,
             policy_registry=self.policy_registry,
@@ -525,6 +656,17 @@ class TradingStrategySystem(BaseSystem):
                 quote_overrides=quote_overrides,
             ),
         )
+        # A replay has its own journal so that it is reproducible and can be
+        # inspected independently.  Publish only its immutable observations to
+        # the control store; deployment parity must never depend on opening an
+        # arbitrary artifact database supplied by a caller.
+        replay_store = StrategyRuntimeStore(Path(result.artifact_dir) / "runtime.sqlite3")
+        for observation in replay_store.list_decision_observations(
+            instance_id,
+            mode="replay",
+            run_id=run_id,
+        ):
+            self.store.record_decision_observation(observation)
         current = self.store.get_instance(instance_id)
         if current["config_hash"] != config.config_hash:
             raise RuntimeError("strategy instance changed during replay")
@@ -546,6 +688,8 @@ class TradingStrategySystem(BaseSystem):
         if not validation["ok"]:
             raise ValueError("; ".join(validation["errors"]))
         config = StrategyInstanceConfig.from_dict(validation["instance"]["config"])
+        if bool(config.data_policy.get("compatibility_only")):
+            raise ValueError("legacy compatibility instances are REPLAY-only and cannot be promoted")
         live = self.context.engine.get_system("live")
         deployment_errors = self._deployment_policy_errors(config, live.config.risk)
         if deployment_errors:
@@ -651,9 +795,21 @@ class TradingStrategySystem(BaseSystem):
         outside = sorted(set(baseline) - set(current["config"].get("universe") or []))
         if outside:
             raise ValueError(f"baseline contains holdings outside the instance universe: {outside}")
-        evidence = self.store.evaluate_stage(instance_id, "shadow", minimum_sessions=5)
-        if not evidence["passed"]:
-            raise ValueError("passing SHADOW evidence is required before LIVE authorization")
+        qualification = self._qualification(
+            instance_id,
+            account_id=account_id,
+            broker=broker,
+        )
+        if not qualification["eligible_for_live_authorization"]:
+            failed = [
+                name for name in (
+                    "paper", "shadow", "parity", "broker_uat", "reconcile", "configuration",
+                )
+                if not bool(qualification[name]["passed"])
+            ]
+            raise ValueError(
+                "LIVE qualification is incomplete: " + ", ".join(failed)
+            )
         self.store.save_account_baseline(
             instance_id,
             current["config_hash"],
@@ -673,6 +829,347 @@ class TradingStrategySystem(BaseSystem):
 
     def audit_events(self, *, limit: int = 200) -> list[dict[str, Any]]:
         return self.store.list_audit_events(limit=limit)
+
+    def compatibility_status(self) -> dict[str, Any]:
+        local_report = self._refresh_local_compatibility_report()
+        return {
+            "schema_version": self.store.schema_version,
+            "environment_id": self.compatibility_environment_id,
+            "environments": self.store.compatibility_environment_status(),
+            "entrypoints": self.store.compatibility_status(),
+            "timing_equivalence": self._timing_equivalence_status(),
+            "local_environment_report": local_report,
+        }
+
+    def _refresh_local_compatibility_report(self) -> dict[str, Any]:
+        environment = self.store.compatibility_environment_status(
+            self.compatibility_environment_id
+        )
+        cutoff = str(environment.get("migration_cutoff") or "")
+        if not cutoff:
+            return {
+                "ready": False,
+                "environment_id": self.compatibility_environment_id,
+                "error": "migration cutoff is not set",
+            }
+        entrypoints = self.store.compatibility_environment_entrypoints(
+            self.compatibility_environment_id
+        )
+        runtime_blockers = self.store.legacy_runtime_blockers()
+        unmigrated_jobs = self.removal_readiness_service._unmigrated_legacy_jobs()
+        payload: dict[str, Any] = {
+            "schema_version": ENVIRONMENT_REPORT_SCHEMA,
+            "runtime_schema_version": self.store.schema_version,
+            "environment_id": self.compatibility_environment_id,
+            "migration_cutoff": cutoff,
+            "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "code_commit": str(self.removal_readiness_service._git_state().get("commit") or ""),
+            "post_cutoff_count": sum(
+                int(item.get("post_cutoff_count") or 0) for item in entrypoints
+            ),
+            "active_legacy_runtime_count": sum(
+                len(items) for items in runtime_blockers.values()
+            ),
+            "unmigrated_legacy_job_count": len(unmigrated_jobs),
+            "entrypoints": entrypoints,
+        }
+        payload["evidence_hash"] = compatibility_environment_report_hash(payload)
+        self.store.save_compatibility_environment_report(
+            payload,
+            evidence_hash=payload["evidence_hash"],
+            imported=False,
+        )
+        return {"ready": True, **payload}
+
+    def import_compatibility_environment_report(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        report = validate_compatibility_environment_report(payload)
+        if report["environment_id"] == self.compatibility_environment_id:
+            raise ValueError("the local compatibility report cannot be re-imported")
+        return self.store.save_compatibility_environment_report(
+            report,
+            evidence_hash=str(report["evidence_hash"]),
+            imported=True,
+        )
+
+    def _timing_equivalence_status(self) -> dict[str, Any]:
+        required = sorted(
+            definition.strategy_id
+            for definition in self.registry.list()
+            if definition.signal_kind == SignalKind.INSTRUMENT_TIMING
+        )
+        coverage = {
+            strategy_id: {"passed_runs": 0, "cases": []}
+            for strategy_id in required
+        }
+        global_cases: set[str] = set()
+        for run in self.store.list_legacy_compatibility_runs():
+            strategy_id = str(run["strategy_id"])
+            if strategy_id not in coverage or run["status"] != "completed":
+                continue
+            equivalence = dict(run.get("result", {}).get("compatibility_equivalence") or {})
+            instance_config = dict(run.get("instance_config") or {})
+            try:
+                current_code_hash = self.registry.get(strategy_id).code_hash
+            except KeyError:
+                continue
+            if (
+                equivalence.get("status") != "passed"
+                or str(instance_config.get("strategy_code_hash") or "") != current_code_hash
+            ):
+                continue
+            cases: set[str] = set()
+            universe = list(instance_config.get("universe") or [])
+            cases.add("multi_instrument" if len(universe) > 1 else "single_instrument")
+            request = dict(run.get("request") or {})
+            if request.get("start_date") or request.get("end_date"):
+                cases.add("date_filter")
+            target = float(
+                (instance_config.get("portfolio_policy") or {}).get("params", {}).get(
+                    "target_percent", 0.0,
+                )
+            )
+            if abs(target) < 1e-12:
+                cases.add("target_0")
+            if abs(target - 0.2) < 1e-12:
+                cases.add("target_20")
+            if abs(target - 1.0) < 1e-12:
+                cases.add("target_100")
+            coverage[strategy_id]["passed_runs"] += 1
+            coverage[strategy_id]["cases"] = sorted(
+                set(coverage[strategy_id]["cases"]) | cases
+            )
+            global_cases.update(cases)
+        required_cases = {
+            "single_instrument", "multi_instrument", "date_filter",
+            "target_0", "target_20", "target_100",
+        }
+        missing_strategies = sorted(
+            strategy_id for strategy_id, item in coverage.items()
+            if not item["passed_runs"]
+        )
+        return {
+            "passed": not missing_strategies and required_cases <= global_cases,
+            "required_strategies": required,
+            "missing_strategies": missing_strategies,
+            "required_cases": sorted(required_cases),
+            "covered_cases": sorted(global_cases),
+            "missing_cases": sorted(required_cases - global_cases),
+            "coverage": coverage,
+        }
+
+    def set_compatibility_cutoff(self) -> dict[str, Any]:
+        cutoff = self.store.set_compatibility_cutoff()
+        return {"migration_cutoff": cutoff, **self.compatibility_status()}
+
+    def start_parity_run(self, instance_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        replay_run_id = str(payload.get("replay_run_id") or "").strip()
+        shadow_stage_run_id = str(payload.get("shadow_stage_run_id") or "").strip()
+        if not replay_run_id or not shadow_stage_run_id:
+            raise ValueError("replay_run_id and shadow_stage_run_id are required")
+        replay = self.store.get_backtest_run(replay_run_id)
+        shadow = self.store.get_stage_run(shadow_stage_run_id)
+        if replay["instance_id"] != instance_id or shadow["instance_id"] != instance_id:
+            raise ValueError("parity inputs must belong to the requested instance")
+        if replay["status"] != "completed" or shadow["status"] != "completed":
+            raise ValueError("parity inputs must be completed runs")
+        if shadow["stage"] != "shadow":
+            raise ValueError("shadow_stage_run_id must identify a SHADOW run")
+        current = self.store.get_instance(instance_id)
+        if (
+            replay["config_hash"] != current["config_hash"]
+            or shadow["config_hash"] != current["config_hash"]
+        ):
+            raise ValueError("parity input config_hash is stale")
+        return self.parity_service.compare(
+            instance_id,
+            replay_run_id=replay_run_id,
+            shadow_stage_run_id=shadow_stage_run_id,
+        )
+
+    def get_parity_run(self, run_id: str) -> dict[str, Any]:
+        return self.store.get_parity_run(run_id)
+
+    def qualification(self, instance_id: str) -> dict[str, Any]:
+        return self._qualification(instance_id)
+
+    def _qualification(
+        self,
+        instance_id: str,
+        *,
+        account_id: str = "",
+        broker: str = "",
+    ) -> dict[str, Any]:
+        runtime = self.store.get_runtime_state(instance_id)
+        selected_broker = str(broker or runtime.get("broker") or "").lower()
+        metadata: dict[str, Any] = {}
+        metadata_error = ""
+        if selected_broker in {"xtp", "emt"}:
+            try:
+                metadata = self.broker_uat_harness.plugin_metadata(selected_broker)
+            except Exception as exc:  # noqa: BLE001 - qualification remains fail closed
+                metadata_error = f"{type(exc).__name__}: {exc}"
+        result = self.qualification_service.evaluate(
+            instance_id,
+            account_id=account_id,
+            broker=selected_broker,
+            environment=str(os.getenv("ALPHAPILOT_BROKER_UAT_ENVIRONMENT") or ""),
+            plugin_version=str(metadata.get("plugin_version") or "__unavailable__")
+            if selected_broker in {"xtp", "emt"} else "",
+            plugin_hash=str(metadata.get("plugin_hash") or "__unavailable__")
+            if selected_broker in {"xtp", "emt"} else "",
+            sdk_version=str(metadata.get("sdk_version") or "__unavailable__")
+            if selected_broker in {"xtp", "emt"} else "",
+            sdk_hash=str(metadata.get("sdk_hash") or "__unavailable__")
+            if selected_broker in {"xtp", "emt"} else "",
+            runtime_code_hash=str(metadata.get("runtime_code_hash") or "__unavailable__")
+            if selected_broker in {"xtp", "emt"} else "",
+        )
+        result["broker_uat"]["plugin_metadata_error"] = metadata_error
+        return result
+
+    def list_broker_uat_runs(self, broker: str | None = None) -> list[dict[str, Any]]:
+        return self.store.list_broker_uat_runs(broker)
+
+    def get_broker_uat_run(self, run_id: str) -> dict[str, Any]:
+        return self.store.get_broker_uat_run(run_id)
+
+    def broker_uat_preflight(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.broker_uat_harness.preflight(
+            broker=str(payload.get("broker") or ""),
+            symbols=[str(item) for item in payload.get("symbols") or []],
+            max_notional=float(_option(payload, "max_notional", 20_000.0)),
+            timeout=float(_option(payload, "timeout", 30.0)),
+        )
+
+    def start_broker_uat(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.broker_uat_harness.start(
+            broker=str(payload.get("broker") or ""),
+            symbol=str(payload.get("symbol") or ""),
+            side=str(payload.get("side") or ""),
+            volume=float(payload.get("volume") or 0.0),
+            price=float(payload.get("price") or 0.0),
+            max_notional=float(payload.get("max_notional") or 0.0),
+            confirmation=str(payload.get("confirmation") or ""),
+            timeout=float(_option(payload, "timeout", 30.0)),
+        )
+
+    def resume_broker_uat(self, run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.broker_uat_harness.resume(
+            run_id,
+            confirmation=str(payload.get("confirmation") or ""),
+            timeout=float(_option(payload, "timeout", 30.0)),
+        )
+
+    def abort_broker_uat(self, run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.broker_uat_harness.abort(
+            run_id,
+            confirmation=str(payload.get("confirmation") or ""),
+            reason=str(payload.get("reason") or "operator aborted Broker UAT"),
+        )
+
+    def removal_check(self, acceptance_instance_id: str) -> dict[str, Any]:
+        if not str(acceptance_instance_id).strip():
+            raise ValueError("acceptance_instance_id is required")
+        # Removal readiness is deliberately independent from the 20/5-day LIVE
+        # promotion gate.  It proves replacement equivalence and operational
+        # safety; it never grants automated LIVE authority.
+        self.compatibility_status()
+        report = self.removal_readiness_service.evaluate(acceptance_instance_id)
+        live_qualification = self._qualification(acceptance_instance_id)
+        report["live_qualification"] = live_qualification
+        equivalence = self._timing_equivalence_status()
+        report["timing_equivalence"] = equivalence
+        report["checks"]["timing_equivalence_matrix"] = bool(equivalence["passed"])
+        observation_cutoff = _latest_cutoff([
+            str(row.get("migration_cutoff") or "")
+            for row in report.get("environments", [])
+        ])
+        report["removal_qualification"] = {
+            "observation_cutoff": observation_cutoff,
+            "timing_equivalence": bool(equivalence["passed"]),
+            "live_waiting_period_required": False,
+        }
+        broker_evidence: dict[str, dict[str, Any] | None] = {}
+        for broker in ("xtp", "emt"):
+            try:
+                metadata = self.broker_uat_harness.plugin_metadata(broker)
+                evidence = self.store.valid_broker_uat_evidence(
+                    broker,
+                    plugin_version=metadata["plugin_version"],
+                    plugin_hash=metadata["plugin_hash"],
+                    sdk_version=metadata["sdk_version"],
+                    sdk_hash=metadata["sdk_hash"],
+                    runtime_code_hash=metadata["runtime_code_hash"],
+                    scenario_version=2,
+                    passed_after=observation_cutoff,
+                )
+            except Exception:  # noqa: BLE001 - missing plugin/SDK invalidates UAT proof
+                evidence = None
+            broker_evidence[broker] = evidence
+            report["checks"][f"{broker}_uat"] = evidence is not None
+            report["broker_uat"][broker] = (
+                None if evidence is None else {
+                    "evidence_id": evidence["evidence_id"],
+                    "evidence_hash": evidence["evidence_hash"],
+                    "environment": evidence["environment"],
+                    "plugin_version": evidence["plugin_version"],
+                    "sdk_hash": evidence["sdk_hash"],
+                    "runtime_code_hash": evidence["runtime_code_hash"],
+                    "passed_at": evidence["passed_at"],
+                    "expires_at": evidence["expires_at"],
+                }
+            )
+        completed_at = _latest_cutoff([
+            *[
+                str(evidence.get("passed_at") or "")
+                for evidence in broker_evidence.values() if evidence is not None
+            ],
+        ])
+        environment_reports_after_cycle = bool(completed_at) and all(
+            (
+                (generated := _utc_timestamp(
+                    str((row.get("evidence") or {}).get("generated_at") or "")
+                )) is not None
+                and (completed := _utc_timestamp(completed_at)) is not None
+                and generated >= completed
+            )
+            for row in report.get("environments", [])
+        )
+        report["removal_qualification"]["completed_at"] = completed_at
+        report["checks"]["environment_reports_after_acceptance_cycle"] = (
+            environment_reports_after_cycle
+        )
+        report["ready"] = all(report["checks"].values())
+        report["removal_qualification"]["eligible_for_removal"] = report["ready"]
+        evidence_material = {
+            "commit": report.get("code", {}).get("commit", ""),
+            "schema_version": self.store.schema_version,
+            "acceptance_config_hash": live_qualification.get("config_hash", ""),
+            "observation_cutoff": observation_cutoff,
+            "removal_acceptance_completed_at": completed_at,
+            "release_verification_hash": str(
+                (report.get("release_verification") or {}).get("report_hash") or ""
+            ),
+            "environment_reports": {
+                str(row["environment_id"]): str(row.get("evidence_hash") or "")
+                for row in report.get("environments", [])
+            },
+            "broker_uat": {
+                broker: str((report["broker_uat"].get(broker) or {}).get("evidence_hash") or "")
+                for broker in ("xtp", "emt")
+            },
+        }
+        report["evidence_hash"] = hashlib.sha256(
+            json.dumps(evidence_material, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        report.pop("report_hash", None)
+        report["report_hash"] = hashlib.sha256(
+            json.dumps(report, sort_keys=True, separators=(",", ":"), default=str).encode()
+        ).hexdigest()
+        return report
 
     def start_stage_run(self, instance_id: str, stage: str) -> dict[str, Any]:
         if stage not in {"paper", "shadow"}:
@@ -783,10 +1280,17 @@ class TradingStrategySystem(BaseSystem):
         else:
             definition = self.policy_registry.get("timing_fixed_exposure")
             strategy_params = dict(payload.get("params") or {})
+            target = float(_option(
+                payload,
+                "target_percent",
+                strategy_params.get("target_percent", 0.2),
+            ))
             params = {
-                "target_percent": float(strategy_params.get("target_percent", 0.2)),
+                "target_percent": target,
                 "cash_buffer": float(_option(payload, "cash_buffer", 0.1)),
-                "max_position_weight": float(_option(payload, "max_position_weight", 0.3)),
+                "max_position_weight": float(
+                    _option(payload, "max_position_weight", max(0.3, target))
+                ),
             }
         return {
             "policy_id": definition.policy_id,

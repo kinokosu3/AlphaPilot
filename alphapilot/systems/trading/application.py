@@ -6,7 +6,7 @@ data implementations are supplied through ports by outer adapters.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import hashlib
 import json
 import threading
@@ -15,6 +15,7 @@ from typing import Any, Mapping, Sequence
 from alphapilot.systems.trading.contracts import (
     AccountSnapshot,
     CompletedBar,
+    DecisionProvenance,
     FeeSchedule,
     InstrumentMetadata,
     PortfolioContext,
@@ -86,10 +87,41 @@ class DecisionPipeline:
         quotes: Mapping[str, TradableQuote] | None = None,
         instruments: Mapping[str, InstrumentMetadata] | None = None,
         persist: bool = True,
+        mode: str = "unknown",
+        run_id: str = "",
     ) -> DecisionResult:
         definition = self.strategy_registry.get(instance.strategy_id)
         self._validate_instance_binding(instance, definition)
         normalized = self._validate_bars(instance, bars)
+        required = resolve_required_history(definition, instance.params)
+        history_window = int(instance.data_policy.get("history_window") or required)
+        if history_window < required:
+            raise ValueError(
+                f"data_policy.history_window={history_window} is below required_history={required}"
+            )
+        universe = {canonical_instrument(item) for item in instance.universe}
+        grouped = {
+            instrument: [bar for bar in normalized if bar.instrument == instrument]
+            for instrument in sorted(universe)
+        }
+        available = min((len(values) for values in grouped.values()), default=0)
+        if available < history_window:
+            raise WarmupRequired(history_window, available)
+        grouped = {
+            instrument: values[-history_window:]
+            for instrument, values in grouped.items()
+        }
+        timelines = {tuple(bar.datetime for bar in values) for values in grouped.values()}
+        if len(timelines) != 1:
+            raise ValueError(
+                "latest completed-bar watermark does not cover an aligned instance universe"
+            )
+        normalized = sorted(
+            [bar for values in grouped.values() for bar in values],
+            key=lambda item: (item.datetime, item.instrument),
+        )
+        history_counts = {instrument: len(values) for instrument, values in grouped.items()}
+        history_hash = _canonical_hash([bar.to_dict() for bar in normalized])
         as_of = max(str(bar.datetime) for bar in normalized)
         signal_session = as_of[:10]
         if not self.calendar.is_trading_session(signal_session):
@@ -106,17 +138,6 @@ class DecisionPipeline:
             if callable(valid_until_fn)
             else f"{str(effective)[:10]}T15:00:00+08:00"
         )
-        required = resolve_required_history(definition, instance.params)
-        universe = {canonical_instrument(item) for item in instance.universe}
-        counts = {
-            instrument: len([bar for bar in normalized if bar.instrument == instrument])
-            for instrument in sorted(universe)
-        }
-        available = min(counts.values(), default=0)
-        # Qlib owns feature history, but the point-in-time caller must still
-        # supply at least the definition's declared completed-bar watermark.
-        if available < required:
-            raise WarmupRequired(required, available)
         latest_instruments = {
             bar.instrument for bar in normalized if str(bar.datetime) == as_of
         }
@@ -127,6 +148,52 @@ class DecisionPipeline:
             )
         data_versions = {bar.data_version for bar in normalized if bar.data_version}
         data_version = next(iter(data_versions), str(instance.data_policy.get("data_version") or ""))
+        if persist:
+            find_observation = getattr(self.store, "find_decision_observation", None)
+            if callable(find_observation):
+                existing = find_observation(
+                    instance.instance_id,
+                    instance.config_hash,
+                    mode=str(mode),
+                    run_id=str(run_id),
+                    as_of=as_of,
+                )
+                if existing is not None:
+                    if existing["history_hash"] != history_hash:
+                        raise ValueError(
+                            "completed history changed for an already observed as_of; "
+                            "publish a new data version before reevaluation"
+                        )
+                    stored = self.store.get_portfolio_decision(existing["decision_id"])
+                    decision = PortfolioDecision.from_dict(stored["decision"])
+                    return DecisionResult(
+                        signal=decision.signal,
+                        decision=decision,
+                        inserted=False,
+                    )
+                find_mode = getattr(self.store, "find_mode_observations_for_as_of", None)
+                if callable(find_mode):
+                    prior = find_mode(
+                        instance.instance_id,
+                        instance.config_hash,
+                        mode=str(mode),
+                        as_of=as_of,
+                    )
+                    revised = [item for item in prior if item["history_hash"] != history_hash]
+                    if revised:
+                        raise ValueError(
+                            "completed history changed for an already observed as_of in this "
+                            "runtime mode; publish a new data version before reevaluation"
+                        )
+                    if prior:
+                        source = prior[-1]
+                        stored = self.store.get_portfolio_decision(source["decision_id"])
+                        decision = PortfolioDecision.from_dict(stored["decision"])
+                        return DecisionResult(
+                            signal=decision.signal,
+                            decision=decision,
+                            inserted=False,
+                        )
         context = StrategyEvaluationContext(
             instance_id=instance.instance_id,
             config_hash=instance.config_hash,
@@ -146,12 +213,16 @@ class DecisionPipeline:
                     instance.strategy_id,
                     instance.params,
                     factory_context=(
-                        {"artifact_binding": dict(instance.artifact_binding)}
-                        if instance.artifact_binding else {}
+                        {
+                            "artifact_binding": dict(instance.artifact_binding),
+                            "history_window": history_window,
+                        }
+                        if instance.artifact_binding else {"history_window": history_window}
                     ),
                 )
                 self._providers[provider_key] = provider
         try:
+            restored = False
             if provider_created:
                 provider.initialize(context)
                 checkpoint = self.store.load_provider_checkpoint(
@@ -161,7 +232,11 @@ class DecisionPipeline:
                     if int(checkpoint["state_schema_version"]) != int(definition.state_schema_version):
                         raise ValueError("provider checkpoint schema version requires an explicit migration")
                     provider.restore(checkpoint["state"])
-            provider.warmup(normalized)
+                    restored = True
+                if not restored:
+                    provider.warmup(normalized)
+            state_before = provider.snapshot()
+            state_before_hash = _canonical_hash(state_before)
             signal = provider.evaluate(context)
             self._validate_signal(signal, instance, definition.signal_kind, as_of, data_version)
             policy_binding = dict(instance.portfolio_policy or {})
@@ -187,6 +262,10 @@ class DecisionPipeline:
             )
             weights = policy.build(_portfolio_inputs(signal), portfolio_context)
             self._validate_weights(weights.weights, instance.universe)
+            state_after = provider.snapshot()
+            state_after_hash = _canonical_hash(state_after)
+            signal_hash = _canonical_hash(signal.to_dict())
+            weights_hash = _canonical_hash(weights.to_dict())
             decision_id = _stable_id(
                 instance.instance_id,
                 instance.config_hash,
@@ -207,6 +286,20 @@ class DecisionPipeline:
                 data_version=data_version,
                 model_version=signal.model_version,
                 strategy_code_hash=instance.strategy_code_hash,
+                provenance=DecisionProvenance(
+                    history_hash=history_hash,
+                    history_window=history_window,
+                    history_counts=history_counts,
+                    provider_state_before_hash=state_before_hash,
+                    provider_state_after_hash=state_after_hash,
+                    signal_hash=signal_hash,
+                    weights_hash=weights_hash,
+                    policy_id=policy_definition.policy_id,
+                    policy_version=policy_definition.version,
+                    data_version=data_version,
+                    model_version=instance.model_hash,
+                    strategy_code_hash=instance.strategy_code_hash,
+                ),
             )
             inserted = False
             if persist:
@@ -224,8 +317,40 @@ class DecisionPipeline:
                     instance.instance_id,
                     instance.config_hash,
                     state_schema_version=definition.state_schema_version,
-                    state=provider.snapshot(),
+                    state=state_after,
+                    last_evaluated_as_of=as_of,
+                    state_hash=state_after_hash,
                 )
+                record_observation = getattr(self.store, "record_decision_observation", None)
+                if callable(record_observation):
+                    record_observation({
+                        "observation_id": _stable_id(
+                            "observation", instance.instance_id, instance.config_hash,
+                            mode, run_id, as_of,
+                        ),
+                        "decision_id": decision_id,
+                        "instance_id": instance.instance_id,
+                        "config_hash": instance.config_hash,
+                        "mode": str(mode),
+                        "run_id": str(run_id),
+                        "as_of": as_of,
+                        "effective_session": effective,
+                        "history_hash": history_hash,
+                        "provider_state_before_hash": state_before_hash,
+                        "provider_state_after_hash": state_after_hash,
+                        "signal_hash": signal_hash,
+                        "weights_hash": weights_hash,
+                        "data_version": data_version,
+                        "model_version": signal.model_version,
+                        "policy_version": policy_definition.version,
+                        "account_hash": _canonical_hash(asdict(policy_account)),
+                        "quote_hash": _canonical_hash({
+                            str(key): asdict(value) for key, value in (quotes or {}).items()
+                        }),
+                        "instrument_hash": _canonical_hash({
+                            str(key): asdict(value) for key, value in (instruments or {}).items()
+                        }),
+                    })
             return DecisionResult(signal=signal, decision=decision, inserted=inserted)
         except Exception:
             with self._provider_lock:
@@ -302,7 +427,6 @@ class DecisionPipeline:
         target.data_version = decision.data_version
         target.model_version = decision.model_version
         return target
-
     @staticmethod
     def _validate_instance_binding(instance: StrategyInstanceConfig, definition: Any) -> None:
         if instance.strategy_version != definition.version:
@@ -344,7 +468,7 @@ class DecisionPipeline:
             normalized.append(CompletedBar.from_dict({**bar.to_dict(), "instrument": instrument}))
         if not normalized:
             raise ValueError("completed bars do not cover the instance universe")
-        if len({value for value in versions if value}) > 1:
+        if len(versions) > 1:
             raise ValueError("completed bars contain multiple data versions")
         return sorted(normalized, key=lambda item: (item.datetime, item.instrument))
 
@@ -379,6 +503,12 @@ class DecisionPipeline:
             raise ValueError("target weights exceed 100%")
 
 
+def canonical_hash(value: Any) -> str:
+    """Stable SHA-256 used by runtime observation adapters."""
+
+    return _canonical_hash(value)
+
+
 def _portfolio_inputs(signal: SignalEnvelope) -> PortfolioInputs:
     if signal.kind == SignalKind.CROSS_SECTIONAL_SELECTION:
         return PortfolioInputs(selection=signal)
@@ -390,3 +520,14 @@ def _portfolio_inputs(signal: SignalEnvelope) -> PortfolioInputs:
 def _stable_id(*parts: Any) -> str:
     raw = json.dumps(parts, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:24]
+
+
+def _canonical_hash(value: Any) -> str:
+    raw = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()

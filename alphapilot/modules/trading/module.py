@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import time
+import csv
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 import uuid
 
@@ -102,16 +104,58 @@ class TradingModule(BaseModule):
     def trading_instance_validate(self, instance_id: str) -> dict[str, Any]:
         return self._print(self._system().validate_instance(instance_id))
 
-    def trading_preview(self, instance_id: str, options: Any = None) -> dict[str, Any]:
-        return self._print(self._system().preview_instance(instance_id, _object(options)))
+    def trading_preview(
+        self,
+        instance_id: str,
+        options: Any = None,
+        output_path: str = "",
+        output_format: str = "json",
+    ) -> dict[str, Any]:
+        result = self._system().preview_instance(instance_id, _object(options))
+        if output_path:
+            destination = Path(output_path).expanduser()
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            format_name = str(output_format or destination.suffix.lstrip(".") or "json").lower()
+            if format_name == "json":
+                destination.write_text(
+                    json.dumps(result, ensure_ascii=False, indent=2, default=str),
+                    encoding="utf-8",
+                )
+            elif format_name == "csv":
+                payload = dict(result.get("signal", {}).get("payload") or {})
+                rows = []
+                if isinstance(payload.get("scores"), dict):
+                    rows = [
+                        {"instrument": key, "score": value}
+                        for key, value in sorted(payload["scores"].items())
+                    ]
+                elif isinstance(payload.get("states"), dict):
+                    rows = [
+                        {"instrument": key, "state": value}
+                        for key, value in sorted(payload["states"].items())
+                    ]
+                else:
+                    rows = [{"payload": json.dumps(payload, ensure_ascii=False, sort_keys=True)}]
+                with destination.open("w", encoding="utf-8", newline="") as stream:
+                    writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+                    writer.writeheader()
+                    writer.writerows(rows)
+            else:
+                raise ValueError("output_format must be json or csv")
+            result = {**result, "output_path": str(destination), "output_format": format_name}
+        return self._print(result)
 
     def trading_backtest(
         self,
         instance_id: str,
         options: Any = None,
         wait: bool = False,
+        output_dir: str = "",
     ) -> dict[str, Any]:
-        run = self._system().start_backtest_run(instance_id, _object(options))
+        request = _object(options)
+        if output_dir:
+            request["output_dir"] = str(Path(output_dir).expanduser())
+        run = self._system().start_backtest_run(instance_id, request)
         if not wait:
             return self._print(run)
         while run["status"] in {"queued", "running"}:
@@ -254,6 +298,156 @@ class TradingModule(BaseModule):
     def trading_audit(self, limit: int = 200) -> list[dict[str, Any]]:
         return self._print(self._system().audit_events(limit=limit))
 
+    def trading_compatibility(
+        self,
+        set_cutoff: bool = False,
+        export_path: str = "",
+        import_path: str = "",
+    ) -> dict[str, Any]:
+        system = self._system()
+        imported = None
+        if import_path:
+            payload = json.loads(Path(import_path).expanduser().read_text(encoding="utf-8"))
+            imported = system.import_compatibility_environment_report(payload)
+        result = (
+            system.set_compatibility_cutoff()
+            if bool(set_cutoff)
+            else system.compatibility_status()
+        )
+        if export_path:
+            report = dict(result.get("local_environment_report") or {})
+            if not report.pop("ready", False):
+                raise ValueError("set the compatibility migration cutoff before exporting")
+            destination = Path(export_path).expanduser()
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            result = {**result, "export_path": str(destination)}
+        if imported is not None:
+            result = {**result, "imported_environment": imported}
+        return self._print(result)
+
+    def trading_removal_check(self, acceptance_instance_id: str) -> dict[str, Any]:
+        return self._print(self._system().removal_check(acceptance_instance_id))
+
+    def trading_parity_start(
+        self,
+        instance_id: str,
+        replay_run_id: str,
+        shadow_stage_run_id: str,
+    ) -> dict[str, Any]:
+        return self._print(self._system().start_parity_run(instance_id, {
+            "replay_run_id": replay_run_id,
+            "shadow_stage_run_id": shadow_stage_run_id,
+        }))
+
+    def trading_parity_status(self, run_id: str) -> dict[str, Any]:
+        return self._print(self._system().get_parity_run(run_id))
+
+    def trading_qualification(self, instance_id: str) -> dict[str, Any]:
+        return self._print(self._system().qualification(instance_id))
+
+    def trading_broker_uat_start(
+        self,
+        broker: str,
+        symbol: str,
+        side: str,
+        volume: float,
+        price: float,
+        max_notional: float,
+        confirmation: str,
+        timeout: float = 30.0,
+        operator_id: str = "local-cli",
+        reason: str = "bounded real-broker UAT",
+    ) -> dict[str, Any]:
+        system = self._system()
+        try:
+            result = system.start_broker_uat({
+                "broker": broker,
+                "symbol": symbol,
+                "side": side,
+                "volume": volume,
+                "price": price,
+                "max_notional": max_notional,
+                "confirmation": confirmation,
+                "timeout": timeout,
+            })
+        except Exception as exc:
+            system.operator_auth.audit(
+                self._operator(operator_id, reason),
+                action="broker_uat_start", result="failed", broker=broker,
+                details={"error_type": type(exc).__name__, "symbol": symbol},
+            )
+            raise
+        system.operator_auth.audit(
+            self._operator(operator_id, reason),
+            action="broker_uat_start", result=result["status"], broker=broker,
+            details={"run_id": result["run_id"], "symbol": result["symbol"]},
+        )
+        return self._print(result)
+
+    def trading_broker_uat_preflight(
+        self,
+        broker: str,
+        symbols: str | list[str] | None = None,
+        max_notional: float = 20_000.0,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        """Run the local, query-only broker readiness and candidate scan."""
+
+        return self._print(self._system().broker_uat_preflight({
+            "broker": broker,
+            "symbols": _symbols(symbols),
+            "max_notional": max_notional,
+            "timeout": timeout,
+        }))
+
+    def trading_broker_uat_status(self, run_id: str = "", broker: str = "") -> Any:
+        if run_id:
+            return self._print(self._system().get_broker_uat_run(run_id))
+        return self._print(self._system().list_broker_uat_runs(broker or None))
+
+    def trading_broker_uat_resume(
+        self,
+        run_id: str,
+        confirmation: str,
+        timeout: float = 30.0,
+        operator_id: str = "local-cli",
+        reason: str = "resume broker UAT after diagnosed failure",
+    ) -> dict[str, Any]:
+        system = self._system()
+        result = system.resume_broker_uat(run_id, {
+            "confirmation": confirmation,
+            "timeout": timeout,
+        })
+        system.operator_auth.audit(
+            self._operator(operator_id, reason),
+            action="broker_uat_resume", result=result["status"], broker=result["broker"],
+            details={"run_id": run_id},
+        )
+        return self._print(result)
+
+    def trading_broker_uat_abort(
+        self,
+        run_id: str,
+        confirmation: str,
+        reason: str,
+        operator_id: str = "local-cli",
+    ) -> dict[str, Any]:
+        system = self._system()
+        result = system.abort_broker_uat(run_id, {
+            "confirmation": confirmation,
+            "reason": reason,
+        })
+        system.operator_auth.audit(
+            self._operator(operator_id, reason),
+            action="broker_uat_abort", result=result["status"], broker=result["broker"],
+            details={"run_id": run_id},
+        )
+        return self._print(result)
+
     def commands(self) -> dict[str, Callable[..., Any]]:
         return {
             "trading_definitions": self.trading_definitions,
@@ -277,4 +471,14 @@ class TradingModule(BaseModule):
             "trading_status": self.trading_status,
             "trading_kill_switch": self.trading_kill_switch,
             "trading_audit": self.trading_audit,
+            "trading_compatibility": self.trading_compatibility,
+            "trading_removal_check": self.trading_removal_check,
+            "trading_parity_start": self.trading_parity_start,
+            "trading_parity_status": self.trading_parity_status,
+            "trading_qualification": self.trading_qualification,
+            "trading_broker_uat_start": self.trading_broker_uat_start,
+            "trading_broker_uat_preflight": self.trading_broker_uat_preflight,
+            "trading_broker_uat_status": self.trading_broker_uat_status,
+            "trading_broker_uat_resume": self.trading_broker_uat_resume,
+            "trading_broker_uat_abort": self.trading_broker_uat_abort,
         }

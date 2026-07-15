@@ -36,6 +36,10 @@ def strategy_definitions() -> list[StrategyDefinition]:
 def _schema_from_defaults(defaults: dict[str, Any]) -> dict[str, Any]:
     properties: dict[str, Any] = {}
     for key, value in defaults.items():
+        # Exposure belongs to the portfolio policy in the formal runtime.  The
+        # legacy timing adapter still accepts target_percent as an alias.
+        if key == "target_percent":
+            continue
         if isinstance(value, bool):
             spec = {"type": "boolean", "default": value}
         elif isinstance(value, int):

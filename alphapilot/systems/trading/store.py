@@ -15,7 +15,7 @@ import uuid
 from alphapilot.systems.trading.domain import DeploymentLevel, LifecycleState, StrategyInstanceConfig
 
 
-LATEST_SCHEMA_VERSION = 5
+LATEST_SCHEMA_VERSION = 8
 
 
 class StrategyRuntimeStore:
@@ -23,6 +23,7 @@ class StrategyRuntimeStore:
         self.path = Path(path).expanduser()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._environment_id = ""
         self._init_schema()
 
     @contextmanager
@@ -63,6 +64,15 @@ class StrategyRuntimeStore:
                 if previous < 5:
                     self._migrate_v5(db)
                     previous = 5
+                if previous < 6:
+                    self._migrate_v6(db)
+                    previous = 6
+                if previous < 7:
+                    self._migrate_v7(db)
+                    previous = 7
+                if previous < 8:
+                    self._migrate_v8(db)
+                    previous = 8
                 if previous != LATEST_SCHEMA_VERSION:
                     raise RuntimeError(
                         f"unsupported strategy runtime schema {previous}; "
@@ -491,6 +501,287 @@ class StrategyRuntimeStore:
             (_now(),),
         )
 
+    @staticmethod
+    def _migrate_v6(db: sqlite3.Connection) -> None:
+        active = db.execute(
+            "SELECT instance_id FROM deployment_runtime WHERE binding_active=1 "
+            "OR desired_state IN ('running', 'warming_up') "
+            "OR observed_state IN ('running', 'warming_up') LIMIT 1"
+        ).fetchone()
+        if active is not None:
+            raise RuntimeError(
+                "strategy runtime schema v6 changes immutable config hashes; "
+                f"stop active instance {active['instance_id']!r} before migration"
+            )
+        checkpoint_columns = {
+            str(row[1]) for row in db.execute("PRAGMA table_info(provider_checkpoints)")
+        }
+        if "last_evaluated_as_of" not in checkpoint_columns:
+            db.execute(
+                "ALTER TABLE provider_checkpoints ADD COLUMN "
+                "last_evaluated_as_of TEXT NOT NULL DEFAULT ''"
+            )
+        if "state_hash" not in checkpoint_columns:
+            db.execute(
+                "ALTER TABLE provider_checkpoints ADD COLUMN state_hash TEXT NOT NULL DEFAULT ''"
+            )
+        backtest_columns = {
+            str(row[1]) for row in db.execute("PRAGMA table_info(backtest_runs)")
+        }
+        if "origin" not in backtest_columns:
+            db.execute(
+                "ALTER TABLE backtest_runs ADD COLUMN origin TEXT NOT NULL DEFAULT 'trading'"
+            )
+        if "legacy_job_id" not in backtest_columns:
+            db.execute(
+                "ALTER TABLE backtest_runs ADD COLUMN legacy_job_id TEXT NOT NULL DEFAULT ''"
+            )
+        _execute_script(
+            db,
+            """
+            CREATE TABLE IF NOT EXISTS compatibility_entrypoints (
+                entrypoint TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                replacement TEXT NOT NULL,
+                deprecated_since TEXT NOT NULL,
+                sunset_at TEXT NOT NULL,
+                removal_release TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'deprecated',
+                migration_cutoff TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS legacy_usage_events (
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entrypoint TEXT NOT NULL,
+                client_kind TEXT NOT NULL DEFAULT '',
+                client_version TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT '',
+                request_id_hash TEXT NOT NULL DEFAULT '',
+                environment_id TEXT NOT NULL DEFAULT '',
+                used_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS ix_legacy_usage_events_entrypoint
+                ON legacy_usage_events(entrypoint, used_at);
+            CREATE TABLE IF NOT EXISTS compatibility_environments (
+                environment_id TEXT PRIMARY KEY,
+                registered_at TEXT NOT NULL,
+                last_reported_at TEXT NOT NULL,
+                migration_cutoff TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT 'local',
+                reported_post_cutoff_count INTEGER NOT NULL DEFAULT 0,
+                evidence_hash TEXT NOT NULL DEFAULT '',
+                evidence_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE TABLE IF NOT EXISTS decision_observations (
+                observation_id TEXT PRIMARY KEY,
+                decision_id TEXT NOT NULL,
+                instance_id TEXT NOT NULL,
+                config_hash TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                run_id TEXT NOT NULL DEFAULT '',
+                as_of TEXT NOT NULL,
+                effective_session TEXT NOT NULL,
+                history_hash TEXT NOT NULL,
+                provider_state_before_hash TEXT NOT NULL,
+                provider_state_after_hash TEXT NOT NULL,
+                signal_hash TEXT NOT NULL,
+                weights_hash TEXT NOT NULL,
+                data_version TEXT NOT NULL DEFAULT '',
+                model_version TEXT NOT NULL DEFAULT '',
+                policy_version TEXT NOT NULL DEFAULT '',
+                account_hash TEXT NOT NULL DEFAULT '',
+                quote_hash TEXT NOT NULL DEFAULT '',
+                instrument_hash TEXT NOT NULL DEFAULT '',
+                plan_hash TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                UNIQUE(instance_id, config_hash, mode, run_id, as_of)
+            );
+            CREATE INDEX IF NOT EXISTS ix_decision_observations_compare
+                ON decision_observations(instance_id, config_hash, as_of, mode);
+            CREATE TABLE IF NOT EXISTS parity_runs (
+                parity_run_id TEXT PRIMARY KEY,
+                instance_id TEXT NOT NULL,
+                config_hash TEXT NOT NULL,
+                replay_run_id TEXT NOT NULL DEFAULT '',
+                shadow_stage_run_id TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL,
+                compared_sessions INTEGER NOT NULL DEFAULT 0,
+                pass_count INTEGER NOT NULL DEFAULT 0,
+                mismatch_count INTEGER NOT NULL DEFAULT 0,
+                not_comparable_count INTEGER NOT NULL DEFAULT 0,
+                details_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS parity_results (
+                parity_run_id TEXT NOT NULL,
+                session TEXT NOT NULL,
+                status TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                replay_observation_id TEXT NOT NULL DEFAULT '',
+                shadow_observation_id TEXT NOT NULL DEFAULT '',
+                details_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (parity_run_id, session),
+                FOREIGN KEY (parity_run_id) REFERENCES parity_runs(parity_run_id)
+            );
+            """,
+        )
+        _rehash_instances_for_v6(db)
+        db.execute(
+            "INSERT OR REPLACE INTO schema_version VALUES (1, 6, ?)",
+            (_now(),),
+        )
+
+    @staticmethod
+    def _migrate_v7(db: sqlite3.Connection) -> None:
+        environment_columns = {
+            str(row[1]) for row in db.execute("PRAGMA table_info(compatibility_environments)")
+        }
+        for name, ddl in (
+            ("source", "TEXT NOT NULL DEFAULT 'local'"),
+            ("reported_post_cutoff_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("evidence_hash", "TEXT NOT NULL DEFAULT ''"),
+            ("evidence_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ):
+            if name not in environment_columns:
+                db.execute(f"ALTER TABLE compatibility_environments ADD COLUMN {name} {ddl}")
+        _execute_script(
+            db,
+            """
+            CREATE TABLE IF NOT EXISTS broker_uat_runs (
+                run_id TEXT PRIMARY KEY,
+                broker TEXT NOT NULL,
+                account_hash TEXT NOT NULL,
+                environment TEXT NOT NULL,
+                plugin_version TEXT NOT NULL DEFAULT '',
+                plugin_hash TEXT NOT NULL DEFAULT '',
+                sdk_version TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                max_notional REAL NOT NULL,
+                current_step TEXT NOT NULL DEFAULT '',
+                error_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                ended_at TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS broker_uat_steps (
+                run_id TEXT NOT NULL,
+                step TEXT NOT NULL,
+                status TEXT NOT NULL,
+                evidence_json TEXT NOT NULL DEFAULT '{}',
+                error_json TEXT NOT NULL DEFAULT '{}',
+                started_at TEXT NOT NULL,
+                ended_at TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (run_id, step),
+                FOREIGN KEY (run_id) REFERENCES broker_uat_runs(run_id)
+            );
+            CREATE TABLE IF NOT EXISTS broker_uat_evidence (
+                evidence_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL UNIQUE,
+                broker TEXT NOT NULL,
+                account_hash TEXT NOT NULL,
+                environment TEXT NOT NULL,
+                plugin_version TEXT NOT NULL,
+                plugin_hash TEXT NOT NULL,
+                sdk_version TEXT NOT NULL DEFAULT '',
+                capabilities_json TEXT NOT NULL,
+                evidence_hash TEXT NOT NULL UNIQUE,
+                passed_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                FOREIGN KEY (run_id) REFERENCES broker_uat_runs(run_id)
+            );
+            CREATE TABLE IF NOT EXISTS broker_uat_route_claims (
+                run_id TEXT NOT NULL,
+                reference TEXT NOT NULL,
+                claimed_at TEXT NOT NULL,
+                PRIMARY KEY (run_id, reference),
+                FOREIGN KEY (run_id) REFERENCES broker_uat_runs(run_id)
+            );
+            CREATE TABLE IF NOT EXISTS qualification_projections (
+                instance_id TEXT PRIMARY KEY,
+                config_hash TEXT NOT NULL,
+                eligible INTEGER NOT NULL,
+                projection_json TEXT NOT NULL,
+                evaluated_at TEXT NOT NULL,
+                FOREIGN KEY (instance_id) REFERENCES strategy_instances(instance_id)
+            );
+            CREATE TABLE IF NOT EXISTS legacy_job_imports (
+                legacy_job_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL UNIQUE,
+                artifact_dir TEXT NOT NULL,
+                imported_at TEXT NOT NULL,
+                details_json TEXT NOT NULL DEFAULT '{}'
+            );
+            """,
+        )
+        db.execute(
+            "INSERT OR REPLACE INTO schema_version VALUES (1, 7, ?)",
+            (_now(),),
+        )
+
+    @staticmethod
+    def _migrate_v8(db: sqlite3.Connection) -> None:
+        """Bind Broker UAT evidence to executable artifacts and scenario v2.
+
+        Version 8 is intentionally additive. Existing v7 evidence remains
+        readable but cannot satisfy the v2 removal/live gates because it has no
+        runtime or native-SDK fingerprint.
+        """
+
+        additions = {
+            "broker_uat_runs": (
+                ("scenario_version", "INTEGER NOT NULL DEFAULT 1"),
+                ("code_commit", "TEXT NOT NULL DEFAULT ''"),
+                ("runtime_code_hash", "TEXT NOT NULL DEFAULT ''"),
+                ("sdk_hash", "TEXT NOT NULL DEFAULT ''"),
+                ("requested_notional", "REAL NOT NULL DEFAULT 0"),
+                ("filled_notional", "REAL NOT NULL DEFAULT 0"),
+            ),
+            "broker_uat_evidence": (
+                ("scenario_version", "INTEGER NOT NULL DEFAULT 1"),
+                ("code_commit", "TEXT NOT NULL DEFAULT ''"),
+                ("runtime_code_hash", "TEXT NOT NULL DEFAULT ''"),
+                ("sdk_hash", "TEXT NOT NULL DEFAULT ''"),
+                ("requested_notional", "REAL NOT NULL DEFAULT 0"),
+                ("filled_notional", "REAL NOT NULL DEFAULT 0"),
+            ),
+            "broker_uat_route_claims": (
+                ("notional", "REAL NOT NULL DEFAULT 0"),
+            ),
+        }
+        for table, columns in additions.items():
+            existing = {
+                str(row[1]) for row in db.execute(f"PRAGMA table_info({table})")
+            }
+            for name, ddl in columns:
+                if name not in existing:
+                    db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+        _execute_script(
+            db,
+            """
+            CREATE TABLE IF NOT EXISTS broker_uat_order_events (
+                event_hash TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                reference TEXT NOT NULL DEFAULT '',
+                order_id TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT '',
+                traded REAL NOT NULL DEFAULT 0,
+                volume REAL NOT NULL DEFAULT 0,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                observed_at TEXT NOT NULL,
+                FOREIGN KEY (run_id) REFERENCES broker_uat_runs(run_id)
+            );
+            CREATE INDEX IF NOT EXISTS ix_broker_uat_order_events_run
+                ON broker_uat_order_events(run_id, observed_at);
+            """,
+        )
+        db.execute(
+            "INSERT OR REPLACE INTO schema_version VALUES (1, 8, ?)",
+            (_now(),),
+        )
+
     @property
     def schema_version(self) -> int:
         return self._detect_schema_version()
@@ -571,6 +862,10 @@ class StrategyRuntimeStore:
             )
             if changed:
                 db.execute("DELETE FROM stage_evidence WHERE instance_id=?", (instance_id,))
+                db.execute(
+                    "DELETE FROM qualification_projections WHERE instance_id=?",
+                    (instance_id,),
+                )
                 db.execute(
                     "UPDATE stage_runs SET status='invalidated', ended_at=?, updated_at=? "
                     "WHERE instance_id=? AND status='running'",
@@ -1167,12 +1462,36 @@ class StrategyRuntimeStore:
             ).fetchall()
         return [_stage_run_row(row) for row in rows]
 
+    def list_stage_sessions(
+        self,
+        instance_id: str,
+        stage: str,
+        *,
+        config_hash: str | None = None,
+        started_after: str = "",
+    ) -> list[str]:
+        current_hash = config_hash or self.get_instance(instance_id)["config_hash"]
+        after_clause = " AND r.started_at>=?" if started_after else ""
+        values: list[Any] = [instance_id, stage, current_hash]
+        if started_after:
+            values.append(str(started_after))
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT DISTINCT s.session FROM stage_run_sessions s "
+                "JOIN stage_runs r ON r.run_id=s.run_id "
+                "WHERE r.instance_id=? AND r.stage=? AND r.config_hash=? "
+                "AND r.status='completed'" + after_clause + " ORDER BY s.session",
+                values,
+            ).fetchall()
+        return [str(row["session"]) for row in rows]
+
     def evaluate_stage(
         self,
         instance_id: str,
         stage: str,
         *,
         minimum_sessions: int,
+        started_after: str = "",
     ) -> dict[str, Any]:
         DeploymentLevel(stage)
         current = self.get_instance(instance_id)
@@ -1181,6 +1500,7 @@ class StrategyRuntimeStore:
             if row["stage"] == stage
             and row["config_hash"] == current["config_hash"]
             and row["status"] == "completed"
+            and (not started_after or str(row["started_at"]) >= str(started_after))
         ]
         run_ids = [row["run_id"] for row in runs]
         sessions = 0
@@ -1204,17 +1524,23 @@ class StrategyRuntimeStore:
         details = {
             "config_hash": current["config_hash"],
             "minimum_sessions": int(minimum_sessions),
+            "started_after": str(started_after),
             "trading_sessions": sessions,
             "runs": len(runs),
             "failures": failures,
         }
-        self.record_stage(
-            instance_id,
-            stage,
-            passed=passed,
-            details=details,
-            expected_config_hash=current["config_hash"],
-        )
+        # ``stage_evidence`` is a projection used while the instance is in that
+        # stage. Qualification also re-evaluates historical PAPER evidence after
+        # promotion to SHADOW; that read must not attempt an invalid lifecycle
+        # write or rewrite the old config-bound evidence.
+        if current["deployment_level"] == stage and not started_after:
+            self.record_stage(
+                instance_id,
+                stage,
+                passed=passed,
+                details=details,
+                expected_config_hash=current["config_hash"],
+            )
         return {"passed": passed, **details}
 
     def record_decision(self, decision_id: str, instance_id: str, config_hash: str, payload: Any) -> bool:
@@ -1401,14 +1727,23 @@ class StrategyRuntimeStore:
         *,
         state_schema_version: int,
         state: dict[str, Any],
+        last_evaluated_as_of: str = "",
+        state_hash: str = "",
     ) -> None:
         with self._lock, self._connect() as db:
             db.execute(
-                "INSERT INTO provider_checkpoints VALUES (?, ?, ?, ?, ?) "
+                "INSERT INTO provider_checkpoints "
+                "(instance_id, config_hash, state_schema_version, state_json, updated_at, "
+                "last_evaluated_as_of, state_hash) VALUES (?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(instance_id, config_hash) DO UPDATE SET "
                 "state_schema_version=excluded.state_schema_version, state_json=excluded.state_json, "
-                "updated_at=excluded.updated_at",
-                (instance_id, config_hash, int(state_schema_version), _json(state), _now()),
+                "updated_at=excluded.updated_at, "
+                "last_evaluated_as_of=excluded.last_evaluated_as_of, "
+                "state_hash=excluded.state_hash",
+                (
+                    instance_id, config_hash, int(state_schema_version), _json(state), _now(),
+                    str(last_evaluated_as_of), str(state_hash),
+                ),
             )
 
     def load_provider_checkpoint(self, instance_id: str, config_hash: str) -> dict[str, Any] | None:
@@ -1425,7 +1760,308 @@ class StrategyRuntimeStore:
             "state_schema_version": int(row["state_schema_version"]),
             "state": json.loads(row["state_json"] or "{}"),
             "updated_at": row["updated_at"],
+            "last_evaluated_as_of": row["last_evaluated_as_of"],
+            "state_hash": row["state_hash"],
         }
+
+    # ---- deterministic decision observations and parity ---------------- #
+
+    def record_decision_observation(self, payload: dict[str, Any]) -> dict[str, Any]:
+        observation_id = str(payload.get("observation_id") or uuid.uuid4().hex)
+        now = _now()
+        values = (
+            observation_id,
+            str(payload.get("decision_id") or ""),
+            str(payload.get("instance_id") or ""),
+            str(payload.get("config_hash") or ""),
+            str(payload.get("mode") or "unknown"),
+            str(payload.get("run_id") or ""),
+            str(payload.get("as_of") or ""),
+            str(payload.get("effective_session") or ""),
+            str(payload.get("history_hash") or ""),
+            str(payload.get("provider_state_before_hash") or ""),
+            str(payload.get("provider_state_after_hash") or ""),
+            str(payload.get("signal_hash") or ""),
+            str(payload.get("weights_hash") or ""),
+            str(payload.get("data_version") or ""),
+            str(payload.get("model_version") or ""),
+            str(payload.get("policy_version") or ""),
+            str(payload.get("account_hash") or ""),
+            str(payload.get("quote_hash") or ""),
+            str(payload.get("instrument_hash") or ""),
+            str(payload.get("plan_hash") or ""),
+            now,
+        )
+        with self._lock, self._connect() as db:
+            existing = db.execute(
+                "SELECT * FROM decision_observations WHERE instance_id=? AND config_hash=? "
+                "AND mode=? AND run_id=? AND as_of=?",
+                (values[2], values[3], values[4], values[5], values[6]),
+            ).fetchone()
+            if existing is not None:
+                immutable_fields = (
+                    "decision_id", "effective_session", "history_hash",
+                    "provider_state_before_hash", "provider_state_after_hash",
+                    "signal_hash", "weights_hash", "data_version", "model_version",
+                    "policy_version",
+                )
+                incoming = {
+                    "decision_id": values[1],
+                    "effective_session": values[7],
+                    "history_hash": values[8],
+                    "provider_state_before_hash": values[9],
+                    "provider_state_after_hash": values[10],
+                    "signal_hash": values[11],
+                    "weights_hash": values[12],
+                    "data_version": values[13],
+                    "model_version": values[14],
+                    "policy_version": values[15],
+                }
+                changed = {
+                    field: {"persisted": str(existing[field]), "incoming": str(incoming[field])}
+                    for field in immutable_fields
+                    if str(existing[field]) != str(incoming[field])
+                }
+                if changed:
+                    raise ValueError(
+                        "decision observation is immutable for a mode/run/as_of; "
+                        f"changed fields: {sorted(changed)}"
+                    )
+            db.execute(
+                "INSERT INTO decision_observations VALUES "
+                "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(instance_id, config_hash, mode, run_id, as_of) DO UPDATE SET "
+                "account_hash=excluded.account_hash, "
+                "quote_hash=excluded.quote_hash, instrument_hash=excluded.instrument_hash, "
+                "plan_hash=excluded.plan_hash, created_at=excluded.created_at",
+                values,
+            )
+            row = db.execute(
+                "SELECT * FROM decision_observations WHERE instance_id=? AND config_hash=? "
+                "AND mode=? AND run_id=? AND as_of=?",
+                (values[2], values[3], values[4], values[5], values[6]),
+            ).fetchone()
+        assert row is not None
+        return dict(row)
+
+    def find_decision_observation(
+        self,
+        instance_id: str,
+        config_hash: str,
+        *,
+        mode: str,
+        run_id: str,
+        as_of: str,
+    ) -> dict[str, Any] | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM decision_observations WHERE instance_id=? AND config_hash=? "
+                "AND mode=? AND run_id=? AND as_of=?",
+                (instance_id, config_hash, mode, run_id, as_of),
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def find_mode_observations_for_as_of(
+        self,
+        instance_id: str,
+        config_hash: str,
+        *,
+        mode: str,
+        as_of: str,
+    ) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM decision_observations WHERE instance_id=? AND config_hash=? "
+                "AND mode=? AND as_of=? ORDER BY created_at, observation_id",
+                (instance_id, config_hash, str(mode), str(as_of)),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_decision_observations(
+        self,
+        instance_id: str,
+        *,
+        mode: str | None = None,
+        run_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses = ["instance_id=?"]
+        values: list[Any] = [instance_id]
+        if mode is not None:
+            clauses.append("mode=?")
+            values.append(str(mode))
+        if run_id is not None:
+            clauses.append("run_id=?")
+            values.append(str(run_id))
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM decision_observations WHERE " + " AND ".join(clauses)
+                + " ORDER BY as_of, observation_id",
+                values,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def attach_execution_observation(
+        self,
+        instance_id: str,
+        config_hash: str,
+        *,
+        mode: str,
+        run_id: str,
+        as_of: str,
+        account_hash: str,
+        quote_hash: str,
+        instrument_hash: str,
+        plan_hash: str,
+    ) -> dict[str, Any]:
+        execution_hashes = {
+            "account_hash": str(account_hash),
+            "quote_hash": str(quote_hash),
+            "instrument_hash": str(instrument_hash),
+            "plan_hash": str(plan_hash),
+        }
+        if not all(execution_hashes.values()):
+            raise ValueError("execution observation hashes must all be present")
+        with self._lock, self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM decision_observations WHERE instance_id=? AND config_hash=? "
+                "AND mode=? AND run_id=? AND as_of=?",
+                (instance_id, config_hash, mode, run_id, as_of),
+            ).fetchone()
+            if row is None:
+                raise KeyError("decision observation is missing before execution planning")
+            if str(row["plan_hash"]):
+                if str(row["plan_hash"]) != execution_hashes["plan_hash"]:
+                    raise ValueError("execution observation is immutable once attached")
+                return dict(row)
+            # The decision-time policy context and D+1 execution context are
+            # both relevant. Preserve them as an ordered composite hash so
+            # parity compares an execution plan only when both snapshots match,
+            # without widening the public observation schema.
+            combined = {
+                key: hashlib.sha256(_json({
+                    "decision_context": str(row[key]),
+                    "execution_context": execution_hashes[key],
+                }).encode("utf-8")).hexdigest()
+                for key in ("account_hash", "quote_hash", "instrument_hash")
+            }
+            db.execute(
+                "UPDATE decision_observations SET account_hash=?, quote_hash=?, "
+                "instrument_hash=?, plan_hash=? WHERE observation_id=?",
+                (
+                    combined["account_hash"], combined["quote_hash"],
+                    combined["instrument_hash"], execution_hashes["plan_hash"],
+                    row["observation_id"],
+                ),
+            )
+            updated = db.execute(
+                "SELECT * FROM decision_observations WHERE observation_id=?",
+                (row["observation_id"],),
+            ).fetchone()
+        assert updated is not None
+        return dict(updated)
+
+    def create_parity_run(
+        self,
+        instance_id: str,
+        *,
+        replay_run_id: str,
+        shadow_stage_run_id: str,
+        parity_run_id: str | None = None,
+    ) -> dict[str, Any]:
+        current = self.get_instance(instance_id)
+        identifier = str(parity_run_id or uuid.uuid4().hex)
+        now = _now()
+        with self._lock, self._connect() as db:
+            db.execute(
+                "INSERT INTO parity_runs "
+                "(parity_run_id, instance_id, config_hash, replay_run_id, "
+                "shadow_stage_run_id, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, 'running', ?, ?)",
+                (
+                    identifier, instance_id, current["config_hash"], replay_run_id,
+                    shadow_stage_run_id, now, now,
+                ),
+            )
+        return self.get_parity_run(identifier)
+
+    def record_parity_result(
+        self,
+        parity_run_id: str,
+        session: str,
+        *,
+        status: str,
+        reason: str = "",
+        replay_observation_id: str = "",
+        shadow_observation_id: str = "",
+        details: Any = None,
+    ) -> None:
+        if status not in {"pass", "mismatch", "not_comparable"}:
+            raise ValueError("invalid parity result status")
+        with self._lock, self._connect() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO parity_results VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    parity_run_id, str(session), status, str(reason),
+                    replay_observation_id, shadow_observation_id,
+                    _json(details or {}), _now(),
+                ),
+            )
+
+    def finish_parity_run(self, parity_run_id: str, *, details: Any = None) -> dict[str, Any]:
+        with self._lock, self._connect() as db:
+            rows = db.execute(
+                "SELECT status, COUNT(*) AS total FROM parity_results "
+                "WHERE parity_run_id=? GROUP BY status",
+                (parity_run_id,),
+            ).fetchall()
+            counts = {str(row["status"]): int(row["total"]) for row in rows}
+            compared = sum(counts.values())
+            status = (
+                "passed"
+                if compared and not counts.get("mismatch") and not counts.get("not_comparable")
+                else "failed"
+            )
+            cursor = db.execute(
+                "UPDATE parity_runs SET status=?, compared_sessions=?, pass_count=?, "
+                "mismatch_count=?, not_comparable_count=?, details_json=?, updated_at=? "
+                "WHERE parity_run_id=? AND status='running'",
+                (
+                    status, compared, counts.get("pass", 0), counts.get("mismatch", 0),
+                    counts.get("not_comparable", 0), _json(details or {}), _now(), parity_run_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("parity run is missing or already terminal")
+        return self.get_parity_run(parity_run_id)
+
+    def get_parity_run(self, parity_run_id: str) -> dict[str, Any]:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM parity_runs WHERE parity_run_id=?", (parity_run_id,)
+            ).fetchone()
+            results = db.execute(
+                "SELECT * FROM parity_results WHERE parity_run_id=? ORDER BY session",
+                (parity_run_id,),
+            ).fetchall()
+        if row is None:
+            raise KeyError(f"unknown parity run {parity_run_id!r}")
+        return {
+            **dict(row),
+            "details": json.loads(row["details_json"] or "{}"),
+            "results": [
+                {**dict(item), "details": json.loads(item["details_json"] or "{}")}
+                for item in results
+            ],
+        }
+
+    def list_parity_runs(self, instance_id: str) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT parity_run_id FROM parity_runs WHERE instance_id=? "
+                "ORDER BY created_at, parity_run_id",
+                (instance_id,),
+            ).fetchall()
+        return [self.get_parity_run(str(row["parity_run_id"])) for row in rows]
 
     # ---- asynchronous backtest runs ------------------------------------ #
 
@@ -1435,6 +2071,8 @@ class StrategyRuntimeStore:
         request: dict[str, Any],
         *,
         run_id: str | None = None,
+        origin: str = "trading",
+        legacy_job_id: str = "",
     ) -> dict[str, Any]:
         current = self.get_instance(instance_id)
         identifier = str(run_id or uuid.uuid4().hex)
@@ -1442,9 +2080,12 @@ class StrategyRuntimeStore:
         with self._lock, self._connect() as db:
             db.execute(
                 "INSERT INTO backtest_runs "
-                "(run_id, instance_id, config_hash, status, request_json, created_at, updated_at) "
-                "VALUES (?, ?, ?, 'queued', ?, ?, ?)",
-                (identifier, instance_id, current["config_hash"], _json(request), now, now),
+                "(run_id, instance_id, config_hash, status, request_json, created_at, updated_at, "
+                "origin, legacy_job_id) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?)",
+                (
+                    identifier, instance_id, current["config_hash"], _json(request), now, now,
+                    str(origin), str(legacy_job_id),
+                ),
             )
         return self.get_backtest_run(identifier)
 
@@ -1506,6 +2147,107 @@ class StrategyRuntimeStore:
             else:
                 rows = db.execute("SELECT * FROM backtest_runs ORDER BY created_at DESC").fetchall()
         return [_backtest_run_row(row) for row in rows]
+
+    def find_backtest_run_by_legacy_job(self, legacy_job_id: str) -> dict[str, Any] | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM backtest_runs WHERE legacy_job_id=? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (str(legacy_job_id),),
+            ).fetchone()
+        return None if row is None else _backtest_run_row(row)
+
+    def import_legacy_backtest_job(
+        self,
+        legacy_job_id: str,
+        *,
+        instance_id: str,
+        request: dict[str, Any],
+        result: dict[str, Any],
+        artifact_dir: str,
+        details: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Idempotently expose a completed 0.1.x job through formal run APIs."""
+
+        legacy_id = str(legacy_job_id).strip()
+        if not legacy_id:
+            raise ValueError("legacy_job_id is required")
+        current = self.get_instance(instance_id)
+        existing = self.find_backtest_run_by_legacy_job(legacy_id)
+        run_id = (
+            existing["run_id"] if existing is not None
+            else "legacy-import-" + hashlib.sha256(legacy_id.encode()).hexdigest()[:24]
+        )
+        now = _now()
+        with self._lock, self._connect() as db:
+            mapping = db.execute(
+                "SELECT run_id FROM legacy_job_imports WHERE legacy_job_id=?",
+                (legacy_id,),
+            ).fetchone()
+            if mapping is not None:
+                return self.get_backtest_run(str(mapping["run_id"]))
+            if existing is None:
+                db.execute(
+                    "INSERT INTO backtest_runs "
+                    "(run_id, instance_id, config_hash, status, request_json, result_json, "
+                    "artifact_dir, started_at, ended_at, created_at, updated_at, origin, "
+                    "legacy_job_id) VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, "
+                    "'legacy_import', ?)",
+                    (
+                        run_id, instance_id, current["config_hash"], _json(request),
+                        _json(result), str(artifact_dir), now, now, now, now, legacy_id,
+                    ),
+                )
+            db.execute(
+                "INSERT INTO legacy_job_imports "
+                "(legacy_job_id, run_id, artifact_dir, imported_at, details_json) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (legacy_id, run_id, str(artifact_dir), now, _json(details or {})),
+            )
+        return self.get_backtest_run(run_id)
+
+    def list_legacy_job_imports(self) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM legacy_job_imports ORDER BY imported_at, legacy_job_id"
+            ).fetchall()
+        return [
+            {**dict(row), "details": json.loads(row["details_json"] or "{}")}
+            for row in rows
+        ]
+
+    def legacy_runtime_blockers(self) -> dict[str, list[dict[str, Any]]]:
+        with self._connect() as db:
+            instances = db.execute(
+                "SELECT instance_id, lifecycle, deployment_level, config_hash, updated_at "
+                "FROM strategy_instances WHERE config_json LIKE '%\"legacy_daemon_import\":true%' "
+                "AND lifecycle NOT IN ('stopped','error') ORDER BY instance_id"
+            ).fetchall()
+            runs = db.execute(
+                "SELECT run_id, instance_id, status, origin, legacy_job_id, updated_at "
+                "FROM backtest_runs WHERE origin IN ('legacy_compatibility','legacy_import') "
+                "AND status IN ('queued','running') ORDER BY created_at"
+            ).fetchall()
+        return {
+            "instances": [dict(row) for row in instances],
+            "backtest_runs": [dict(row) for row in runs],
+        }
+
+    def list_legacy_compatibility_runs(self) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT br.*, si.strategy_id, si.config_json FROM backtest_runs br "
+                "JOIN strategy_instances si ON si.instance_id=br.instance_id "
+                "WHERE br.origin='legacy_compatibility' ORDER BY br.created_at, br.run_id"
+            ).fetchall()
+        return [
+            {
+                **_backtest_run_row(row),
+                "strategy_id": str(row["strategy_id"]),
+                "instance_config": json.loads(row["config_json"] or "{}"),
+            }
+            for row in rows
+        ]
 
     # ---- recoverable execution journal --------------------------------- #
 
@@ -1801,13 +2543,174 @@ class StrategyRuntimeStore:
             "positions": json.loads(row["positions_json"] or "{}"),
         }
 
-    def record_legacy_usage(self, entrypoint: str, details: Any = None) -> None:
+    # ---- compatibility governance ------------------------------------- #
+
+    def register_compatibility_entrypoint(
+        self,
+        entrypoint: str,
+        *,
+        kind: str,
+        replacement: str,
+        deprecated_since: str,
+        sunset_at: str,
+        removal_release: str = "0.2.0",
+        status: str = "deprecated",
+        migration_cutoff: str = "",
+    ) -> None:
+        with self._lock, self._connect() as db:
+            db.execute(
+                "INSERT INTO compatibility_entrypoints VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(entrypoint) DO UPDATE SET kind=excluded.kind, "
+                "replacement=excluded.replacement, deprecated_since=excluded.deprecated_since, "
+                "sunset_at=excluded.sunset_at, removal_release=excluded.removal_release, "
+                "status=excluded.status, "
+                "migration_cutoff=CASE WHEN excluded.migration_cutoff<>'' "
+                "THEN excluded.migration_cutoff ELSE compatibility_entrypoints.migration_cutoff END, "
+                "updated_at=excluded.updated_at",
+                (
+                    entrypoint, kind, replacement, deprecated_since, sunset_at,
+                    removal_release, status, migration_cutoff, _now(),
+                ),
+            )
+
+    def set_compatibility_cutoff(self, cutoff: str | None = None) -> str:
+        value = str(cutoff or _now())
+        with self._lock, self._connect() as db:
+            db.execute(
+                "UPDATE compatibility_entrypoints SET migration_cutoff=?, updated_at=?",
+                (value, _now()),
+            )
+            if self._environment_id:
+                db.execute(
+                    "UPDATE compatibility_environments SET migration_cutoff=?, "
+                    "last_reported_at=? WHERE environment_id=?",
+                    (value, _now(), self._environment_id),
+                )
+        return value
+
+    def register_compatibility_environment(self, environment_id: str) -> dict[str, Any]:
+        value = str(environment_id).strip()
+        if not value:
+            raise ValueError("compatibility environment_id is required")
+        now = _now()
+        with self._lock, self._connect() as db:
+            db.execute(
+                "INSERT INTO compatibility_environments "
+                "(environment_id, registered_at, last_reported_at, source) "
+                "VALUES (?, ?, ?, 'local') "
+                "ON CONFLICT(environment_id) DO UPDATE SET "
+                "last_reported_at=excluded.last_reported_at, source='local'",
+                (value, now, now),
+            )
+        self._environment_id = value
+        return self.compatibility_environment_status(value)
+
+    def compatibility_environment_status(
+        self,
+        environment_id: str | None = None,
+    ) -> dict[str, Any] | list[dict[str, Any]]:
+        clauses = "" if environment_id is None else "WHERE environment_id=?"
+        values: tuple[Any, ...] = () if environment_id is None else (str(environment_id),)
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT ce.*, CASE WHEN ce.source='imported' "
+                "THEN ce.reported_post_cutoff_count ELSE "
+                "(SELECT COUNT(*) FROM legacy_usage_events le "
+                " WHERE le.environment_id=ce.environment_id "
+                " AND ce.migration_cutoff<>'' AND le.used_at>=ce.migration_cutoff) END "
+                "AS post_cutoff_count "
+                "FROM compatibility_environments ce " + clauses + " ORDER BY environment_id",
+                values,
+            ).fetchall()
+        result = [
+            {**dict(row), "evidence": json.loads(row["evidence_json"] or "{}")}
+            for row in rows
+        ]
+        if environment_id is None:
+            return result
+        if not result:
+            raise KeyError(f"unknown compatibility environment {environment_id!r}")
+        return result[0]
+
+    def compatibility_environment_entrypoints(
+        self,
+        environment_id: str,
+    ) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT ce.entrypoint, ce.kind, ce.replacement, ce.sunset_at, "
+                "env.migration_cutoff, (SELECT COUNT(*) FROM legacy_usage_events le "
+                "WHERE le.environment_id=env.environment_id AND le.entrypoint=ce.entrypoint "
+                "AND env.migration_cutoff<>'' AND le.used_at>=env.migration_cutoff) "
+                "AS post_cutoff_count FROM compatibility_entrypoints ce "
+                "JOIN compatibility_environments env ON env.environment_id=? "
+                "ORDER BY ce.entrypoint",
+                (str(environment_id),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def save_compatibility_environment_report(
+        self,
+        payload: dict[str, Any],
+        *,
+        evidence_hash: str,
+        imported: bool,
+    ) -> dict[str, Any]:
+        environment_id = str(payload.get("environment_id") or "").strip()
+        cutoff = str(payload.get("migration_cutoff") or "").strip()
+        generated_at = str(payload.get("generated_at") or _now())
+        if not environment_id or not cutoff or not str(evidence_hash).strip():
+            raise ValueError("compatibility environment report binding is incomplete")
+        post_cutoff = max(int(payload.get("post_cutoff_count") or 0), 0)
+        source = "imported" if imported else "local"
+        with self._lock, self._connect() as db:
+            db.execute(
+                "INSERT INTO compatibility_environments "
+                "(environment_id, registered_at, last_reported_at, migration_cutoff, source, "
+                "reported_post_cutoff_count, evidence_hash, evidence_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(environment_id) DO UPDATE SET "
+                "last_reported_at=excluded.last_reported_at, "
+                "migration_cutoff=excluded.migration_cutoff, source=excluded.source, "
+                "reported_post_cutoff_count=excluded.reported_post_cutoff_count, "
+                "evidence_hash=excluded.evidence_hash, evidence_json=excluded.evidence_json",
+                (
+                    environment_id, generated_at, generated_at, cutoff, source,
+                    post_cutoff, str(evidence_hash), _json(payload),
+                ),
+            )
+        return self.compatibility_environment_status(environment_id)
+
+    def record_legacy_usage(
+        self,
+        entrypoint: str,
+        details: Any = None,
+        *,
+        client_kind: str = "",
+        client_version: str = "",
+        source: str = "",
+        request_id: str = "",
+        environment_id: str = "",
+    ) -> None:
+        request_hash = (
+            hashlib.sha256(str(request_id).encode("utf-8")).hexdigest()[:24]
+            if request_id else ""
+        )
         with self._lock, self._connect() as db:
             db.execute(
                 "INSERT INTO legacy_usage VALUES (?, 1, ?, ?) "
                 "ON CONFLICT(entrypoint) DO UPDATE SET call_count=call_count+1, "
                 "last_used_at=excluded.last_used_at, details_json=excluded.details_json",
                 (entrypoint, _now(), _json(details or {})),
+            )
+            db.execute(
+                "INSERT INTO legacy_usage_events "
+                "(entrypoint, client_kind, client_version, source, request_id_hash, "
+                "environment_id, used_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    entrypoint, str(client_kind), str(client_version), str(source),
+                    request_hash, str(environment_id or self._environment_id), _now(),
+                ),
             )
 
     def list_legacy_usage(self) -> list[dict[str, Any]]:
@@ -1817,6 +2720,516 @@ class StrategyRuntimeStore:
             {**dict(row), "details": json.loads(row["details_json"] or "{}")}
             for row in rows
         ]
+
+    def compatibility_status(self) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT ce.*, COALESCE(lu.call_count, 0) AS call_count, "
+                "COALESCE(lu.last_used_at, '') AS last_used_at, "
+                "(SELECT COUNT(*) FROM legacy_usage_events le WHERE le.entrypoint=ce.entrypoint "
+                "AND ce.migration_cutoff<>'' AND le.used_at>=ce.migration_cutoff) AS post_cutoff_count "
+                "FROM compatibility_entrypoints ce LEFT JOIN legacy_usage lu "
+                "ON lu.entrypoint=ce.entrypoint ORDER BY ce.entrypoint"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    # ---- deployment qualification projection ------------------------- #
+
+    def save_qualification_projection(self, payload: dict[str, Any]) -> dict[str, Any]:
+        instance_id = str(payload.get("instance_id") or "").strip()
+        config_hash = str(payload.get("config_hash") or "").strip()
+        evaluated_at = str(payload.get("evaluated_at") or _now())
+        if not instance_id or not config_hash:
+            raise ValueError("qualification projection requires instance_id and config_hash")
+        with self._lock, self._connect() as db:
+            current = db.execute(
+                "SELECT config_hash FROM strategy_instances WHERE instance_id=?",
+                (instance_id,),
+            ).fetchone()
+            if current is None:
+                raise KeyError(f"unknown strategy instance {instance_id!r}")
+            if str(current["config_hash"]) != config_hash:
+                raise ValueError("qualification projection config_hash is stale")
+            db.execute(
+                "INSERT INTO qualification_projections "
+                "(instance_id, config_hash, eligible, projection_json, evaluated_at) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(instance_id) DO UPDATE SET "
+                "config_hash=excluded.config_hash, eligible=excluded.eligible, "
+                "projection_json=excluded.projection_json, evaluated_at=excluded.evaluated_at",
+                (
+                    instance_id, config_hash,
+                    int(bool(payload.get("eligible_for_live_authorization"))),
+                    _json(payload), evaluated_at,
+                ),
+            )
+        return self.get_qualification_projection(instance_id) or {}
+
+    def get_qualification_projection(self, instance_id: str) -> dict[str, Any] | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM qualification_projections WHERE instance_id=?",
+                (instance_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "instance_id": row["instance_id"],
+            "config_hash": row["config_hash"],
+            "eligible": bool(row["eligible"]),
+            "evaluated_at": row["evaluated_at"],
+            "projection": json.loads(row["projection_json"]),
+        }
+
+    # ---- Broker UAT evidence ------------------------------------------ #
+
+    def create_broker_uat_run(
+        self,
+        *,
+        broker: str,
+        account_hash: str,
+        environment: str,
+        plugin_version: str,
+        plugin_hash: str,
+        sdk_version: str,
+        symbol: str,
+        max_notional: float,
+        scenario_version: int = 1,
+        code_commit: str = "",
+        runtime_code_hash: str = "",
+        sdk_hash: str = "",
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        if str(broker).lower() not in {"xtp", "emt"}:
+            raise ValueError("broker UAT supports xtp or emt")
+        if float(max_notional) <= 0:
+            raise ValueError("broker UAT max_notional must be positive")
+        if int(scenario_version) not in {1, 2}:
+            raise ValueError("unsupported broker UAT scenario version")
+        identifier = str(run_id or uuid.uuid4().hex)
+        now = _now()
+        with self._lock, self._connect() as db:
+            db.execute(
+                "INSERT INTO broker_uat_runs "
+                "(run_id, broker, account_hash, environment, plugin_version, plugin_hash, "
+                "sdk_version, status, symbol, max_notional, scenario_version, code_commit, "
+                "runtime_code_hash, sdk_hash, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'created', ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    identifier, str(broker).lower(), account_hash, environment,
+                    plugin_version, plugin_hash, sdk_version, symbol,
+                    float(max_notional), int(scenario_version), str(code_commit),
+                    str(runtime_code_hash), str(sdk_hash), now, now,
+                ),
+            )
+        return self.get_broker_uat_run(identifier)
+
+    def update_broker_uat_step(
+        self,
+        run_id: str,
+        step: str,
+        *,
+        status: str,
+        evidence: Any = None,
+        error: Any = None,
+    ) -> dict[str, Any]:
+        if status not in {"running", "passed", "failed", "aborted"}:
+            raise ValueError("invalid broker UAT step status")
+        now = _now()
+        ended_at = now if status in {"passed", "failed", "aborted"} else ""
+        with self._lock, self._connect() as db:
+            db.execute(
+                "INSERT INTO broker_uat_steps "
+                "(run_id, step, status, evidence_json, error_json, started_at, ended_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(run_id, step) DO UPDATE SET status=excluded.status, "
+                "evidence_json=excluded.evidence_json, error_json=excluded.error_json, "
+                "ended_at=excluded.ended_at",
+                (
+                    run_id, step, status, _json(evidence or {}), _json(error or {}),
+                    now, ended_at,
+                ),
+            )
+            run_status = "failed" if status == "failed" else "running"
+            if status == "aborted":
+                run_status = "aborted"
+            db.execute(
+                "UPDATE broker_uat_runs SET status=?, current_step=?, error_json=?, "
+                "updated_at=?, ended_at=? WHERE run_id=?",
+                (
+                    run_status, step, _json(error or {}), now,
+                    ended_at if status in {"failed", "aborted"} else "", run_id,
+                ),
+            )
+        return self.get_broker_uat_run(run_id)
+
+    def bind_broker_uat_account(self, run_id: str, account_hash: str) -> dict[str, Any]:
+        value = str(account_hash).strip()
+        if not value:
+            raise ValueError("broker UAT account_hash is required")
+        with self._lock, self._connect() as db:
+            cursor = db.execute(
+                "UPDATE broker_uat_runs SET account_hash=?, updated_at=? "
+                "WHERE run_id=? AND account_hash='' AND status IN ('created','running')",
+                (value, _now(), run_id),
+            )
+            if cursor.rowcount != 1:
+                row = db.execute(
+                    "SELECT account_hash FROM broker_uat_runs WHERE run_id=?", (run_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(f"unknown broker UAT run {run_id!r}")
+                if str(row["account_hash"]) != value:
+                    raise ValueError("broker UAT account binding is immutable")
+        return self.get_broker_uat_run(run_id)
+
+    def claim_broker_uat_route(
+        self,
+        run_id: str,
+        reference: str,
+        notional: float = 0.0,
+    ) -> bool:
+        """Atomically reserve one bounded real-order reference for a UAT run.
+
+        The claim is deliberately never released. If a process dies after the
+        broker accepts an order but before its callback is journalled, recovery
+        must reconcile that unknown outcome instead of submitting again.
+        """
+
+        identifier = str(run_id).strip()
+        stable_reference = str(reference).strip()
+        if not identifier or not stable_reference:
+            return False
+        amount = max(float(notional), 0.0)
+        with self._lock, self._connect() as db:
+            run = db.execute(
+                "SELECT status, max_notional FROM broker_uat_runs WHERE run_id=?",
+                (identifier,),
+            ).fetchone()
+            if run is None or str(run["status"]) not in {"created", "running"}:
+                return False
+            if db.execute(
+                "SELECT 1 FROM broker_uat_route_claims WHERE run_id=? AND reference=?",
+                (identifier, stable_reference),
+            ).fetchone() is not None:
+                return False
+            claimed = float(db.execute(
+                "SELECT COALESCE(SUM(notional), 0) FROM broker_uat_route_claims "
+                "WHERE run_id=?",
+                (identifier,),
+            ).fetchone()[0])
+            if claimed + amount > float(run["max_notional"]) + 1e-9:
+                return False
+            cursor = db.execute(
+                "INSERT OR IGNORE INTO broker_uat_route_claims "
+                "(run_id, reference, claimed_at, notional) "
+                "SELECT run_id, ?, ?, ? FROM broker_uat_runs "
+                "WHERE run_id=? AND status IN ('created','running')",
+                (stable_reference, _now(), amount, identifier),
+            )
+            if cursor.rowcount == 1:
+                db.execute(
+                    "UPDATE broker_uat_runs SET requested_notional=?, updated_at=? "
+                    "WHERE run_id=?",
+                    (claimed + amount, _now(), identifier),
+                )
+            return cursor.rowcount == 1
+
+    def update_broker_uat_filled_notional(
+        self,
+        run_id: str,
+        filled_notional: float,
+    ) -> dict[str, Any]:
+        amount = max(float(filled_notional), 0.0)
+        with self._lock, self._connect() as db:
+            cursor = db.execute(
+                "UPDATE broker_uat_runs SET filled_notional=?, updated_at=? WHERE run_id=?",
+                (amount, _now(), run_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"unknown broker UAT run {run_id!r}")
+        return self.get_broker_uat_run(run_id)
+
+    def record_broker_uat_order_event(
+        self,
+        run_id: str,
+        *,
+        reference: str,
+        order_id: str,
+        status: str,
+        traded: float,
+        volume: float,
+        payload: Any,
+        observed_at: str = "",
+    ) -> bool:
+        safe_payload = payload if isinstance(payload, dict) else {"value": payload}
+        material = {
+            "run_id": str(run_id),
+            "reference": str(reference),
+            "order_id": str(order_id),
+            "status": str(status),
+            "traded": float(traded),
+            "volume": float(volume),
+            "payload": safe_payload,
+            "observed_at": str(observed_at),
+        }
+        event_hash = hashlib.sha256(_json(material).encode("utf-8")).hexdigest()
+        with self._lock, self._connect() as db:
+            cursor = db.execute(
+                "INSERT OR IGNORE INTO broker_uat_order_events "
+                "(event_hash, run_id, reference, order_id, status, traded, volume, "
+                "payload_json, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    event_hash, str(run_id), str(reference), str(order_id), str(status),
+                    float(traded), float(volume), _json(safe_payload),
+                    str(observed_at or _now()),
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def abort_broker_uat_run(self, run_id: str, *, reason: str) -> dict[str, Any]:
+        if not str(reason).strip():
+            raise ValueError("broker UAT abort requires a reason")
+        with self._lock, self._connect() as db:
+            cursor = db.execute(
+                "UPDATE broker_uat_runs SET status='aborted', error_json=?, "
+                "updated_at=?, ended_at=? WHERE run_id=? "
+                "AND status IN ('created','running','failed','restart_required')",
+                (_json({"reason": str(reason)}), _now(), _now(), run_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("broker UAT run is missing or already terminal")
+        return self.get_broker_uat_run(run_id)
+
+    def resume_broker_uat_run(self, run_id: str) -> dict[str, Any]:
+        with self._lock, self._connect() as db:
+            cursor = db.execute(
+                "UPDATE broker_uat_runs SET status='running', error_json='{}', "
+                "updated_at=?, ended_at='' WHERE run_id=? "
+                "AND status IN ('created','failed','restart_required')",
+                (_now(), run_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("broker UAT run is not resumable")
+        return self.get_broker_uat_run(run_id)
+
+    def mark_broker_uat_restart_required(
+        self,
+        run_id: str,
+        *,
+        process_marker: str,
+    ) -> dict[str, Any]:
+        marker = str(process_marker).strip()
+        if not marker:
+            raise ValueError("broker UAT process marker is required")
+        self.update_broker_uat_step(
+            run_id,
+            "process_restart_required",
+            status="passed",
+            evidence={"origin_process_marker": marker},
+        )
+        with self._lock, self._connect() as db:
+            cursor = db.execute(
+                "UPDATE broker_uat_runs SET status='restart_required', "
+                "current_step='process_restart_required', error_json='{}', "
+                "updated_at=?, ended_at='' WHERE run_id=? AND status='running'",
+                (_now(), run_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("broker UAT run cannot enter the restart checkpoint")
+        return self.get_broker_uat_run(run_id)
+
+    def complete_broker_uat_run(
+        self,
+        run_id: str,
+        *,
+        capabilities: list[str],
+        expires_at: str,
+    ) -> dict[str, Any]:
+        run = self.get_broker_uat_run(run_id)
+        if int(run.get("scenario_version") or 1) >= 2:
+            required_steps = {
+                "preflight", "connected", "execution_plan",
+                "marketable_order_acknowledged", "marketable_fill_observed",
+                "remainder_order_acknowledged", "plan_partial_execution_observed",
+                "process_restart_required", "restart_reconciled",
+                "kill_switches_verified", "cancel_confirmed", "reconnect_reconciled",
+            }
+        else:
+            required_steps = {
+                "preflight", "connected", "order_acknowledged", "partial_fill_observed",
+                "process_restart_required", "restart_reconciled",
+                "kill_switches_verified", "cancel_confirmed", "reconnect_reconciled",
+            }
+        statuses = {str(step["step"]): str(step["status"]) for step in run["steps"]}
+        missing = sorted(required_steps - set(statuses))
+        failed = sorted(step for step in required_steps if statuses.get(step) != "passed")
+        if missing or failed:
+            raise ValueError(
+                "all required broker UAT steps must pass before evidence is issued: "
+                f"missing={missing}, not_passed={failed}"
+            )
+        if not str(run["account_hash"]) or not str(run["plugin_hash"]):
+            raise ValueError("broker UAT account and plugin bindings are required")
+        if int(run.get("scenario_version") or 1) >= 2 and not all(
+            str(run.get(field) or "")
+            for field in ("code_commit", "runtime_code_hash", "sdk_hash")
+        ):
+            raise ValueError(
+                "Broker UAT v2 evidence requires code, runtime and native SDK fingerprints"
+            )
+        if str(expires_at) <= _now():
+            raise ValueError("broker UAT evidence expiry must be in the future")
+        payload = {
+            "run_id": run_id,
+            "broker": run["broker"],
+            "account_hash": run["account_hash"],
+            "environment": run["environment"],
+            "plugin_version": run["plugin_version"],
+            "plugin_hash": run["plugin_hash"],
+            "sdk_version": run["sdk_version"],
+            "sdk_hash": run["sdk_hash"],
+            "scenario_version": int(run["scenario_version"]),
+            "code_commit": run["code_commit"],
+            "runtime_code_hash": run["runtime_code_hash"],
+            "requested_notional": float(run["requested_notional"]),
+            "filled_notional": float(run["filled_notional"]),
+            "capabilities": sorted(set(capabilities)),
+            "expires_at": str(expires_at),
+        }
+        evidence_hash = hashlib.sha256(_json(payload).encode("utf-8")).hexdigest()
+        evidence_id = uuid.uuid4().hex
+        now = _now()
+        with self._lock, self._connect() as db:
+            db.execute(
+                "INSERT INTO broker_uat_evidence "
+                "(evidence_id, run_id, broker, account_hash, environment, plugin_version, "
+                "plugin_hash, sdk_version, capabilities_json, evidence_hash, passed_at, expires_at, "
+                "scenario_version, code_commit, runtime_code_hash, sdk_hash, requested_notional, "
+                "filled_notional) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    evidence_id, run_id, run["broker"], run["account_hash"],
+                    run["environment"], run["plugin_version"], run["plugin_hash"],
+                    run["sdk_version"],
+                    _json(payload["capabilities"]), evidence_hash, now, str(expires_at),
+                    int(run["scenario_version"]), run["code_commit"],
+                    run["runtime_code_hash"], run["sdk_hash"],
+                    float(run["requested_notional"]), float(run["filled_notional"]),
+                ),
+            )
+            db.execute(
+                "UPDATE broker_uat_runs SET status='passed', current_step='completed', "
+                "updated_at=?, ended_at=? WHERE run_id=?",
+                (now, now, run_id),
+            )
+        return self.get_broker_uat_run(run_id)
+
+    def get_broker_uat_run(self, run_id: str) -> dict[str, Any]:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM broker_uat_runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            steps = db.execute(
+                "SELECT * FROM broker_uat_steps WHERE run_id=? ORDER BY started_at, step",
+                (run_id,),
+            ).fetchall()
+            evidence = db.execute(
+                "SELECT * FROM broker_uat_evidence WHERE run_id=?", (run_id,)
+            ).fetchone()
+            order_events = db.execute(
+                "SELECT * FROM broker_uat_order_events WHERE run_id=? "
+                "ORDER BY observed_at, rowid",
+                (run_id,),
+            ).fetchall()
+        if row is None:
+            raise KeyError(f"unknown broker UAT run {run_id!r}")
+        return {
+            **dict(row),
+            "error": json.loads(row["error_json"] or "{}"),
+            "steps": [
+                {
+                    **dict(item),
+                    "evidence": json.loads(item["evidence_json"] or "{}"),
+                    "error": json.loads(item["error_json"] or "{}"),
+                }
+                for item in steps
+            ],
+            "order_events": [
+                {**dict(item), "payload": json.loads(item["payload_json"] or "{}")}
+                for item in order_events
+            ],
+            "evidence": None if evidence is None else {
+                **dict(evidence),
+                "capabilities": json.loads(evidence["capabilities_json"] or "[]"),
+            },
+        }
+
+    def list_broker_uat_runs(self, broker: str | None = None) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            if broker:
+                rows = db.execute(
+                    "SELECT run_id FROM broker_uat_runs WHERE broker=? ORDER BY created_at DESC",
+                    (str(broker).lower(),),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    "SELECT run_id FROM broker_uat_runs ORDER BY created_at DESC"
+                ).fetchall()
+        return [self.get_broker_uat_run(str(row["run_id"])) for row in rows]
+
+    def valid_broker_uat_evidence(
+        self,
+        broker: str,
+        *,
+        account_hash: str = "",
+        environment: str = "",
+        plugin_version: str = "",
+        plugin_hash: str = "",
+        sdk_version: str = "",
+        sdk_hash: str = "",
+        runtime_code_hash: str = "",
+        scenario_version: int = 0,
+        passed_after: str = "",
+        now: str | None = None,
+    ) -> dict[str, Any] | None:
+        current = str(now or _now())
+        clauses = ["broker=?", "expires_at>?"]
+        values: list[Any] = [str(broker).lower(), current]
+        if account_hash:
+            clauses.append("account_hash=?")
+            values.append(account_hash)
+        if environment:
+            clauses.append("environment=?")
+            values.append(environment)
+        if plugin_version:
+            clauses.append("plugin_version=?")
+            values.append(plugin_version)
+        if plugin_hash:
+            clauses.append("plugin_hash=?")
+            values.append(plugin_hash)
+        if sdk_version:
+            clauses.append("sdk_version=?")
+            values.append(sdk_version)
+        if sdk_hash:
+            clauses.append("sdk_hash=?")
+            values.append(sdk_hash)
+        if runtime_code_hash:
+            clauses.append("runtime_code_hash=?")
+            values.append(runtime_code_hash)
+        if scenario_version:
+            clauses.append("scenario_version=?")
+            values.append(int(scenario_version))
+        if passed_after:
+            clauses.append("passed_at>=?")
+            values.append(str(passed_after))
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM broker_uat_evidence WHERE " + " AND ".join(clauses)
+                + " ORDER BY passed_at DESC LIMIT 1",
+                values,
+            ).fetchone()
+        if row is None:
+            return None
+        return {**dict(row), "capabilities": json.loads(row["capabilities_json"] or "[]")}
 
 
 def _instance_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -1888,6 +3301,90 @@ def _rehash_instances_for_v4(db: sqlite3.Connection) -> None:
                 config.config_hash, DeploymentLevel.REPLAY.value,
                 LifecycleState.VALIDATED.value, LifecycleState.VALIDATED.value,
                 _json({"rule": "config_hash_schema_upgrade", "reason": "v4 artifact binding"}),
+                now, config.instance_id,
+            ),
+        )
+
+
+def _rehash_instances_for_v6(db: sqlite3.Connection) -> None:
+    """Bind exact evaluation history and policy ownership into config hashes."""
+
+    rows = db.execute("SELECT * FROM strategy_instances").fetchall()
+    now = _now()
+    for row in rows:
+        payload = json.loads(row["config_json"] or "{}")
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"invalid config JSON for strategy instance {row['instance_id']}")
+        old_hash = str(row["config_hash"])
+        params = dict(payload.get("params") or {})
+        data_policy = dict(payload.get("data_policy") or {})
+        windows = {
+            str(key): int(value)
+            for key, value in params.items()
+            if "window" in str(key)
+            and isinstance(value, int)
+            and not isinstance(value, bool)
+            and int(value) > 0
+        }
+        if "rsi_window" in windows and "stoch_window" in windows:
+            inferred = windows["rsi_window"] + windows["stoch_window"] + 1
+        else:
+            inferred = max(windows.values(), default=0) + 1
+        data_policy["history_window"] = max(
+            int(data_policy.get("history_window") or 0), inferred, 1,
+        )
+        policy = dict(payload.get("portfolio_policy") or {})
+        if str(policy.get("policy_id") or "") == "timing_fixed_exposure":
+            policy_params = dict(policy.get("params") or {})
+            legacy_target = params.pop("target_percent", None)
+            if legacy_target is not None:
+                policy_params.setdefault("target_percent", float(legacy_target))
+            policy["params"] = policy_params
+        payload.update({
+            "instance_id": str(row["instance_id"]),
+            "strategy_id": str(row["strategy_id"]),
+            "strategy_version": str(row["strategy_version"]),
+            "params": params,
+            "data_policy": data_policy,
+            "portfolio_policy": policy,
+            "deployment_level": DeploymentLevel.REPLAY.value,
+            "config_hash": "",
+        })
+        config = StrategyInstanceConfig.from_dict(payload)
+        db.execute(
+            "UPDATE strategy_instances SET config_json=?, config_hash=?, lifecycle=?, "
+            "deployment_level=?, updated_at=? WHERE instance_id=?",
+            (
+                _json(config.to_dict()), config.config_hash, LifecycleState.VALIDATED.value,
+                DeploymentLevel.REPLAY.value, now, config.instance_id,
+            ),
+        )
+        db.execute("DELETE FROM stage_evidence WHERE instance_id=?", (config.instance_id,))
+        db.execute("DELETE FROM live_approvals WHERE instance_id=?", (config.instance_id,))
+        db.execute("DELETE FROM account_baselines WHERE instance_id=?", (config.instance_id,))
+        db.execute("DELETE FROM provider_checkpoints WHERE instance_id=?", (config.instance_id,))
+        db.execute(
+            "UPDATE stage_runs SET status='invalidated', ended_at=?, updated_at=? "
+            "WHERE instance_id=? AND status='running'",
+            (now, now, config.instance_id),
+        )
+        db.execute(
+            "UPDATE artifact_manifests SET config_hash=? "
+            "WHERE instance_id=? AND config_hash=?",
+            (config.config_hash, config.instance_id, old_hash),
+        )
+        db.execute(
+            "UPDATE deployment_runtime SET config_hash=?, deployment_level=?, account_id='', "
+            "broker='', desired_state=?, observed_state=?, runtime_id='', runner_heartbeat_at='', "
+            "last_command_id='', last_error_json=?, reconcile_required=0, binding_active=0, "
+            "version=version+1, updated_at=? WHERE instance_id=?",
+            (
+                config.config_hash, DeploymentLevel.REPLAY.value,
+                LifecycleState.VALIDATED.value, LifecycleState.VALIDATED.value,
+                _json({
+                    "rule": "deterministic_history_schema_upgrade",
+                    "reason": "v6 exact history window and portfolio policy ownership",
+                }),
                 now, config.instance_id,
             ),
         )
@@ -1979,6 +3476,8 @@ def _backtest_run_row(row: sqlite3.Row) -> dict[str, Any]:
         "ended_at": row["ended_at"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
+        "origin": row["origin"],
+        "legacy_job_id": row["legacy_job_id"],
     }
 
 

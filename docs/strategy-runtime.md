@@ -98,22 +98,37 @@ observed state，以及 runtime ID、runner heartbeat、最后命令、错误和
 - `POST /api/trading/kill-switches/{global|account|instance}/{id}/engage`
 - `POST /api/trading/kill-switches/{global|account|instance}/{id}/release`
 
-## PAPER/SHADOW 证据与数据库迁移
+## PAPER/SHADOW 证据、一致性与数据库迁移
 
 PAPER/SHADOW 启动时创建绑定当前 `config_hash` 的 stage run。runner 按真实会话日期记录交易日，
 并累计决策、执行计划、拒单、重复引用、仓位越界、未处理错误和恢复差异。停止后 stage run
 才会完成；PAPER 默认至少 20 个交易日，SHADOW 默认至少 5 个交易日。调用方声明的天数不会
 替代运行时实际记录的会话日期；同一配置多次重启或多段运行中的同一交易日只计一次。
 
-证据接口：
+stage run 只能由 runtime 自动开始、记录和结束。以下手工写接口仅作为 0.1.x 兼容面保留，
+不接受调用方填写的交易日数量，也不能生成正式 qualification 所需的可信证据；0.2.0 将删除：
 
 - `POST /api/trading/stage-runs/{instance_id}/{paper|shadow}/start`
 - `POST /api/trading/stage-runs/{run_id}/finish`
 - `POST /api/trading/stage-runs/{instance_id}/{paper|shadow}/evaluate`
 
-策略运行 SQLite 当前使用顺序 schema migration（schema v5）和 WAL。旧无版本数据库先生成
-SQLite 在线备份，再在一个 `BEGIN IMMEDIATE` 事务内迁移；迁移失败会保留旧库并阻止交易系统
-启动，不会删除或静默重建数据库。LIVE 单账户单写者由部分唯一索引在数据库层保证。
+正式只读接口为：
+
+- `GET /api/trading/deployments/{instance_id}/stage-runs`
+- `POST /api/trading/deployments/{instance_id}/parity-runs`
+- `GET /api/trading/parity-runs/{run_id}`
+- `GET /api/trading/deployments/{instance_id}/qualification`
+
+REPLAY、PAPER、SHADOW 和 LIVE-plan 保存带输入、状态和输出哈希的决策观测。SHADOW 每个计入
+交易日都必须与 REPLAY 比较为 `PASS`；`MISMATCH`、`NOT_COMPARABLE` 或缺失观测都不具备晋升
+资格。账户、原始报价和合约哈希一致时才继续比较目标股数和执行计划。
+
+策略运行 SQLite 当前使用顺序 schema migration（schema v8）和 WAL。v6 增加确定性历史、
+checkpoint/provenance、详细兼容调用、决策观测与 parity；v7 增加 Broker UAT、qualification 投影、
+旧 job 导入和多环境零调用证据；v8 增加 UAT v2 场景、核心代码/native SDK 指纹、累计请求/成交
+金额与逐次 Broker callback 状态。旧库先生成 SQLite 在线备份，再在一个 `BEGIN IMMEDIATE`
+事务内迁移；存在活动 runtime 时涉及配置重哈希的迁移会拒绝执行。迁移失败保留原数据库并
+阻止自动路由，不会删除或静默重建。LIVE 单账户单写者由部分唯一索引在数据库层保证。
 
 ## 选股与择时（各自已贯通，组合仅预留）
 
@@ -138,7 +153,10 @@ SQLite 在线备份，再在一个 `BEGIN IMMEDIATE` 事务内迁移；迁移失
 - `POST /api/trading/deployments/{id}/promote`
 - `POST /api/trading/deployments/{id}/start|pause|reconcile|resume|stop|status`
 
-旧 `/api/timing/*` 和 daemon strategy-name 调用仍可用于研究与 PAPER，响应会给出新接口的
-迁移提示。旧 PAPER daemon 会在自身 `state_dir` 中创建受授权器约束的临时实例，而不会退回
-不受控的 `LiveEngine.submit`；正式实例禁止跨部署状态目录运行。LIVE 自动策略只接受已经
-晋升的 `instance_id`。
+旧 `/api/timing/*` 和 daemon strategy-name 调用仍只在 0.1.x 兼容期存在，响应会给出固定
+Sunset 和正式 successor。timing signal/backtest 已转接仅 REPLAY 的正式临时实例；旧 PAPER
+daemon 会转换为普通持久化实例，之后只能通过 `strategy_instance_id` 控制。正式实例禁止跨部署
+状态目录运行，LIVE 自动策略只接受已经晋升且通过 qualification 的 `instance_id`。
+
+完整的多环境迁移、XTP/EMT UAT 和 0.2.0 删除门禁见
+[《0.2.0 策略链路迁移、券商 UAT 与旧入口删除手册》](strategy-trading-migration-0.2.md)。

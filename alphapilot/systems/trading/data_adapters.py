@@ -16,6 +16,104 @@ from alphapilot.systems.trading.contracts import (
     TradableQuote,
     canonical_instrument,
 )
+from alphapilot.systems.trading.ports import HistoricalExecutionSlice
+
+
+class LocalHistoricalDataAdapter:
+    """Read canonical local market data without routing through TimingSystem."""
+
+    def __init__(self, context: Any, *, data_dir: str | None = None) -> None:
+        self.context = context
+        self.data_dir = data_dir
+
+    def with_data_dir(self, data_dir: str | None) -> "LocalHistoricalDataAdapter":
+        return type(self)(self.context, data_dir=data_dir or self.data_dir)
+
+    def _frame(
+        self,
+        *,
+        instruments: Sequence[str],
+        start: str | None,
+        end: str | None,
+        frequency: str,
+        adjustment: str,
+        data_dir: str | None,
+    ) -> pd.DataFrame:
+        from alphapilot.systems.timing.data import load_bars
+
+        return load_bars(
+            self.context,
+            symbols=list(instruments),
+            start_date=start,
+            end_date=end,
+            freq=frequency,
+            data_dir=data_dir or self.data_dir,
+            adjust_mode=adjustment,
+        )
+
+    def load_completed_bars(
+        self,
+        *,
+        instruments: Sequence[str],
+        start: str | None,
+        end: str | None,
+        frequency: str,
+        adjustment: str,
+        data_dir: str | None = None,
+    ) -> list[CompletedBar]:
+        mode = PriceAdjustment(str(adjustment))
+        frame = self._frame(
+            instruments=instruments,
+            start=start,
+            end=end,
+            frequency=frequency,
+            adjustment=mode.value,
+            data_dir=data_dir,
+        )
+        return completed_bars_from_frame(
+            frame,
+            frequency=frequency,
+            adjustment=mode,
+        )
+
+    def load_execution_slice(
+        self,
+        *,
+        instruments: Sequence[str],
+        start: str | None,
+        end: str | None,
+        frequency: str,
+        data_dir: str | None = None,
+        default_lot_size: int = 100,
+    ) -> HistoricalExecutionSlice:
+        frame = self._frame(
+            instruments=instruments,
+            start=start,
+            end=end,
+            frequency=frequency,
+            adjustment=PriceAdjustment.NONE.value,
+            data_dir=data_dir,
+        )
+        bars = completed_bars_from_frame(
+            frame,
+            frequency=frequency,
+            adjustment=PriceAdjustment.NONE,
+        )
+        versions = sorted({bar.data_version for bar in bars if bar.data_version})
+        version = versions[0] if len(versions) == 1 else ""
+        return HistoricalExecutionSlice(
+            bars=tuple(bars),
+            quotes=tradable_quotes_from_frame(
+                frame,
+                frequency=frequency,
+                data_version=version,
+            ),
+            instruments=instrument_metadata_from_frame(
+                frame,
+                default_lot_size=default_lot_size,
+            ),
+            data_version=version,
+        )
 
 
 class TimingHistoricalDataAdapter:
@@ -33,6 +131,7 @@ class TimingHistoricalDataAdapter:
         end: str | None,
         frequency: str,
         adjustment: str,
+        data_dir: str | None = None,
     ) -> list[CompletedBar]:
         mode = PriceAdjustment(str(adjustment))
         frame = self.timing_system.load_bars(
@@ -40,7 +139,7 @@ class TimingHistoricalDataAdapter:
             start_date=start,
             end_date=end,
             freq=frequency,
-            data_dir=self.data_dir,
+            data_dir=data_dir or self.data_dir,
             adjust_mode=mode.value,
         )
         return completed_bars_from_frame(

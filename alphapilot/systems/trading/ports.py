@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Protocol, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from alphapilot.systems.trading.contracts import (
     AccountSnapshot,
@@ -19,6 +19,7 @@ from alphapilot.systems.trading.contracts import (
 class RouteOrigin(str, Enum):
     MANUAL = "manual"
     AUTOMATED = "automated"
+    BROKER_UAT = "broker_uat"
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,7 @@ class RouteContext:
     broker: str = ""
     deployment_level: str = ""
     runtime_id: str = ""
+    uat_run_id: str = ""
 
     @classmethod
     def manual(cls) -> "RouteContext":
@@ -67,7 +69,29 @@ class HistoricalDataPort(Protocol):
         end: str | None,
         frequency: str,
         adjustment: str,
+        data_dir: str | None = None,
     ) -> list[CompletedBar]: ...
+
+
+@dataclass(frozen=True)
+class HistoricalExecutionSlice:
+    bars: tuple[CompletedBar, ...]
+    quotes: Mapping[str, Mapping[str, TradableQuote]]
+    instruments: Mapping[str, InstrumentMetadata]
+    data_version: str = ""
+
+
+class HistoricalExecutionDataPort(Protocol):
+    def load_execution_slice(
+        self,
+        *,
+        instruments: Sequence[str],
+        start: str | None,
+        end: str | None,
+        frequency: str,
+        data_dir: str | None = None,
+        default_lot_size: int = 100,
+    ) -> HistoricalExecutionSlice: ...
 
 
 class CompletedBarPort(Protocol):

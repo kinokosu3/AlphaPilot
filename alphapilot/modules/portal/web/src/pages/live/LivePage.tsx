@@ -42,6 +42,22 @@ type DeploymentPackage = {
   route_blocks?: Array<{ scope_type: string; scope_id: string; active: boolean; reason?: string }>;
 };
 
+type QualificationPackage = {
+  eligible_for_live_authorization: boolean;
+  paper?: { passed: boolean; trading_sessions: number; minimum_sessions: number };
+  shadow?: { passed: boolean; trading_sessions: number; minimum_sessions: number };
+  parity?: { passed: boolean; passed_sessions: string[]; missing_sessions: string[] };
+  broker_uat?: { required: boolean; passed: boolean; broker: string; expires_at?: string };
+  reconcile?: { passed: boolean };
+  configuration?: { passed: boolean; config_hash?: string };
+};
+
+type BrokerUATRun = {
+  run_id: string; broker: string; status: string; symbol: string; current_step?: string;
+  environment?: string; plugin_version?: string; sdk_version?: string; created_at?: string; ended_at?: string;
+  evidence?: { expires_at?: string; evidence_hash?: string } | null;
+};
+
 const WORKSPACE_STORAGE_KEY = "portal_live_workspace";
 
 function initialWorkspace(): Workspace {
@@ -138,6 +154,16 @@ export function LivePage() {
       : Promise.resolve({} as DeploymentPackage),
     [daemonTimingStrategy],
   );
+  const deploymentQualification = useAsync(
+    () => daemonTimingStrategy.trim()
+      ? api.get<QualificationPackage>(`/api/trading/deployments/${daemonTimingStrategy.trim()}/qualification`)
+      : Promise.resolve({ eligible_for_live_authorization: false } as QualificationPackage),
+    [daemonTimingStrategy],
+  );
+  const brokerUatRuns = useAsync(
+    () => api.get<{ runs: BrokerUATRun[] }>("/api/trading/broker-uat-runs"),
+    [],
+  );
   const safetyState = useAsync(async () => {
     const [switches, audit] = await Promise.all([
       api.get<{ kill_switches: Array<{ scope_type: string; scope_id: string; active: boolean; reason?: string; updated_at?: string }> }>("/api/trading/kill-switches"),
@@ -211,10 +237,12 @@ export function LivePage() {
     await Promise.all([
       daemonStatus.refresh(), runtimeState.refresh(), riskStatus.refresh(), ledgerEvents.refresh(),
       deploymentEvidence.refresh(), safetyState.refresh(),
+      deploymentQualification.refresh(), brokerUatRuns.refresh(),
     ]);
   }, [
     daemonStatus.refresh, runtimeState.refresh, riskStatus.refresh, ledgerEvents.refresh,
     deploymentEvidence.refresh, safetyState.refresh,
+    deploymentQualification.refresh, brokerUatRuns.refresh,
   ]);
 
   const checkRuntime = () => run(async () => {
@@ -285,6 +313,7 @@ export function LivePage() {
     await api.post(`/api/trading/deployments/${daemonTimingStrategy.trim()}/${action}`, { reason: "portal" });
     await Promise.all([
       refreshWorkspace(), strategyInstances.refresh(), deploymentEvidence.refresh(),
+      deploymentQualification.refresh(),
     ]);
   }, message);
   const strategyPause = () => deploymentCommand("pause", t("liveStrategyPaused"));
@@ -447,8 +476,8 @@ export function LivePage() {
             <span className="muted">状态以 trading runtime 为准；daemon 心跳、对账和配置哈希不一致时自动路由关闭。</span>
           </div>
         </div>
-        {deploymentEvidence.error || safetyState.error ? (
-          <Alert tone="error">{deploymentEvidence.error || safetyState.error}</Alert>
+        {deploymentEvidence.error || deploymentQualification.error || safetyState.error || brokerUatRuns.error ? (
+          <Alert tone="error">{deploymentEvidence.error || deploymentQualification.error || safetyState.error || brokerUatRuns.error}</Alert>
         ) : null}
         {!daemonTimingStrategy.trim() ? <div className="empty">选择策略实例后查看部署、阶段证据和 kill switch。</div> : (
           <>
@@ -457,6 +486,13 @@ export function LivePage() {
               <span><small>账户 / Broker</small><strong>{deploymentEvidence.data?.runtime?.account_id || "—"} / {deploymentEvidence.data?.runtime?.broker || "—"}</strong></span>
               <span><small>最近心跳</small><strong>{deploymentEvidence.data?.runtime?.runner_heartbeat_at || "—"}</strong></span>
               <span><small>需要对账</small><strong>{deploymentEvidence.data?.runtime?.reconcile_required ? "是" : "否"}</strong></span>
+            </div>
+            <div className="live-runner-summary" aria-label="LIVE qualification">
+              <span><small>LIVE 资格</small><strong>{deploymentQualification.data?.eligible_for_live_authorization ? "PASS" : "BLOCKED"}</strong></span>
+              <span><small>PAPER</small><strong>{deploymentQualification.data?.paper?.trading_sessions ?? 0} / {deploymentQualification.data?.paper?.minimum_sessions ?? 20}</strong></span>
+              <span><small>SHADOW</small><strong>{deploymentQualification.data?.shadow?.trading_sessions ?? 0} / {deploymentQualification.data?.shadow?.minimum_sessions ?? 5}</strong></span>
+              <span><small>逐日 Parity</small><strong>{deploymentQualification.data?.parity?.passed ? "PASS" : `缺 ${deploymentQualification.data?.parity?.missing_sessions?.length ?? 0} 日`}</strong></span>
+              <span><small>Broker UAT</small><strong>{deploymentQualification.data?.broker_uat?.required ? (deploymentQualification.data?.broker_uat?.passed ? "PASS" : "BLOCKED") : "N/A"}</strong></span>
             </div>
             <div className="table-wrap">
               <table>
@@ -494,6 +530,21 @@ export function LivePage() {
         <details>
           <summary>最近操作员审计</summary>
           <pre className="inline-json">{JSON.stringify((safetyState.data?.events || []).slice(0, 20), null, 2)}</pre>
+        </details>
+        <details>
+          <summary>XTP / EMT UAT 证据（只读）</summary>
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>Broker</th><th>环境</th><th>状态</th><th>步骤</th><th>标的</th><th>SDK</th><th>到期</th></tr></thead>
+              <tbody>{(brokerUatRuns.data?.runs || []).map((item) => (
+                <tr key={item.run_id}>
+                  <td>{item.broker}</td><td>{item.environment || "—"}</td><td>{item.status}</td><td>{item.current_step || "—"}</td>
+                  <td>{item.symbol}</td><td>{item.sdk_version || "—"}</td><td>{item.evidence?.expires_at || "—"}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+          {!(brokerUatRuns.data?.runs || []).length ? <div className="empty">尚无真实券商 UAT 证据；只能通过本地 CLI 运行。</div> : null}
         </details>
       </section>
       <LiveActivityTabs

@@ -32,6 +32,7 @@ from alphapilot.systems.trading.data_adapters import SequenceCalendar
 from alphapilot.systems.trading.domain import StrategyDefinition, StrategyInstanceConfig
 from alphapilot.systems.trading.execution import ExecutionCoordinator
 from alphapilot.systems.trading.planning import ExecutionPlanner
+from alphapilot.systems.trading.parity import DecisionParityService
 from alphapilot.systems.trading.portfolio import AccountSizer
 from alphapilot.systems.trading.policy_registry import PortfolioPolicyRegistry
 from alphapilot.systems.trading.registry import StrategyRegistry
@@ -422,11 +423,11 @@ def test_v2_provider_lives_for_pipeline_session_and_restores_checkpoint(
         strategy_registry=registry, policy_registry=policies,
         store=store, calendar=calendar,
     )
-    restarted.evaluate(instance, bars)
-    restored = _LifecycleProvider.latest
-    assert restored is not None and restored is not first
-    assert restored.initialize_count == 1
-    assert restored.evaluate_count == 3
+    duplicate = restarted.evaluate(instance, bars)
+    # The immutable observation is returned before a provider is recreated or
+    # a checkpoint consumes the same history a second time.
+    assert duplicate.inserted is False
+    assert _LifecycleProvider.latest is first
     restarted.close("test")
 
 
@@ -845,6 +846,7 @@ def test_daily_instance_runner_only_plans_in_opening_auction() -> None:
     )
     runner.engine = engine
     runner.trading = SimpleNamespace(store=store)
+    runner.store = store
     runner._heartbeat = lambda: None
     runner._stage_event = lambda *_args, **_kwargs: None
     runner._halt = lambda reason: (_ for _ in ()).throw(AssertionError(reason))
@@ -950,12 +952,13 @@ def test_core_dependency_boundary_has_no_outer_system_imports() -> None:
         root / "trading" / name
         for name in (
             "contracts.py", "domain.py", "ports.py", "application.py",
-            "portfolio.py", "planning.py", "execution.py",
+            "portfolio.py", "planning.py", "execution.py", "service.py",
         )
     ]
     forbidden = (
         "alphapilot.systems.live", "alphapilot.systems.timing",
-        "alphapilot.systems.backtest", "alphapilot.systems.strategy",
+        "alphapilot.systems.selection", "alphapilot.systems.backtest",
+        "alphapilot.systems.strategy",
     )
     for path in core:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -1332,6 +1335,20 @@ def test_decision_pipeline_requires_complete_universe_warmup_and_latest_watermar
     ]
     with pytest.raises(ValueError, match="watermark does not cover"):
         pipeline.evaluate(instance, misaligned)
+
+    mixed_versions = _bars(
+        instance.universe,
+        ["2026-07-08", "2026-07-09", "2026-07-10"],
+        adjustment=PriceAdjustment.BACKWARD,
+        frequency="day",
+        data_version="features",
+    )
+    mixed_versions[-1] = CompletedBar.from_dict({
+        **mixed_versions[-1].to_dict(),
+        "data_version": "",
+    })
+    with pytest.raises(ValueError, match="multiple data versions"):
+        pipeline.evaluate(instance, mixed_versions)
     pipeline.close("test_complete")
 
 
@@ -1348,15 +1365,56 @@ def test_live_approval_binds_confirmed_baseline_and_is_consumed_once(engine) -> 
     assert trading.validate_instance(row["instance_id"])["ok"]
     trading.store.record_stage(row["instance_id"], "replay", passed=True)
     trading.store.promote(row["instance_id"], "paper")
-    trading.store.record_stage(row["instance_id"], "paper", passed=True)
+    paper_run = trading.store.start_stage_run(row["instance_id"], "paper")
+    for day in range(20):
+        trading.store.record_stage_session(
+            row["instance_id"], config_hash=row["config_hash"], stage="paper",
+            session=f"2026-05-{day + 1:02d}",
+        )
+    trading.store.finish_stage_run(paper_run["run_id"], trading_sessions=20)
+    assert trading.evaluate_stage(row["instance_id"], "paper")["passed"]
     trading.store.promote(row["instance_id"], "shadow")
     run = trading.store.start_stage_run(row["instance_id"], "shadow")
     for day in range(5):
+        session = f"2026-06-{day + 1:02d}"
         trading.store.record_stage_session(
             row["instance_id"], config_hash=row["config_hash"], stage="shadow",
-            session=f"2026-06-{day + 1:02d}",
+            session=session,
         )
+        observation = {
+            "decision_id": f"decision-{day}",
+            "instance_id": row["instance_id"],
+            "config_hash": row["config_hash"],
+            "as_of": session,
+            "effective_session": session,
+            "history_hash": f"history-{day}",
+            "provider_state_before_hash": f"before-{day}",
+            "provider_state_after_hash": f"after-{day}",
+            "signal_hash": f"signal-{day}",
+            "weights_hash": f"weights-{day}",
+            "data_version": "features-v1",
+            "model_version": "",
+            "policy_version": "1.0.0",
+        }
+        trading.store.record_decision_observation({
+            **observation,
+            "observation_id": f"replay-observation-{day}",
+            "mode": "replay",
+            "run_id": "approval-replay",
+        })
+        trading.store.record_decision_observation({
+            **observation,
+            "observation_id": f"shadow-observation-{day}",
+            "mode": "shadow",
+            "run_id": run["run_id"],
+        })
     trading.store.finish_stage_run(run["run_id"], trading_sessions=999)
+    parity = DecisionParityService(trading.store).compare(
+        row["instance_id"],
+        replay_run_id="approval-replay",
+        shadow_stage_run_id=run["run_id"],
+    )
+    assert parity["status"] == "passed"
     assert trading.evaluate_stage(row["instance_id"], "shadow")["passed"]
     operator = OperatorContext(
         operator_id="risk-operator", request_id="approval-request",

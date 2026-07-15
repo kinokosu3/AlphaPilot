@@ -12,7 +12,11 @@ from typing import Any, Mapping, Sequence
 
 import pandas as pd
 
-from alphapilot.systems.trading.application import DecisionPipeline, WarmupRequired
+from alphapilot.systems.trading.application import (
+    DecisionPipeline,
+    WarmupRequired,
+    canonical_hash,
+)
 from alphapilot.systems.trading.contracts import (
     AccountSnapshot,
     CompletedBar,
@@ -355,7 +359,14 @@ class ReplayRuntime:
             if session == sessions[-1]:
                 continue
             try:
-                result = pipeline.evaluate(instance, history, account=snapshot, persist=True)
+                result = pipeline.evaluate(
+                    instance,
+                    history,
+                    account=snapshot,
+                    persist=True,
+                    mode="replay",
+                    run_id=run_id,
+                )
             except WarmupRequired:
                 continue
             decision = result.decision
@@ -388,6 +399,21 @@ class ReplayRuntime:
                 )
             except ValueError as exc:
                 blocked = _blocked_sizing_plan(decision, str(exc))
+                run_store.attach_execution_observation(
+                    instance.instance_id,
+                    instance.config_hash,
+                    mode="replay",
+                    run_id=run_id,
+                    as_of=decision.as_of,
+                    account_hash=canonical_hash(asdict(execution_snapshot)),
+                    quote_hash=canonical_hash({
+                        str(key): asdict(value) for key, value in quotes.items()
+                    }),
+                    instrument_hash=canonical_hash({
+                        str(key): asdict(value) for key, value in metadata.items()
+                    }),
+                    plan_hash=canonical_hash(blocked.to_dict()),
+                )
                 targets.append({
                     "decision_id": decision.decision_id,
                     "instance_id": decision.instance_id,
@@ -425,6 +451,21 @@ class ReplayRuntime:
                 continue
             targets.append(_target_dict(target))
             plan = planner.plan(target, execution_snapshot, quotes=quotes, instruments=metadata)
+            run_store.attach_execution_observation(
+                instance.instance_id,
+                instance.config_hash,
+                mode="replay",
+                run_id=run_id,
+                as_of=decision.as_of,
+                account_hash=canonical_hash(asdict(execution_snapshot)),
+                quote_hash=canonical_hash({
+                    str(key): asdict(value) for key, value in quotes.items()
+                }),
+                instrument_hash=canonical_hash({
+                    str(key): asdict(value) for key, value in metadata.items()
+                }),
+                plan_hash=canonical_hash(plan.to_dict()),
+            )
             plans.append(plan.to_dict())
             replay_broker.set_session(effective, execution_prices, metadata)
             execution = ExecutionCoordinator(

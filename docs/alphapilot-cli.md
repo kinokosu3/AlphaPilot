@@ -782,6 +782,31 @@ alphapilot trading_instance_create \
 证据、确认基准持仓并消费 `trading_authorize_live` 创建的短时 approval。自动 LIVE 默认由
 `ALPHAPILOT_AUTOMATED_LIVE_ENABLED=false` 禁用。
 
+迁移、一致性和只允许本机执行的券商 UAT 命令：
+
+```bash
+# 旧入口调用状态；迁移开始时设置 cutoff，各受控环境最终导出/导入哈希报告
+alphapilot trading_compatibility --set_cutoff=True
+alphapilot trading_compatibility --export_path=reports/compatibility-host-a.json
+alphapilot trading_compatibility --import_path=reports/compatibility-host-b.json
+
+# REPLAY/SHADOW 逐日一致性与统一晋升资格
+alphapilot trading_parity_start \
+  --instance_id=ma_5_20 --replay_run_id=<run_id> --shadow_stage_run_id=<stage_run_id>
+alphapilot trading_parity_status --run_id=<parity_run_id>
+alphapilot trading_qualification --instance_id=ma_5_20
+
+# 只读检查 0.2.0 删除门禁；失败条件不能由参数绕过
+alphapilot trading_removal_check --acceptance_instance_id=ma_5_20
+```
+
+`trading_broker_uat_start|resume|abort` 可能向真实测试账户发单，默认关闭，要求环境白名单、
+名义金额上限和精确确认短语；HTTP/Portal 只有 `broker-uat-runs` 只读查询。两家券商共用同一
+场景定义。`start` 在部分成交后返回 `restart_required`，随后必须在一个新启动的本地 CLI 进程中
+调用 `resume`；同一进程恢复会被拒绝，等待期间可用 `abort` 撤销余单。XTP 和 EMT 必须各自产生
+由 callback 自动判定的有效证据。完整操作步骤和凭据
+隔离要求见[《0.2.0 策略链路迁移、券商 UAT 与旧入口删除手册》](strategy-trading-migration-0.2.md)。
+
 完整契约、安全边界、API 和旧入口删除条件见
 [《策略到交易全链路》](strategy-trading-full-chain.md)。
 

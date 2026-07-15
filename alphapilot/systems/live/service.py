@@ -172,6 +172,27 @@ class LiveSystem(BaseSystem):
 
         return DaemonRuntimeControl(self.config)
 
+    def broker_uat_harness(self, store):  # noqa: ANN001
+        """Build the local-only XTP/EMT UAT harness around the real runtime."""
+
+        from alphapilot.systems.live.broker_uat import BrokerUATHarness
+
+        def runtime_factory(broker: str):
+            return self.create_runtime(
+                mode=RunMode.LIVE,
+                broker=broker,
+                trade_broker=broker,
+                quote_provider=broker,
+                ledger_dir=str(
+                    Path(self.config.ledger_dir).expanduser()
+                    / "broker_uat"
+                    / str(broker).lower()
+                ),
+                require_exchange_calendar=True,
+            )
+
+        return BrokerUATHarness(store, runtime_factory=runtime_factory)
+
     def _trading_day_predicate(
         self,
         *,

@@ -28,6 +28,7 @@ MODULE_ENTRY_POINT_GROUP = "alphapilot.modules"
 # In-tree registries: name -> class path or class.
 _SYSTEM_CLASSES: dict[str, object] = {}
 _MODULE_CLASSES: dict[str, object] = {}
+_STRATEGY_DEFINITION_FACTORIES: list[object] = []
 
 
 def register_system(name: str, cls_or_path: object) -> None:
@@ -38,12 +39,25 @@ def register_module(name: str, cls_or_path: object) -> None:
     _MODULE_CLASSES[name] = cls_or_path
 
 
+def register_strategy_definitions(factory_or_path: object) -> None:
+    """Register a composition-root strategy-definition contribution."""
+
+    _STRATEGY_DEFINITION_FACTORIES.append(factory_or_path)
+
+
 def _resolve(cls_or_path: object) -> type:
     """Resolve a class object or ``pkg.mod.Cls`` string to a class."""
     if isinstance(cls_or_path, str):
         module_path, cls_name = cls_or_path.rsplit(".", 1)
         return getattr(import_module(module_path), cls_name)
     return cls_or_path  # type: ignore[return-value]
+
+
+def _resolve_object(ref: object) -> object:
+    if isinstance(ref, str):
+        module_path, name = ref.rsplit(".", 1)
+        return getattr(import_module(module_path), name)
+    return ref
 
 
 def iter_builtin_systems() -> Iterator[tuple[str, type["BaseSystem"]]]:
@@ -54,6 +68,15 @@ def iter_builtin_systems() -> Iterator[tuple[str, type["BaseSystem"]]]:
 def iter_builtin_modules() -> Iterator[tuple[str, type["BaseModule"]]]:
     for name, ref in _MODULE_CLASSES.items():
         yield name, _resolve(ref)
+
+
+def builtin_strategy_definitions() -> list[object]:
+    definitions: list[object] = []
+    for ref in _STRATEGY_DEFINITION_FACTORIES:
+        factory = _resolve_object(ref)
+        values = factory() if callable(factory) else factory
+        definitions.extend(list(values or []))
+    return definitions
 
 
 def discover_entry_point_classes(group: str) -> Iterator[tuple[str, type]]:
@@ -93,6 +116,12 @@ def _register_builtin_defaults() -> None:
     register_system("notify", "alphapilot.systems.notify.service.NotificationSystem")
     register_system("live", "alphapilot.systems.live.service.LiveSystem")
     register_system("trading", "alphapilot.systems.trading.service.TradingStrategySystem")
+    register_strategy_definitions(
+        "alphapilot.systems.timing.definitions.strategy_definitions"
+    )
+    register_strategy_definitions(
+        "alphapilot.systems.selection.definitions.strategy_definitions"
+    )
     register_module(
         "alpha_mining",
         "alphapilot.modules.alpha_mining.module.AlphaMiningModule",

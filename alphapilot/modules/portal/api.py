@@ -31,6 +31,7 @@ from alphapilot.modules.portal.settings import (
     save_portal_settings,
     settings_path,
 )
+from alphapilot.systems.trading.compatibility import SUNSET_AT
 
 
 def _jsonable(value: Any) -> Any:
@@ -102,12 +103,24 @@ def _trading_operator(
 
 def _deprecated(response: Response, replacement: str) -> None:
     response.headers["Deprecation"] = "true"
+    response.headers["Sunset"] = SUNSET_AT
     response.headers["Link"] = f'<{replacement}>; rel="successor-version"'
 
 
-def _record_legacy_entrypoint(app: FastAPI, entrypoint: str) -> None:
+def _record_legacy_entrypoint(
+    app: FastAPI,
+    entrypoint: str,
+    request: Request | None = None,
+) -> None:
     try:
-        _engine(app).get_system("trading").store.record_legacy_usage(entrypoint)
+        headers = {} if request is None else request.headers
+        _engine(app).get_system("trading").store.record_legacy_usage(
+            entrypoint,
+            client_kind="http",
+            client_version=str(headers.get("user-agent") or ""),
+            source=str(request.client.host if request is not None and request.client else ""),
+            request_id=str(headers.get("x-request-id") or ""),
+        )
     except (AttributeError, KeyError):
         # Lightweight embedded/test engines may intentionally omit trading.
         return
@@ -153,6 +166,13 @@ def _load_engine() -> Any:
 def _engine(app: FastAPI) -> Any:
     if not hasattr(app.state, "engine"):
         app.state.engine = _load_engine()
+    if not getattr(app.state, "legacy_timing_jobs_imported", False):
+        app.state.legacy_timing_jobs_imported = True
+        _safe_call(
+            "legacy timing job import",
+            lambda: _import_completed_timing_jobs(app.state.engine),
+            {"imported": 0},
+        )
     return app.state.engine
 
 
@@ -565,6 +585,47 @@ def _timing_job_artifact_dir(job_id: str) -> tuple[dict[str, Any], dict[str, Any
     return job, summary, artifact_dir
 
 
+def _import_completed_timing_jobs(engine: Any) -> dict[str, Any]:
+    """One-time, idempotent projection of completed 0.1.x jobs into v7 runs."""
+
+    trading = engine.get_system("trading")
+    timing = engine.get_system("timing")
+    imported: list[str] = []
+    skipped: list[dict[str, str]] = []
+    for job in jobs.list_jobs(refresh=False):
+        if job.get("kind") != "timing_backtest" or job.get("status") != "succeeded":
+            continue
+        legacy_job_id = str(job.get("job_id") or "")
+        try:
+            already = trading.store.find_backtest_run_by_legacy_job(legacy_job_id)
+            job_row, summary, artifact_dir = _timing_job_artifact_dir(legacy_job_id)
+            if already is None:
+                request = _timing_request_from_payload(dict(job_row.get("params") or {}))
+                instance = timing.ensure_legacy_replay_instance(request)
+                instance_id = instance["instance_id"]
+            else:
+                instance_id = already["instance_id"]
+            mapped = trading.store.import_legacy_backtest_job(
+                legacy_job_id,
+                instance_id=instance_id,
+                request=dict(job_row.get("params") or {}),
+                result=summary,
+                artifact_dir=str(artifact_dir),
+                details={
+                    "job_status": job_row.get("status"),
+                    "created_at": job_row.get("created_at"),
+                    "finished_at": job_row.get("finished_at"),
+                },
+            )
+            imported.append(mapped["run_id"])
+        except Exception as exc:  # noqa: BLE001 - one corrupt legacy job cannot block Portal
+            skipped.append({
+                "job_id": legacy_job_id,
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+    return {"imported": len(imported), "run_ids": imported, "skipped": skipped}
+
+
 def create_app(
     *,
     static_dir: str | Path | None = None,
@@ -577,6 +638,12 @@ def create_app(
     app = FastAPI(title="AlphaPilot Portal API")
     if engine is not None:
         app.state.engine = engine
+        app.state.legacy_timing_jobs_imported = True
+        _safe_call(
+            "legacy timing job import",
+            lambda: _import_completed_timing_jobs(engine),
+            {"imported": 0},
+        )
     app.state.portal_host = portal_host
     app.state.portal_port = portal_port
     selected_host = str(portal_host or "127.0.0.1")
@@ -1077,10 +1144,10 @@ def create_app(
             raise _api_error(exc) from exc
 
     @app.get("/api/timing/strategies")
-    def timing_strategies(response: Response) -> dict[str, Any]:
+    def timing_strategies(response: Response, request: Request) -> dict[str, Any]:
         try:
             _deprecated(response, "/api/trading/strategy-definitions")
-            _record_legacy_entrypoint(app, "GET /api/timing/strategies")
+            _record_legacy_entrypoint(app, "GET /api/timing/strategies", request)
             strategies = _engine(app).get_system("timing").list_strategies()
             return _jsonable({
                 "strategies": strategies,
@@ -1092,10 +1159,15 @@ def create_app(
             raise _api_error(exc) from exc
 
     @app.post("/api/timing/signal")
-    def timing_signal(response: Response, payload: dict[str, Any], max_rows: int = 500) -> dict[str, Any]:
+    def timing_signal(
+        response: Response,
+        payload: dict[str, Any],
+        request: Request,
+        max_rows: int = 500,
+    ) -> dict[str, Any]:
         try:
             _deprecated(response, "/api/trading/strategy-instances/{id}/preview")
-            _record_legacy_entrypoint(app, "POST /api/timing/signal")
+            _record_legacy_entrypoint(app, "POST /api/timing/signal", request)
             req = _timing_request_from_payload(payload)
             signals = _engine(app).get_system("timing").generate_signals(req)
             return _jsonable(
@@ -1110,14 +1182,18 @@ def create_app(
             raise _api_error(exc) from exc
 
     @app.post("/api/timing/backtest")
-    def timing_backtest(response: Response, payload: dict[str, Any]) -> dict[str, Any]:
+    def timing_backtest(
+        response: Response,
+        payload: dict[str, Any],
+        request: Request,
+    ) -> dict[str, Any]:
         try:
             _deprecated(response, "/api/trading/strategy-instances/{id}/backtest-runs")
-            _record_legacy_entrypoint(app, "POST /api/timing/backtest")
+            _record_legacy_entrypoint(app, "POST /api/timing/backtest", request)
             return _jsonable({
                 **jobs.start_job("timing_backtest", dict(payload)),
                 "deprecated": True,
-                "replacement": "/api/trading/strategy-instances/{id}/backtest",
+                "replacement": "/api/trading/strategy-instances/{id}/backtest-runs",
             })
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
@@ -1126,6 +1202,29 @@ def create_app(
     def trading_strategy_definitions() -> dict[str, Any]:
         try:
             return _jsonable(_engine(app).get_system("trading").list_definitions())
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.get("/api/trading/compatibility")
+    def trading_compatibility() -> dict[str, Any]:
+        try:
+            return _jsonable(_engine(app).get_system("trading").compatibility_status())
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.get("/api/trading/broker-uat-runs")
+    def trading_broker_uat_runs(broker: str | None = None) -> dict[str, Any]:
+        try:
+            return _jsonable({
+                "runs": _engine(app).get_system("trading").list_broker_uat_runs(broker)
+            })
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.get("/api/trading/broker-uat-runs/{run_id}")
+    def trading_broker_uat_run(run_id: str) -> dict[str, Any]:
+        try:
+            return _jsonable(_engine(app).get_system("trading").get_broker_uat_run(run_id))
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
@@ -1230,6 +1329,11 @@ def create_app(
     ) -> dict[str, Any]:
         try:
             _deprecated(response, f"/api/trading/strategy-instances/{instance_id}/backtest-runs")
+            _record_legacy_entrypoint(
+                app,
+                "POST /api/trading/strategy-instances/{id}/backtest",
+                request,
+            )
             operator = _trading_operator(app, request, authorization, reason=str(payload.get("reason") or ""))
             result = _engine(app).get_system("trading").backtest_instance(instance_id, payload)
             _engine(app).get_system("trading").operator_auth.audit(
@@ -1363,6 +1467,49 @@ def create_app(
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
+    @app.post("/api/trading/deployments/{instance_id}/parity-runs")
+    def trading_deployment_parity_run(
+        instance_id: str,
+        payload: dict[str, Any],
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        try:
+            operator = _trading_operator(
+                app,
+                request,
+                authorization,
+                reason=str(payload.get("reason") or "compare REPLAY and SHADOW decisions"),
+            )
+            trading = _engine(app).get_system("trading")
+            result = trading.start_parity_run(instance_id, payload)
+            current = trading.store.get_instance(instance_id)
+            trading.operator_auth.audit(
+                operator,
+                action="run_decision_parity",
+                result=result["status"],
+                instance_id=instance_id,
+                config_hash=current["config_hash"],
+                details={"parity_run_id": result["parity_run_id"]},
+            )
+            return _jsonable(result)
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.get("/api/trading/parity-runs/{run_id}")
+    def trading_parity_run(run_id: str) -> dict[str, Any]:
+        try:
+            return _jsonable(_engine(app).get_system("trading").get_parity_run(run_id))
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.get("/api/trading/deployments/{instance_id}/qualification")
+    def trading_deployment_qualification(instance_id: str) -> dict[str, Any]:
+        try:
+            return _jsonable(_engine(app).get_system("trading").qualification(instance_id))
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
     def _deployment_command(
         instance_id: str,
         action: str,
@@ -1422,6 +1569,11 @@ def create_app(
     ) -> dict[str, Any]:
         try:
             _deprecated(response, f"/api/trading/deployments/{instance_id}/{action}")
+            _record_legacy_entrypoint(
+                app,
+                "POST /api/trading/deployments/{id}/{action}",
+                request,
+            )
             compatibility_payload = dict(payload or {})
             compatibility_payload.setdefault(
                 "reason", "legacy compatibility lifecycle action",
@@ -1451,6 +1603,7 @@ def create_app(
     ) -> dict[str, Any]:
         try:
             _deprecated(response, f"/api/trading/deployments/{instance_id}/start")
+            _record_legacy_entrypoint(app, "POST /api/trading/stage-runs/*", request)
             operator = _trading_operator(app, request, authorization, reason="legacy stage-run start")
             trading = _engine(app).get_system("trading")
             result = trading.start_stage_run(instance_id, stage)
@@ -1472,6 +1625,7 @@ def create_app(
     ) -> dict[str, Any]:
         try:
             _deprecated(response, "/api/trading/deployments/{id}/stop")
+            _record_legacy_entrypoint(app, "POST /api/trading/stage-runs/*", request)
             operator = _trading_operator(app, request, authorization, reason="legacy stage-run finish")
             trading = _engine(app).get_system("trading")
             result = trading.finish_stage_run(run_id, payload)
@@ -1494,6 +1648,7 @@ def create_app(
     ) -> dict[str, Any]:
         try:
             _deprecated(response, f"/api/trading/deployments/{instance_id}/stage-runs")
+            _record_legacy_entrypoint(app, "POST /api/trading/stage-runs/*", request)
             operator = _trading_operator(app, request, authorization, reason="legacy stage evaluation")
             trading = _engine(app).get_system("trading")
             result = trading.evaluate_stage(instance_id, stage)
@@ -1557,8 +1712,15 @@ def create_app(
             raise _api_error(exc) from exc
 
     @app.get("/api/timing/jobs/{job_id}/detail")
-    def timing_job_detail(job_id: str, max_rows: int = 1000) -> dict[str, Any]:
+    def timing_job_detail(
+        job_id: str,
+        response: Response,
+        request: Request,
+        max_rows: int = 1000,
+    ) -> dict[str, Any]:
         try:
+            _deprecated(response, "/api/trading/backtest-runs/{id}/detail")
+            _record_legacy_entrypoint(app, "GET /api/timing/jobs/{id}/detail", request)
             job, summary, artifact_dir = _timing_job_artifact_dir(job_id)
             return _jsonable(
                 {
@@ -2491,10 +2653,12 @@ def create_app(
             raise _api_error(exc) from exc
 
     @app.post("/api/live/daemon/strategy/status")
-    def live_daemon_strategy_status(payload: dict[str, Any], response: Response) -> dict[str, Any]:
+    def live_daemon_strategy_status(
+        payload: dict[str, Any], response: Response, request: Request,
+    ) -> dict[str, Any]:
         try:
             _deprecated(response, "/api/trading/deployments/{id}/status")
-            _record_legacy_entrypoint(app, "/api/live/daemon/strategy/status")
+            _record_legacy_entrypoint(app, "POST /api/live/daemon/strategy/status", request)
             return _jsonable(
                 _live_module().live_daemon_strategy_status(
                     state_dir=payload.get("state_dir"),
@@ -2506,10 +2670,12 @@ def create_app(
             raise _api_error(exc) from exc
 
     @app.post("/api/live/daemon/strategy/start")
-    def live_daemon_strategy_start(payload: dict[str, Any], response: Response) -> dict[str, Any]:
+    def live_daemon_strategy_start(
+        payload: dict[str, Any], response: Response, request: Request,
+    ) -> dict[str, Any]:
         try:
             _deprecated(response, "/api/trading/deployments/{id}/start")
-            _record_legacy_entrypoint(app, "/api/live/daemon/strategy/start")
+            _record_legacy_entrypoint(app, "POST /api/live/daemon/strategy/start", request)
             return _jsonable(
                 _live_module().live_daemon_strategy_start(
                     timing_strategy=str(payload.get("timing_strategy") or payload.get("strategy") or ""),
@@ -2530,10 +2696,12 @@ def create_app(
             raise _api_error(exc) from exc
 
     @app.post("/api/live/daemon/strategy/pause")
-    def live_daemon_strategy_pause(payload: dict[str, Any], response: Response) -> dict[str, Any]:
+    def live_daemon_strategy_pause(
+        payload: dict[str, Any], response: Response, request: Request,
+    ) -> dict[str, Any]:
         try:
             _deprecated(response, "/api/trading/deployments/{id}/pause")
-            _record_legacy_entrypoint(app, "/api/live/daemon/strategy/pause")
+            _record_legacy_entrypoint(app, "POST /api/live/daemon/strategy/pause", request)
             return _jsonable(
                 _live_module().live_daemon_strategy_pause(
                     state_dir=payload.get("state_dir"),
@@ -2545,10 +2713,12 @@ def create_app(
             raise _api_error(exc) from exc
 
     @app.post("/api/live/daemon/strategy/resume")
-    def live_daemon_strategy_resume(payload: dict[str, Any], response: Response) -> dict[str, Any]:
+    def live_daemon_strategy_resume(
+        payload: dict[str, Any], response: Response, request: Request,
+    ) -> dict[str, Any]:
         try:
             _deprecated(response, "/api/trading/deployments/{id}/resume")
-            _record_legacy_entrypoint(app, "/api/live/daemon/strategy/resume")
+            _record_legacy_entrypoint(app, "POST /api/live/daemon/strategy/resume", request)
             return _jsonable(
                 _live_module().live_daemon_strategy_resume(
                     state_dir=payload.get("state_dir"),
@@ -2561,10 +2731,12 @@ def create_app(
             raise _api_error(exc) from exc
 
     @app.post("/api/live/daemon/strategy/stop")
-    def live_daemon_strategy_stop(payload: dict[str, Any], response: Response) -> dict[str, Any]:
+    def live_daemon_strategy_stop(
+        payload: dict[str, Any], response: Response, request: Request,
+    ) -> dict[str, Any]:
         try:
             _deprecated(response, "/api/trading/deployments/{id}/stop")
-            _record_legacy_entrypoint(app, "/api/live/daemon/strategy/stop")
+            _record_legacy_entrypoint(app, "POST /api/live/daemon/strategy/stop", request)
             return _jsonable(
                 _live_module().live_daemon_strategy_stop(
                     state_dir=payload.get("state_dir"),

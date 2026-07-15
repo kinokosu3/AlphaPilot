@@ -742,6 +742,10 @@ def _apply_command(
                 runtime=runtime,
             )
             if runner_holder is not None:
+                resolved_instance_id = (
+                    str((runner.status() if runner is not None else {}).get("instance_id") or "")
+                    or strategy_instance_id
+                )
                 runner_holder["runner"] = runner
                 runner_holder["config"] = _runner_config(
                     timing_strategy=strategy_name,
@@ -750,7 +754,7 @@ def _apply_command(
                     bar_seconds=bar_seconds,
                     min_bars=min_bars,
                     window=window,
-                    instance_id=strategy_instance_id,
+                    instance_id=resolved_instance_id,
                 )
             result["message"] = "strategy_started"
             result["runner_status"] = runner.status() if runner is not None else None
@@ -911,16 +915,14 @@ def _build_timing_runner(
         definition = trading.registry.get(timing_strategy)
         if runtime is not None and bar_source is not None:
             from alphapilot.systems.live.instance_runner import StrategyInstanceRunner
-            from alphapilot.systems.trading.data_adapters import TimingHistoricalDataAdapter
 
             instance = StrategyInstanceConfig.from_dict(config)
             runner = StrategyInstanceRunner(
                 runtime=runtime,
                 trading=trading,
                 instance=instance,
-                historical_data=TimingHistoricalDataAdapter(
-                    kernel_engine.get_system("timing"),
-                    data_dir=str(instance.data_policy.get("data_dir") or "") or None,
+                historical_data=trading.historical_data.with_data_dir(
+                    str(instance.data_policy.get("data_dir") or "") or None
                 ),
                 bar_source=bar_source,
                 bar_seconds=bar_seconds,
@@ -939,9 +941,16 @@ def _build_timing_runner(
                 "frequency": timing_freq,
                 "mode": str(engine.config.mode),
             },
+            client_kind="daemon",
+            client_version="0.1.x",
+            source=str(getattr(runtime, "runtime_id", "") or "local-daemon"),
         )
         definition = trading.registry.get(timing_strategy)
-        strategy = trading.registry.create(timing_strategy, timing_params or {})
+        strategy = (
+            None
+            if runtime is not None and bar_source is not None
+            else trading.registry.create(timing_strategy, timing_params or {})
+        )
     else:
         from alphapilot.systems.timing.strategies import create_strategy
 
@@ -959,7 +968,18 @@ def _build_timing_runner(
         StrategyInstanceConfig.from_dict(stored_instance["config"])
         if stored_instance is not None
         else StrategyInstanceConfig(
-            instance_id=f"legacy-{timing_strategy}-{timing_freq}",
+            instance_id=(
+                f"legacy-paper-{timing_strategy}-"
+                + uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    json.dumps({
+                        "strategy": timing_strategy,
+                        "params": timing_params or {},
+                        "frequency": timing_freq,
+                        "symbols": sorted(symbols),
+                    }, sort_keys=True, separators=(",", ":")),
+                ).hex[:16]
+            ),
             strategy_id=str(timing_strategy),
             strategy_version=str(getattr(definition, "version", "legacy")),
             params=dict(timing_params or {}),
@@ -968,7 +988,15 @@ def _build_timing_runner(
             strategy_code_hash=str(getattr(definition, "code_hash", "") or ""),
         )
     )
-    target_pct = float(instance.params.get("target_percent", 1.0) or 0.0)
+    policy_binding = dict(instance.portfolio_policy or {})
+    policy_params = dict(policy_binding.get("params") or {})
+    target_pct = float(
+        policy_params.get(
+            "target_percent",
+            instance.params.get("target_percent", 1.0),
+        )
+        or 0.0
+    )
     if target_pct > float(engine.config.risk.max_position_pct) + 1e-9:
         raise ValueError(
             f"target_percent {target_pct:.1%} exceeds automated max_position_pct "
@@ -984,6 +1012,26 @@ def _build_timing_runner(
         stored_instance = _prepare_legacy_paper_instance(trading, instance, runtime)
         instance = StrategyInstanceConfig.from_dict(stored_instance["config"])
         legacy_paper_adapter = True
+        if bar_source is not None:
+            from alphapilot.systems.live.instance_runner import StrategyInstanceRunner
+
+            formal_runner = StrategyInstanceRunner(
+                runtime=runtime,
+                trading=trading,
+                instance=instance,
+                historical_data=trading.historical_data.with_data_dir(
+                    str(instance.data_policy.get("data_dir") or "") or None
+                ),
+                bar_source=bar_source,
+                bar_seconds=bar_seconds,
+                store=runtime.execution_journal,
+            )
+            formal_runner.start()
+            journal = runtime.execution_journal
+            if journal.get_active_stage_run(instance.instance_id, stage="paper") is None:
+                journal.start_stage_run(instance.instance_id, "paper")
+            journal.set_route_block("instance", instance.instance_id, active=False)
+            return formal_runner
     route_port = (
         runtime.automated_order_router(
             instance_id=instance.instance_id,
@@ -1003,8 +1051,6 @@ def _build_timing_runner(
     restored = False
     if checkpoint is not None and checkpoint.is_file():
         try:
-            import json
-
             checkpoint_state = json.loads(checkpoint.read_text(encoding="utf-8"))
             if checkpoint_state.get("config_hash") == instance.config_hash:
                 restored = True
@@ -1050,6 +1096,8 @@ def _build_timing_runner(
 def _prepare_legacy_paper_instance(trading: Any, config: Any, runtime: Any) -> dict[str, Any]:
     """Adapt the deprecated strategy-name daemon path to a persisted PAPER instance."""
 
+    from alphapilot.systems.trading.domain import StrategyInstanceConfig
+
     if runtime.route_authorizer is None:
         raise RuntimeError("legacy PAPER automation requires a bound route authorizer")
     store = runtime.execution_journal
@@ -1067,25 +1115,46 @@ def _prepare_legacy_paper_instance(trading: Any, config: Any, runtime: Any) -> d
     try:
         current = store.get_instance(config.instance_id)
     except KeyError:
-        current = store.create_instance(config)
+        normalized = trading.build_instance_config({
+            "instance_id": config.instance_id,
+            "strategy_id": config.strategy_id,
+            "strategy_version": config.strategy_version,
+            "params": dict(config.params),
+            "universe": list(config.universe),
+            "frequency": config.frequency,
+            "data_policy": {
+                **dict(config.data_policy),
+                "feature_adjustment": str(
+                    config.data_policy.get("feature_adjustment") or "backward"
+                ),
+                "legacy_daemon_import": True,
+            },
+        })
+        current = store.create_instance(normalized)
     else:
         if current["strategy_id"] != config.strategy_id:
             raise ValueError(f"reserved legacy instance id {config.instance_id!r} is already in use")
-        if current["config_hash"] != config.config_hash:
-            current = store.update_instance(
-                config.instance_id,
-                {
-                    "strategy_version": config.strategy_version,
-                    "params": config.params,
-                    "universe": list(config.universe),
-                    "frequency": config.frequency,
-                    "data_policy": config.data_policy,
-                    "portfolio_policy": config.portfolio_policy,
-                    "strategy_code_hash": config.strategy_code_hash,
-                    "model_hash": config.model_hash,
-                },
+        requested_params = dict(config.params)
+        persisted_params = dict(current["config"].get("params") or {})
+        requested_target = float(requested_params.pop("target_percent", 1.0))
+        persisted_target = float(
+            (current["config"].get("portfolio_policy") or {}).get("params", {}).get(
+                "target_percent", 1.0,
             )
-    current = store.get_instance(config.instance_id)
+        )
+        if (
+            persisted_params != requested_params
+            or tuple(current["config"].get("universe") or ()) != tuple(config.universe)
+            or str(current["config"].get("frequency")) != str(config.frequency)
+            or abs(persisted_target - requested_target) > 1e-12
+        ):
+            raise ValueError(
+                "legacy daemon parameters changed; create a formal strategy instance instead"
+            )
+    persisted_config = StrategyInstanceConfig.from_dict(current["config"])
+    validation = trading.validate_instance_config(persisted_config)
+    if not validation.get("ok"):
+        raise ValueError("; ".join(validation.get("errors") or []))
     if current["deployment_level"] == "replay":
         store.record_stage(
             config.instance_id,
@@ -1300,6 +1369,17 @@ def run_daemon(
             bar_source=runtime.market_data,
             runtime=runtime,
         )
+        if runner is not None and not strategy_instance_id:
+            resolved_instance_id = str(runner.status().get("instance_id") or "") or None
+            meta["runner"] = _runner_config(
+                timing_strategy=timing_strategy,
+                timing_params=timing_params,
+                timing_freq=timing_freq,
+                bar_seconds=bar_seconds,
+                min_bars=min_bars,
+                window=window,
+                instance_id=resolved_instance_id,
+            )
         if symbols and runner is None:
             runtime.engine.subscribe_market_data(symbols)
         runner_holder = {

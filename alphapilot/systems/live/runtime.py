@@ -11,6 +11,8 @@ long-lived daemon later.
 
 from __future__ import annotations
 
+import hashlib
+import os
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -28,6 +30,7 @@ from alphapilot.systems.live.engine import LiveEngine
 from alphapilot.systems.live.executor import reconcile
 from alphapilot.systems.live.risk import RiskGate
 from alphapilot.systems.live.targets import TargetPortfolio
+from alphapilot.systems.live.redaction import redact_secrets
 from alphapilot.systems.live.market_data import tick_to_dict
 from alphapilot.systems.live.journal import InMemoryExecutionJournal
 from alphapilot.systems.live.routing import AutomatedOrderRouter
@@ -184,7 +187,7 @@ class LiveRuntime:
             except NotImplementedError:
                 report["unsupported"].append(kind)
             except Exception as exc:  # noqa: BLE001 - broker refresh is best-effort
-                error = {"kind": kind, "error": str(exc)}
+                error = {"kind": kind, "error": redact_secrets(str(exc))}
                 report["errors"].append(error)
                 self.engine.ledger.record("refresh_error", error)
             else:
@@ -546,6 +549,21 @@ class LiveRuntime:
         if context.origin == RouteOrigin.AUTOMATED:
             router = AutomatedOrderRouter(self.engine, self.route_authorizer, lambda: context)
             return router.submit(request)
+        if context.origin == RouteOrigin.BROKER_UAT:
+            denial = self._broker_uat_route_denial(request, context)
+            if denial is not None:
+                rule, reason = denial
+                self.engine.ledger.record_event(
+                    "blocked",
+                    {
+                        "origin": RouteOrigin.BROKER_UAT.value,
+                        "rule": rule,
+                        "reason": reason,
+                    },
+                    reference=request.reference,
+                )
+                return None
+            return self.engine.submit(request, origin=RouteOrigin.BROKER_UAT.value)
         blocks = self._manual_route_blocks(context)
         if blocks:
             reason = ", ".join(f"{item['scope_type']}:{item['scope_id']}" for item in blocks)
@@ -580,6 +598,82 @@ class LiveRuntime:
             )
             return None
         return self.engine.submit(request, origin="manual")
+
+    def _broker_uat_route_denial(
+        self,
+        request: OrderRequest,
+        context: RouteContext,
+    ) -> tuple[str, str] | None:
+        """Validate a local-only Broker UAT route against persisted limits.
+
+        The UAT origin is deliberately separate from both manual and automated
+        strategy routing.  It receives no LIVE deployment authority and cannot
+        weaken the normal OMS/risk checks performed by ``engine.submit``.
+        """
+
+        enabled = os.getenv("ALPHAPILOT_BROKER_UAT_ENABLED", "false").strip().lower()
+        if enabled not in {"1", "true", "yes", "on"}:
+            return "uat_disabled", "ALPHAPILOT_BROKER_UAT_ENABLED is not true"
+        run_id = str(context.uat_run_id or "").strip()
+        if not run_id:
+            return "uat_binding", "uat_run_id is required"
+        get_run = getattr(self.execution_journal, "get_broker_uat_run", None)
+        if not callable(get_run):
+            return "uat_state", "durable Broker UAT state is unavailable"
+        try:
+            run = get_run(run_id)
+        except (KeyError, RuntimeError, ValueError) as exc:
+            return "uat_state", str(exc)
+        if run["status"] not in {"created", "running"}:
+            return "uat_state", f"Broker UAT run is {run['status']}"
+        broker = str(self.config.trade_broker or self.config.broker or "").lower()
+        if str(run["broker"]).lower() != broker:
+            return "uat_broker", "runtime broker does not match the UAT run"
+        account = self.engine.oms.account
+        account_id = "" if account is None else str(account.account_id)
+        account_hash = hashlib.sha256(account_id.encode("utf-8")).hexdigest() if account_id else ""
+        if not account_hash or account_hash != str(run["account_hash"]):
+            return "uat_account", "runtime account does not match the UAT run"
+        if request.key != str(run["symbol"]):
+            return "uat_whitelist", f"{request.key} is not the bound UAT symbol"
+        if request.type != OrderType.LIMIT or float(request.price) <= 0:
+            return "uat_price", "Broker UAT requires a positive limit price"
+        notional = float(request.volume) * float(request.price)
+        if notional > float(run["max_notional"]) + 1e-9:
+            return "uat_notional", (
+                f"UAT notional {notional:.2f} exceeds persisted cap "
+                f"{float(run['max_notional']):.2f}"
+            )
+        blocks = self._manual_route_blocks(RouteContext(
+            origin=RouteOrigin.BROKER_UAT,
+            instance_id=f"broker-uat:{run_id}",
+            account_id=account_id,
+            uat_run_id=run_id,
+        ))
+        if blocks:
+            scopes = ", ".join(f"{item['scope_type']}:{item['scope_id']}" for item in blocks)
+            return "kill_switch", f"route blocked by {scopes}"
+        writer_lookup = getattr(self.execution_journal, "active_live_writer", None)
+        writer = writer_lookup(account_id) if callable(writer_lookup) and account_id else None
+        if writer is not None:
+            return "automated_writer_lock", (
+                f"LIVE writer {writer['instance_id']} owns this account"
+            )
+        scenario_version = int(run.get("scenario_version") or 1)
+        allowed_references = (
+            {f"broker-uat/{run_id}/fill", f"broker-uat/{run_id}/remainder"}
+            if scenario_version >= 2
+            else {f"broker-uat/{run_id}/primary"}
+        )
+        expected_reference = str(request.reference)
+        if expected_reference not in allowed_references:
+            return "uat_reference", "reference is not part of the persisted UAT scenario"
+        claim = getattr(self.execution_journal, "claim_broker_uat_route", None)
+        if not callable(claim):
+            return "uat_state", "durable Broker UAT route claims are unavailable"
+        if not bool(claim(run_id, expected_reference, notional)):
+            return "duplicate", "the UAT route was already claimed or exhausted its cap"
+        return None
 
     def _manual_route_blocks(self, context: RouteContext) -> list[dict[str, Any]]:
         lookup = getattr(self.execution_journal, "active_route_blocks", None)
@@ -748,7 +842,15 @@ class LiveRuntime:
             "engine": self.engine.snapshot(),
             "recovery": self.recovery,
             "account": None if account is None else {
-                "account_id": account.account_id,
+                **(
+                    {
+                        "account_id_hash": hashlib.sha256(
+                            str(account.account_id).encode("utf-8")
+                        ).hexdigest(),
+                    }
+                    if uses_real_providers(self.config.mode)
+                    else {"account_id": account.account_id}
+                ),
                 "balance": account.balance,
                 "available": account.available,
                 "frozen": account.frozen,
@@ -799,7 +901,11 @@ class LiveRuntime:
             ],
             "market_data": None if self.market_data is None else self.market_data.recorder.status(),
             "logs": [
-                {"level": log.level, "msg": log.msg, "gateway": log.gateway}
+                {
+                    "level": log.level,
+                    "msg": redact_secrets(log.msg),
+                    "gateway": log.gateway,
+                }
                 for log in list(oms.logs)[-50:]
             ],
             "ledger_tail": self.engine.ledger.events()[-50:],

@@ -68,13 +68,16 @@ alphaforge = [
   "sb3-contrib",
   "shimmy",
 ]
+test = [
+  "coverage>=7.6",
+]
 
 [project.urls]
 homepage = "https://github.com/ai-yang/money_is_all_you_need"
 issue = "https://github.com/ai-yang/money_is_all_you_need/issues"
 
-[tool.setuptools]
-packages = ["alphapilot"]
+[tool.setuptools.packages.find]
+include = ["alphapilot*"]
 
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}

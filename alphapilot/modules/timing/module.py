@@ -46,12 +46,22 @@ class TimingModule(BaseModule):
         return self.context.system("timing")
 
     def _deprecated(self, command: str) -> None:
+        successor = {
+            "timing_strategies": "trading_definitions",
+            "timing_signal": "trading_instance_create + trading_preview",
+            "timing_backtest": "trading_instance_create + trading_backtest --wait",
+        }.get(command, "trading_* instance commands")
         print(
             f"DEPRECATED: {command} is a compatibility command; "
-            "use trading_* instance commands for new workflows."
+            f"successor: {successor}. Removal is planned for 0.2.0."
         )
         try:
-            self.context.system("trading").store.record_legacy_usage(f"CLI {command}")
+            self.context.system("trading").store.record_legacy_usage(
+                f"CLI {command}",
+                client_kind="cli",
+                client_version="0.1.x",
+                source="local",
+            )
         except (AttributeError, KeyError):
             pass
 

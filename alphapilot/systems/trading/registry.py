@@ -71,6 +71,11 @@ class StrategyRegistry:
         definition = self.get(strategy_id)
         merged = schema_defaults(definition.parameter_schema)
         merged.update(params or {})
+        if (
+            definition.signal_kind == SignalKind.INSTRUMENT_TIMING
+            and "target_percent" not in (definition.parameter_schema.get("properties") or {})
+        ):
+            merged.pop("target_percent", None)
         errors = validate_parameters(definition.parameter_schema, merged)
         if errors:
             raise ValueError("; ".join(errors))
@@ -100,6 +105,11 @@ class StrategyRegistry:
         definition = self.get(strategy_id)
         merged = schema_defaults(definition.parameter_schema)
         merged.update(params or {})
+        if (
+            definition.signal_kind == SignalKind.INSTRUMENT_TIMING
+            and "target_percent" not in (definition.parameter_schema.get("properties") or {})
+        ):
+            merged.pop("target_percent", None)
         errors = validate_parameters(definition.parameter_schema, merged)
         if errors:
             raise ValueError("; ".join(errors))
@@ -109,19 +119,28 @@ class StrategyRegistry:
             return V1BatchProviderAdapter(
                 self.create(strategy_id, merged),
                 params=merged,
+                max_history=int((factory_context or {}).get("history_window") or 4096),
             )
         if definition.source != "builtin":
             from alphapilot.systems.trading.worker import PersistentStrategyWorker
 
+            provider_context = {
+                key: value for key, value in (factory_context or {}).items()
+                if key != "history_window"
+            }
             return PersistentStrategyWorker(
                 definition.to_dict()["factory"],
-                {**merged, **(factory_context or {})},
+                {**merged, **provider_context},
                 base=self._local_bases.get(definition.strategy_id),
             )
         factory = definition.factory
         if isinstance(factory, str):
             factory = _load_factory(factory, base=self._local_bases.get(definition.strategy_id))
-        provider = factory(**{**merged, **(factory_context or {})})
+        provider_context = {
+            key: value for key, value in (factory_context or {}).items()
+            if key != "history_window"
+        }
+        provider = factory(**{**merged, **provider_context})
         required = {"initialize", "warmup", "evaluate", "snapshot", "restore", "stop"}
         missing = sorted(name for name in required if not callable(getattr(provider, name, None)))
         if missing:
@@ -229,10 +248,11 @@ class StrategyRegistry:
 
 
 def builtin_definitions() -> list[StrategyDefinition]:
-    """Compatibility discovery without importing timing at module import time."""
+    """Compatibility discovery delegated to the application composition root."""
 
-    module = importlib.import_module("alphapilot.systems.timing.definitions")
-    return list(module.strategy_definitions())
+    from alphapilot.kernel.registry import builtin_strategy_definitions
+
+    return list(builtin_strategy_definitions())
 
 
 def schema_defaults(schema: dict[str, Any]) -> dict[str, Any]:

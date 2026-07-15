@@ -44,6 +44,7 @@ class TimingFixedExposurePolicy:
     target_percent: float = 0.20
     cash_buffer: float = 0.10
     max_position_weight: float = 0.30
+    exposure_mode: str = "per_instrument"
     policy_id: str = "timing_fixed_exposure"
     version: str = "1.0.0"
 
@@ -67,16 +68,27 @@ class TimingFixedExposurePolicy:
         if target < 0 or target > cap + 1e-12:
             raise ValueError("target_percent must be non-negative and <= max_position_weight")
         investable = 1.0 - float(self.cash_buffer)
-        total = target * len(active)
         if investable < 0 or investable > 1:
             raise ValueError("cash_buffer must be between 0 and 1")
-        if total > investable + 1e-12:
-            raise ValueError(
-                f"timing target weights sum to {total:.2%}, above investable {investable:.2%}"
-            )
+        mode = str(self.exposure_mode).strip().lower()
+        if mode == "per_instrument":
+            total = target * len(active)
+            if total > investable + 1e-12:
+                raise ValueError(
+                    f"timing target weights sum to {total:.2%}, above investable {investable:.2%}"
+                )
+            weight = target
+        elif mode == "equal_active_budget":
+            weight = min(target / len(active), cap) if active else 0.0
+            if target > investable + 1e-12:
+                raise ValueError(
+                    f"timing exposure budget {target:.2%} is above investable {investable:.2%}"
+                )
+        else:
+            raise ValueError("exposure_mode must be per_instrument or equal_active_budget")
         return TargetWeights(
             as_of=envelope.as_of,
-            weights={instrument: target for instrument in active},
+            weights={instrument: weight for instrument in active},
             scores=scores,
             policy_id=self.policy_id,
             policy_version=self.version,
