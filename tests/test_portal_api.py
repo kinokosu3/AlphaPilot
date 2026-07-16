@@ -593,6 +593,181 @@ def test_portal_asset_import_export_rejects_paths_outside_important_data(tmp_pat
     assert outside.read_text(encoding="utf-8") == '{"secret": true}'
 
 
+def test_report_factor_upload_extract_and_delete(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    c = client(tmp_path, monkeypatch)
+
+    class ReportFactorApiModule:
+        def ocr_providers(self) -> dict[str, Any]:
+            return {
+                "default_provider": "azure",
+                "modes": ["auto", "local", "azure", "vendor"],
+                "providers": [
+                    {
+                        "provider_id": "azure",
+                        "display_name": "Azure Document Intelligence",
+                        "source": "built_in",
+                    },
+                    {
+                        "provider_id": "vendor",
+                        "display_name": "Vendor OCR",
+                        "source": "entry_point",
+                    },
+                ],
+            }
+
+        def validate_ocr_mode(self, mode: str) -> str:
+            normalized = mode.strip().lower()
+            if normalized not in {"auto", "local", "azure", "vendor"}:
+                raise ValueError(f"Unknown OCR mode/provider {normalized!r}")
+            return normalized
+
+    c.app.state.engine.modules["report_factor"] = ReportFactorApiModule()
+    providers = c.get("/api/report-factors/ocr-providers")
+    assert providers.status_code == 200
+    assert providers.json()["modes"] == ["auto", "local", "azure", "vendor"]
+
+    uploaded = c.post(
+        "/api/report-factors/upload",
+        files={"file": ("research.pdf", b"%PDF-1.7 offline fixture", "application/pdf")},
+    )
+    assert uploaded.status_code == 200
+    upload = uploaded.json()
+    assert upload["file_name"] == "research.pdf"
+    assert Path(upload["source"]).is_file()
+
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_start(kind: str, kwargs: dict[str, Any], **_options: Any) -> dict[str, Any]:
+        calls.append((kind, kwargs))
+        return {"job_id": "report-job", "kind": kind, "status": "running"}
+
+    monkeypatch.setattr(jobs, "start_job", fake_start)
+    started = c.post(
+        "/api/report-factors/extract",
+        json={"source": upload["source"], "ocr_mode": "local"},
+    )
+    assert started.status_code == 200
+    assert started.json()["job_id"] == "report-job"
+    assert calls[0][0] == "report_factor_extract"
+    assert calls[0][1]["source"] == upload["source"]
+
+    unknown = c.post(
+        "/api/report-factors/extract",
+        json={"source": upload["source"], "ocr_mode": "missing"},
+    )
+    assert unknown.status_code == 400
+    assert "Unknown OCR mode/provider" in unknown.json()["detail"]
+
+    deleted = c.delete(f"/api/report-factors/uploads/{upload['upload_id']}")
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted"] is True
+    assert not Path(upload["source"]).exists()
+
+
+def test_report_factor_upload_and_source_guards(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    c = client(tmp_path, monkeypatch)
+    bad_upload = c.post(
+        "/api/report-factors/upload",
+        files={"file": ("fake.pdf", b"not really a pdf", "application/pdf")},
+    )
+    assert bad_upload.status_code == 400
+
+    traversal = c.post(
+        "/api/report-factors/upload",
+        files={"file": ("../escape.pdf", b"%PDF-1.7", "application/pdf")},
+    )
+    assert traversal.status_code == 400
+
+    wrong_extension = c.post(
+        "/api/report-factors/upload",
+        files={"file": ("report.txt", b"%PDF-1.7", "application/pdf")},
+    )
+    assert wrong_extension.status_code == 400
+
+    monkeypatch.setenv("ALPHAPILOT_REPORT_FACTOR_MAX_UPLOAD_MB", "1")
+    oversized = c.post(
+        "/api/report-factors/upload",
+        files={"file": ("large.pdf", b"%PDF-1.7" + b"x" * (1024 * 1024), "application/pdf")},
+    )
+    assert oversized.status_code == 400
+
+    outside = tmp_path / "outside.pdf"
+    outside.write_bytes(b"%PDF-1.7 outside")
+    bad_source = c.post(
+        "/api/report-factors/extract",
+        json={"source": str(outside), "ocr_mode": "local"},
+    )
+    assert bad_source.status_code == 400
+
+    legacy = c.post(
+        "/api/factors/import",
+        json={"kind": "pdf", "source": str(outside)},
+    )
+    assert legacy.status_code == 422
+
+
+def test_report_factor_commit_checks_job_membership(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    c = client(tmp_path, monkeypatch)
+    calls: list[tuple[str, list[dict[str, Any]]]] = []
+
+    class ReportFactorModule:
+        def commit_factors(self, job_id: str, factors: list[dict[str, Any]]) -> dict[str, Any]:
+            calls.append((job_id, factors))
+            return {
+                "job_id": job_id,
+                "committed": factors,
+                "rejected": [],
+                "n_requested": len(factors),
+                "n_committed": len(factors),
+                "n_rejected": 0,
+            }
+
+    c.app.state.engine.modules["report_factor"] = ReportFactorModule()
+    monkeypatch.setattr(
+        jobs,
+        "get_job",
+        lambda _job_id: {"job_id": "report-job", "kind": "report_factor_extract", "status": "succeeded"},
+    )
+    monkeypatch.setattr(
+        jobs,
+        "read_result",
+        lambda _job_id: {"result": {"factors": [{"draft_id": "draft-1"}]}},
+    )
+
+    committed = c.post(
+        "/api/report-factors/commit",
+        json={
+            "job_id": "report-job",
+            "factors": [
+                {
+                    "draft_id": "draft-1",
+                    "factor_name": "momentum",
+                    "factor_expression": "$close/Ref($close,5)-1",
+                    "categories": ["report"],
+                }
+            ],
+        },
+    )
+    assert committed.status_code == 200
+    assert committed.json()["n_committed"] == 1
+    assert calls[0][0] == "report-job"
+
+    unknown = c.post(
+        "/api/report-factors/commit",
+        json={
+            "job_id": "report-job",
+            "factors": [
+                {
+                    "draft_id": "not-from-job",
+                    "factor_name": "bad",
+                    "factor_expression": "$close",
+                }
+            ],
+        },
+    )
+    assert unknown.status_code == 400
+
+
 def test_portal_asset_repo_relative_path_follows_relocated_important_data(tmp_path, monkeypatch) -> None:  # noqa: ANN001
     c = client(tmp_path, monkeypatch)
     response = c.post("/api/factors/export", json={"output_path": "important_data/factor_zoo/export.csv"})

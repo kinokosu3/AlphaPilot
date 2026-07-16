@@ -184,6 +184,7 @@ EXPECTED_MODULES: frozenset[str] = frozenset(
         "platform",
         "portal",
         "qlib_yaml",
+        "report_factor",
         "stock_pool",
         "strategy_backtest",
         "timing",

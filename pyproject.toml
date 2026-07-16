@@ -46,6 +46,7 @@ notify = "alphapilot.systems.notify.service:NotificationSystem"
 
 [project.entry-points."alphapilot.modules"]
 alpha_mining = "alphapilot.modules.alpha_mining.module:AlphaMiningModule"
+report_factor = "alphapilot.modules.report_factor.module:ReportFactorModule"
 platform = "alphapilot.modules.platform.module:PlatformModule"
 portal = "alphapilot.modules.portal.module:PortalModule"
 data_viz = "alphapilot.modules.data_viz.module:DataVizModule"

@@ -59,6 +59,17 @@ describe("api client", () => {
     expect(init.body).toBe("{}");
   });
 
+  it("uploads FormData without overriding the multipart content type", async () => {
+    const fetchMock = mockFetch({ json: { upload_id: "u1" } });
+    const form = new FormData();
+    form.append("file", new Blob(["%PDF-1.7"]), "report.pdf");
+    await api.upload("/api/report-factors/upload", form);
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.method).toBe("POST");
+    expect(init.body).toBe(form);
+    expect(new Headers(init.headers).has("Content-Type")).toBe(false);
+  });
+
   it("PATCH and DELETE use the right verbs", async () => {
     const fetchMock = mockFetch({ json: {} });
     await api.patch("/api/notify", { config: {} });

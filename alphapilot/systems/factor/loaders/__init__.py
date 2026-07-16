@@ -6,12 +6,9 @@ from alphapilot.systems.factor.loaders.json_loader import (
     FactorExperimentLoaderFromJsonString,
     FactorTestCaseLoaderFromJsonFile,
 )
-from alphapilot.systems.factor.loaders.pdf_loader import FactorExperimentLoaderFromPDFfiles
-
 __all__ = [
     "FactorExperimentLoaderFromDict",
     "FactorExperimentLoaderFromJsonFile",
     "FactorExperimentLoaderFromJsonString",
-    "FactorExperimentLoaderFromPDFfiles",
     "FactorTestCaseLoaderFromJsonFile",
 ]

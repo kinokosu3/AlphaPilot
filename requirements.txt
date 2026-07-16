@@ -1,5 +1,6 @@
 # Requirements for runtime.
 pydantic-settings
+python-multipart
 
 python-Levenshtein
 filelock

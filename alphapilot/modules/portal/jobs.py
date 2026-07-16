@@ -39,6 +39,7 @@ ALPHAFORGE_JOBS: dict[str, tuple[str, str]] = {
 
 VALID_KINDS = {
     "mine",
+    "report_factor_extract",
     "factor_backtest",
     "strategy_backtest",
     "daily_signals",
@@ -266,6 +267,11 @@ def _run_target(kind: JobKind, kwargs: dict[str, Any]) -> Any:
     engine = build_engine(discover=True)
     if kind == "mine":
         return engine.get_module("alpha_mining").run_mining(**kwargs)
+    if kind == "report_factor_extract":
+        return engine.get_module("report_factor").extract_pdf(
+            **kwargs,
+            progress_callback=update_current_job_progress,
+        )
     if kind == "factor_backtest":
         return engine.get_module("alpha_mining").run_backtest(**kwargs)
     if kind == "strategy_backtest":

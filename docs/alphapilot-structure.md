@@ -51,7 +51,7 @@
 | **策略管理系统** | `alphapilot/systems/strategy/` | 策略资产落盘（`important_data/strategy_zoo/`）、`backtest_from_asset` 复测编排（经 `strategy/backtest.py` 委托 backtest 系统，不依赖 `alpha_mining` 模块） |
 | **策略复测模块** | `alphapilot/modules/strategy_backtest/` | CLI：`strategy_backtest` / `strategy_backtest_list` |
 | **交易回测系统** | `alphapilot/systems/backtest/` | 因子/模型回测（统一由 system 内部 qlib workspace 执行）、结果存取（`BacktestResultStore`） |
-| **模块 modules** | `alphapilot/modules/` | 可插拔特性；内置 `alpha_mining`、`portal`、`platform`、`data_viz` 等 |
+| **模块 modules** | `alphapilot/modules/` | 可插拔特性；内置 `alpha_mining`、`report_factor`、`portal`、`platform`、`data_viz` 等 |
 | **Web 门户** | `alphapilot/modules/portal/` | FastAPI（`api.py`）+ React/TypeScript 前端（`web/`） |
 
 四大系统通过 `adapters/` 保持外部边界可替换（当前重点为 LLM/数据源）。回测默认由 backtest system 内聚的 qlib 执行链路统一承载；系统服务内部对 qlib/baostock/pandas 采用惰性导入，因此内核装配与命令发现保持轻量。
@@ -172,12 +172,44 @@ flowchart TB
 | `coder/data_science/` | 数据科学流水线占位模块 |
 | `proposal/` | 通用 proposal 提示词 |
 | `loader/` | 从任务/实验定义加载数据 |
-| `document_reader/` | 读 PDF 等文档（研报抽因子用） |
+| `document_reader/` | 旧模型/策略 PDF 读取组件；研报因子提取使用独立 `modules/report_factor/readers/` |
 | `knowledge_management/` | 向量库等知识检索 |
 | `runner/` | 运行器相关抽象 |
 | `benchmark/` | 评测基类与 `TestCase`（`systems/factor/loaders` 等会引用）；因子代码生成批量评测需自写脚本调用 `FactorImplementEval` |
 
 > 历史路径 `alphapilot/app/benchmark/`（手动 `eval.py` / `analysis.py`）已移除，不参与 `mine` / `backtest` CLI。
+
+### `modules/report_factor/` — PDF 研报因子提取
+
+该模块将 PDF 逐页解析、可插拔 OCR、LLM 因子抽取和 AlphaPilot DSL
+校验封装为独立的 JSON 草稿流程。Portal 中的研报提取必须经过人工审核后才调用
+`FactorSystem.add_factor`；模块不依赖 `FactorTask`、`QlibFactorExperiment`、回测、
+策略或实盘系统。
+
+OCR 扩展契约位于 `readers/ocr.py`：适配器继承 `OCRProvider`，将服务商结果转换为
+带页码的 `PDFReadResult`，并通过 `OCRProviderRegistry` 惰性创建。内置 Azure 只是
+一个 Provider；`auto` 模式使用环境变量 `ALPHAPILOT_REPORT_FACTOR_OCR_PROVIDER`
+指定的默认 Provider（默认 `azure`）。Portal 通过
+`GET /api/report-factors/ocr-providers` 动态展示当前可用模式。
+
+外部包可使用 Python entry point 接入，后台任务子进程会自动发现，核心提取服务
+无需修改：
+
+```toml
+[project.entry-points."alphapilot.report_factor.ocr_providers"]
+vendor = "my_ocr_package:VendorOCRProvider"
+```
+
+entry point 必须返回 `OCRProvider` 实例，或指向可无参构造的 `OCRProvider` 子类/
+工厂。凭据、SDK 惰性导入、重试和厂商响应映射均由适配器自身负责；Provider ID
+必须与 entry point 名称一致。直接调用模块时也可使用
+`ReportFactorModule.register_ocr_provider()` 注册工厂，但 Portal 的 spawn 后台任务
+应使用 entry point，才能跨进程生效。
+
+旧的 `FactorSystem.import_factors(kind="pdf")` 和
+`ALPHAPILOT_FACTOR_PDF_LOADER_CLASS` 已移除。CSV/JSON 导入契约保持不变；PDF
+调用方应迁移到 `/api/report-factors/upload`、`/api/report-factors/extract` 和
+`/api/report-factors/commit`。
 
 ### `modules/alpha_mining/qlib/` — Qlib 因子/模型场景（本仓库最核心）
 
@@ -196,7 +228,6 @@ flowchart TB
 | `experiment/template_paths.py` | 解析 `QLIB_FACTOR_QLIB_TEMPLATE_DIR`；默认或自定义目录拷入 workspace |
 | `experiment/factor_data_template/` | 旧版因子数据模板；当前主要由 factor h5 cache 供因子计算 |
 | `experiment/workspace.py` | 每次实验的工作目录 |
-| `factor_experiment_loader/` | 从 JSON / PDF 加载已有因子定义 |
 | `regulator/` | 因子合规/质量检查 |
 | `docker/` | 可选 Docker 回测环境 |
 | `prompts_*.yaml` | 各阶段 LLM 提示词 |

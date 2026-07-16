@@ -828,6 +828,53 @@ type FactorValidationResponse = {
   message?: string;
   details?: Record<string, unknown> | null;
 };
+type ReportFactorUpload = {
+  upload_id: string;
+  source: string;
+  file_name: string;
+  size: number;
+  sha256: string;
+};
+type ReportFactorOcrProviders = {
+  default_provider: string;
+  modes: string[];
+  providers: Array<{ provider_id: string; display_name: string; source: string }>;
+};
+type ReportFactorDraft = {
+  draft_id: string;
+  factor_name: string;
+  description: string;
+  formulation: string;
+  variables: Record<string, string>;
+  factor_expression: string | null;
+  source_pages: number[];
+  evidence: string[];
+  viability: { status: "viable" | "unviable" | "unknown"; reason: string };
+  validation: FactorValidationResponse;
+  warnings: string[];
+};
+type ReportFactorExtraction = {
+  schema_version: string;
+  report: {
+    file_name: string;
+    sha256: string;
+    page_count: number;
+    parser: string;
+    ocr_used: boolean;
+    classification: { relevant?: boolean | null; label: string; reason: string };
+  };
+  summary: string;
+  factors: ReportFactorDraft[];
+  warnings: string[];
+};
+type ReportFactorReview = ReportFactorDraft & { selected: boolean; categoriesText: string };
+type ReportFactorCommitResult = {
+  n_requested: number;
+  n_committed: number;
+  n_rejected: number;
+  committed: Array<Record<string, unknown>>;
+  rejected: Array<Record<string, unknown>>;
+};
 
 function factorValidationMessage(result: FactorValidationResponse): string {
   const message = typeof result.message === "string" && result.message.trim() ? result.message.trim() : "";
@@ -841,6 +888,10 @@ export function LibraryPage() {
   const factors = useAsync(() => api.get<{ factors: Factor[]; categories: string[]; supports_categories: boolean }>("/api/factors"), []);
   const strategies = useAsync(() => api.get<{ strategies: Array<Record<string, unknown>>; names: string[] }>("/api/strategies"), []);
   const instrumentSets = useAsync(() => api.get<{ sets: string[] }>("/api/data/instrument-sets"), []);
+  const reportOcrProviders = useAsync(
+    () => api.get<ReportFactorOcrProviders>("/api/report-factors/ocr-providers"),
+    [],
+  );
   const poolNames = instrumentSets.data?.sets || [];
   const libraryBtSpecs = useMemo(() => withInstrumentSetOptions(factorLibraryBacktestSpecs, poolNames), [instrumentSets.data]);
   const createStrategySpecs = useMemo(() => withInstrumentSetOptions(createStrategyFromFactorsSpecs, poolNames), [instrumentSets.data]);
@@ -860,6 +911,19 @@ export function LibraryPage() {
   const [exportPath, setExportPath] = useState("important_data/factor_zoo/factor_zoo.csv");
   const [importKind, setImportKind] = useState("csv");
   const [importSource, setImportSource] = useState("");
+  const [reportFile, setReportFile] = useState<File | null>(null);
+  const [reportSource, setReportSource] = useState("");
+  const [reportUploadId, setReportUploadId] = useState("");
+  const [reportMarket, setReportMarket] = useState("China A-share");
+  const [reportFrequency, setReportFrequency] = useState("daily");
+  const [reportAvailableData, setReportAvailableData] = useState("daily OHLCV and turnover, financial statements, stock fundamentals, minute OHLCV, analyst consensus expectations");
+  const [reportOcrMode, setReportOcrMode] = useState("auto");
+  const [reportJob, setReportJob] = useState<Job | null>(null);
+  const [reportProgress, setReportProgress] = useState<JobProgress | null>(null);
+  const [reportResult, setReportResult] = useState<ReportFactorExtraction | null>(null);
+  const [reportDrafts, setReportDrafts] = useState<ReportFactorReview[]>([]);
+  const [reportError, setReportError] = useState("");
+  const [reportCommitResult, setReportCommitResult] = useState<ReportFactorCommitResult | null>(null);
   const factorBacktestAdvanced = useJsonInput("{}");
   const factorBacktestForm = useParamForm(libraryBtSpecs, factorBacktestAdvanced.raw);
   const [strategyName, setStrategyName] = useState("");
@@ -872,6 +936,9 @@ export function LibraryPage() {
   const createStrategyForm = useParamForm(createStrategySpecs);
   const [dupResult, setDupResult] = useState<DuplicatesResult | null>(null);
   const [dupDelete, setDupDelete] = useState<Record<string, boolean>>({});
+  const reportOcrModes = reportOcrProviders.data?.modes?.length
+    ? reportOcrProviders.data.modes
+    : ["auto", "local", "azure"];
   const filtered = useMemo(() => {
     const q = search.toLowerCase();
     return (factors.data?.factors || []).filter((f) => {
@@ -887,8 +954,117 @@ export function LibraryPage() {
     return counts;
   }, [factors.data]);
 
+  useEffect(() => {
+    if (!reportJob?.job_id) return;
+    const jobId = reportJob.job_id;
+    let alive = true;
+    let timer: number | undefined;
+    const poll = async () => {
+      let terminal = false;
+      try {
+        const progress = await api.get<JobProgress>(`/api/jobs/${jobId}/progress`);
+        if (!alive) return;
+        setReportProgress(progress);
+        const status = progress.status || "";
+        if (["succeeded", "failed", "cancelled", "lost"].includes(status)) {
+          terminal = true;
+          if (status === "succeeded") {
+            const wrapped = await api.get<{ result: ReportFactorExtraction }>(`/api/jobs/${jobId}/result`);
+            if (!alive) return;
+            if (!wrapped?.result) throw new Error(t("reportResultMissing"));
+            setReportResult(wrapped.result);
+            setReportDrafts((wrapped.result.factors || []).map((item) => ({ ...item, selected: false, categoriesText: "" })));
+            setReportError("");
+          } else {
+            setReportError(progress.message || status);
+          }
+          if (alive) setReportJob(null);
+        }
+      } catch (error) {
+        if (alive) setReportError(error instanceof Error ? error.message : String(error));
+      }
+      if (alive && !terminal) timer = window.setTimeout(poll, 1500);
+    };
+    void poll();
+    return () => {
+      alive = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [reportJob?.job_id, t]);
+
   function toggleFactor(factorName: string) {
     setSelectedFactors((current) => current.includes(factorName) ? current.filter((name) => name !== factorName) : [...current, factorName]);
+  }
+
+  function startReportFactorExtraction() {
+    void run(async () => {
+      let source = reportSource.trim();
+      if (reportFile) {
+        const form = new FormData();
+        form.append("file", reportFile);
+        const uploaded = await api.upload<ReportFactorUpload>("/api/report-factors/upload", form);
+        source = uploaded.source;
+        setReportSource(uploaded.source);
+        setReportUploadId(uploaded.upload_id);
+      }
+      if (!source) throw new Error(t("reportSourceRequired"));
+      const availableData = reportAvailableData.split(",").map((item) => item.trim()).filter(Boolean);
+      const job = await api.post<Job>("/api/report-factors/extract", {
+        source,
+        market: reportMarket,
+        frequency: reportFrequency,
+        available_data: availableData,
+        ocr_mode: reportOcrMode,
+      });
+      setReportJob(job);
+      setReportProgress(job.progress || { job_id: job.job_id, status: job.status, percent: 0, stage: "queued", message: "queued" });
+      setReportResult(null);
+      setReportDrafts([]);
+      setReportCommitResult(null);
+      setReportError("");
+    }, t("reportExtractionStarted"));
+  }
+
+  function updateReportDraft(draftId: string, patch: Partial<ReportFactorReview>) {
+    setReportDrafts((current) => current.map((item) => item.draft_id === draftId ? { ...item, ...patch } : item));
+  }
+
+  function validateReportDraft(draft: ReportFactorReview) {
+    void run(async () => {
+      const validationResult = await api.post<FactorValidationResponse>("/api/factors/validate", { expression: draft.factor_expression || "" });
+      updateReportDraft(draft.draft_id, { validation: validationResult });
+    }, t("validate"));
+  }
+
+  async function commitReportFactors() {
+    const selected = reportDrafts.filter((item) => item.selected);
+    if (!selected.length) return;
+    if (!(await confirm({ message: `${t("reportCommitConfirm")} ${selected.length} ${t("factorsUnit")}?` }))) return;
+    void run(async () => {
+      if (!reportProgress?.job_id) throw new Error(t("reportResultMissing"));
+      const result = await api.post<ReportFactorCommitResult>("/api/report-factors/commit", {
+        job_id: reportProgress.job_id,
+        factors: selected.map((item) => ({
+          draft_id: item.draft_id,
+          factor_name: item.factor_name,
+          factor_expression: item.factor_expression || "",
+          categories: item.categoriesText.split(",").map((category) => category.trim()).filter(Boolean),
+        })),
+      });
+      setReportCommitResult(result);
+      await factors.refresh();
+    }, t("reportCommitDone"));
+  }
+
+  async function deleteReportUpload() {
+    if (!reportUploadId) return;
+    if (!(await confirm({ message: t("reportDeleteUploadConfirm"), danger: true }))) return;
+    void run(async () => {
+      await api.delete(`/api/report-factors/uploads/${encodeURIComponent(reportUploadId)}`);
+      setReportUploadId("");
+      setReportFile(null);
+      setReportSource("");
+    }, t("delete"));
   }
 
   function addFactor() {
@@ -1144,6 +1320,116 @@ export function LibraryPage() {
                 <JsonTextArea value={factorBacktestAdvanced.raw} onChange={factorBacktestAdvanced.setRaw} rows={5} />
               </details>
             </details>
+            <section className="panel inset">
+              <div className="panel-head">
+                <div>
+                  <h3>{t("reportFactorTitle")}</h3>
+                  <span className="muted">{t("reportFactorSubtitle")}</span>
+                </div>
+                {reportResult ? <span className="muted">{reportResult.report.file_name} · {reportResult.report.page_count} pages</span> : null}
+              </div>
+              <div className="dynamic-form cols-2">
+                <label>
+                  {t("reportPdfFile")}
+                  <input type="file" accept=".pdf,application/pdf" onChange={(event) => setReportFile(event.target.files?.[0] || null)} />
+                </label>
+                <label>
+                  {t("reportServerPath")}
+                  <input value={reportSource} onChange={(event) => setReportSource(event.target.value)} placeholder="important_data/reports/report.pdf" />
+                </label>
+                <label>
+                  {t("reportMarket")}
+                  <input value={reportMarket} onChange={(event) => setReportMarket(event.target.value)} />
+                </label>
+                <label>
+                  {t("reportFrequency")}
+                  <input value={reportFrequency} onChange={(event) => setReportFrequency(event.target.value)} />
+                </label>
+                <label>
+                  {t("reportOcrMode")}
+                  <select value={reportOcrMode} onChange={(event) => setReportOcrMode(event.target.value)}>
+                    {reportOcrModes.map((mode) => <option key={mode} value={mode}>{mode}</option>)}
+                  </select>
+                </label>
+                <label>
+                  {t("reportAvailableData")}
+                  <textarea rows={3} value={reportAvailableData} onChange={(event) => setReportAvailableData(event.target.value)} />
+                </label>
+              </div>
+              <div className="toolbar below">
+                <button className="button primary" disabled={busy || Boolean(reportJob)} onClick={() => startReportFactorExtraction()}>
+                  {busy || reportJob ? <Spinner /> : null}{t("reportStartExtraction")}
+                </button>
+                {reportUploadId ? <button className="button danger" disabled={busy || Boolean(reportJob)} onClick={() => void deleteReportUpload()}>{t("reportDeleteUpload")}</button> : null}
+              </div>
+              {reportProgress ? (
+                <ProgressBar
+                  percent={reportProgress.percent}
+                  active={Boolean(reportJob)}
+                  label={`${reportProgress.stage}${reportProgress.message ? ` · ${reportProgress.message}` : ""}`}
+                />
+              ) : null}
+              {reportError ? <Alert tone="error">{reportError}</Alert> : null}
+              {reportResult ? (
+                <>
+                  <p>{reportResult.summary || t("reportNoSummary")}</p>
+                  <p className="muted">
+                    {t("reportParser")}: {reportResult.report.parser} · OCR: {reportResult.report.ocr_used ? "yes" : "no"} · {reportResult.report.classification.label}
+                  </p>
+                  {(reportResult.warnings || []).map((warning, index) => <Alert key={index} tone="info">{warning}</Alert>)}
+                  <div className="toolbar below">
+                    <button className="button small" onClick={() => setReportDrafts((current) => current.map((item) => ({ ...item, selected: true })))}>{t("selectAllList")}</button>
+                    <button className="button small" onClick={() => setReportDrafts((current) => current.map((item) => ({ ...item, selected: false })))}>{t("clearSelection")}</button>
+                    <button className="button primary" disabled={busy || !reportDrafts.some((item) => item.selected)} onClick={() => void commitReportFactors()}>{t("reportCommitSelected")}</button>
+                  </div>
+                  {reportDrafts.length === 0 ? <p className="muted">{t("reportNoFactors")}</p> : null}
+                  {reportDrafts.map((draft) => (
+                    <div className="dup-group" key={draft.draft_id}>
+                      <label className="inline-check">
+                        <input className="row-check" type="checkbox" checked={draft.selected} onChange={() => updateReportDraft(draft.draft_id, { selected: !draft.selected })} />
+                        <strong>{draft.factor_name}</strong>
+                        <StatusPill status={draft.validation?.acceptable ? "succeeded" : "failed"} />
+                      </label>
+                      <div className="dynamic-form cols-2">
+                        <label>
+                          {t("colName")}
+                          <input value={draft.factor_name} onChange={(event) => updateReportDraft(draft.draft_id, { factor_name: event.target.value })} />
+                        </label>
+                        <label>
+                          {t("colCategories")}
+                          <input value={draft.categoriesText} onChange={(event) => updateReportDraft(draft.draft_id, { categoriesText: event.target.value })} placeholder={t("categoriesCommaPh")} />
+                        </label>
+                      </div>
+                      <p>{draft.description}</p>
+                      <p className="muted">{t("reportPages")}: {draft.source_pages.join(", ")} · {draft.viability.status}: {draft.viability.reason}</p>
+                      {draft.formulation ? <pre className="inline-json">{draft.formulation}</pre> : null}
+                      {(draft.evidence || []).map((evidence, index) => <blockquote key={index}>{evidence}</blockquote>)}
+                      <label>
+                        AlphaPilot DSL
+                        <textarea
+                          rows={3}
+                          value={draft.factor_expression || ""}
+                          onChange={(event) => updateReportDraft(draft.draft_id, {
+                            factor_expression: event.target.value,
+                            validation: { acceptable: false, code: "not_validated", message: t("reportNeedsValidation") },
+                          })}
+                        />
+                      </label>
+                      <div className="toolbar below">
+                        <button className="button small" disabled={busy} onClick={() => validateReportDraft(draft)}>{t("validate")}</button>
+                        <span className="muted">{draft.validation?.code}: {draft.validation?.message}</span>
+                      </div>
+                      {(draft.warnings || []).map((warning, index) => <p className="muted" key={index}>{warning}</p>)}
+                    </div>
+                  ))}
+                  {reportCommitResult ? (
+                    <Alert tone={reportCommitResult.n_rejected ? "error" : "success"}>
+                      {t("reportCommitSummary")}: {reportCommitResult.n_committed}/{reportCommitResult.n_requested}; {t("reportRejected")}: {reportCommitResult.n_rejected}
+                    </Alert>
+                  ) : null}
+                </>
+              ) : null}
+            </section>
           </section>
           <aside className="panel">
             <div className="panel-head compact">
@@ -1201,7 +1487,6 @@ export function LibraryPage() {
             <select value={importKind} onChange={(e) => setImportKind(e.target.value)}>
               <option value="csv">CSV</option>
               <option value="json">JSON</option>
-              <option value="pdf">PDF</option>
             </select>
             <input placeholder={t("importSourcePh")} value={importSource} onChange={(e) => setImportSource(e.target.value)} />
             <button className="button" disabled={busy} onClick={() => void run(async () => { await api.post("/api/factors/import", { kind: importKind, source: importSource }); await factors.refresh(); }, t("importFactors"))}>{t("importFactors")}</button>

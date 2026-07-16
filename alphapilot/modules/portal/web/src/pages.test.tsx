@@ -98,6 +98,13 @@ function mockPortalFetch({
     if (path === "/api/strategies" && (!init || init.method === undefined)) {
       return Response.json({ strategies, names: strategies.map((strategy) => strategy.strategy_name) });
     }
+    if (path === "/api/report-factors/ocr-providers") {
+      return Response.json({
+        default_provider: "azure",
+        modes: ["auto", "local", "azure"],
+        providers: [{ provider_id: "azure", display_name: "Azure Document Intelligence", source: "built_in" }],
+      });
+    }
     if (path === "/api/factors" && init?.method === "POST") {
       return Response.json({
         acceptable: false,
@@ -204,6 +211,74 @@ describe("LibraryPage factor add", () => {
     expect(nameInput).toHaveValue("new_factor");
     expect(expressionInput).toHaveValue("$close / $open");
     expect(fetchMock.mock.calls.filter(([path, init]) => String(path) === "/api/factors" && init?.method === "POST")).toHaveLength(1);
+  });
+
+  it("reviews extracted PDF factors before explicitly committing them", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === "/api/factors" && (!init || init.method === undefined)) {
+        return Response.json({ factors: [], categories: [], supports_categories: true });
+      }
+      if (path === "/api/strategies") return Response.json({ strategies: [], names: [] });
+      if (path === "/api/data/instrument-sets") return Response.json({ sets: [] });
+      if (path === "/api/report-factors/ocr-providers") {
+        return Response.json({
+          default_provider: "azure",
+          modes: ["auto", "local", "azure", "vendor"],
+          providers: [{ provider_id: "vendor", display_name: "Vendor OCR", source: "entry_point" }],
+        });
+      }
+      if (path === "/api/report-factors/extract" && init?.method === "POST") {
+        return Response.json({ job_id: "report-job", kind: "report_factor_extract", status: "running" });
+      }
+      if (path === "/api/jobs/report-job/progress") {
+        return Response.json({ job_id: "report-job", status: "succeeded", percent: 100, stage: "done" });
+      }
+      if (path === "/api/jobs/report-job/result") {
+        return Response.json({ result: {
+          schema_version: "1.0",
+          report: { file_name: "research.pdf", sha256: "abc", page_count: 2, parser: "pypdf", ocr_used: false, classification: { relevant: true, label: "quant_factor_research", reason: "factor study" } },
+          summary: "Momentum report",
+          warnings: [],
+          factors: [{
+            draft_id: "draft-1", factor_name: "momentum_5d", description: "five-day momentum",
+            formulation: "P_t/P_{t-5}-1", variables: { P: "close" }, factor_expression: "$close/Ref($close,5)-1",
+            source_pages: [2], evidence: ["five-day momentum"], viability: { status: "viable", reason: "daily close exists" },
+            validation: { acceptable: true, code: "ok", message: "valid" }, warnings: [],
+          }],
+        } });
+      }
+      if (path === "/api/factors/validate" && init?.method === "POST") {
+        return Response.json({ acceptable: true, code: "ok", message: "valid" });
+      }
+      if (path === "/api/report-factors/commit" && init?.method === "POST") {
+        return Response.json({ n_requested: 1, n_committed: 1, n_rejected: 0, committed: [], rejected: [] });
+      }
+      return Response.json({}, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    renderLibraryPage();
+
+    const ocrMode = await screen.findByLabelText("OCR 模式");
+    await screen.findByRole("option", { name: "vendor" });
+    fireEvent.change(ocrMode, { target: { value: "vendor" } });
+    fireEvent.change(await screen.findByLabelText("服务器 PDF 路径"), { target: { value: "important_data/research.pdf" } });
+    fireEvent.click(screen.getByRole("button", { name: "开始提取" }));
+    const factorName = await screen.findByDisplayValue("momentum_5d");
+    const card = factorName.closest(".dup-group") as HTMLElement;
+    fireEvent.click(within(card).getByRole("checkbox"));
+    fireEvent.click(within(card).getByRole("button", { name: "校验" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([path]) => String(path) === "/api/factors/validate")).toBe(true));
+    fireEvent.click(screen.getByRole("button", { name: "确认选中项入库" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([path]) => String(path) === "/api/report-factors/commit")).toBe(true));
+    const commitCall = fetchMock.mock.calls.find(([path]) => String(path) === "/api/report-factors/commit");
+    expect(JSON.parse(String(commitCall?.[1]?.body))).toMatchObject({
+      job_id: "report-job",
+      factors: [{ draft_id: "draft-1", factor_name: "momentum_5d" }],
+    });
+    const extractCall = fetchMock.mock.calls.find(([path]) => String(path) === "/api/report-factors/extract");
+    expect(JSON.parse(String(extractCall?.[1]?.body))).toMatchObject({ ocr_mode: "vendor" });
   });
 });
 

@@ -1,7 +1,7 @@
 """Default factor management system.
 
 Wraps the factor DSL + the file-based factor zoo, and exposes the
-existing JSON/PDF import loaders behind a single ``import_factors`` API.
+existing JSON import loaders behind a single ``import_factors`` API.
 """
 
 from __future__ import annotations
@@ -46,12 +46,6 @@ class FactorSystem(BaseFactorSystem):
                 else source
             )
             return FactorExperimentLoaderFromDict().load(records)
-        if kind == "pdf":
-            from alphapilot.systems.factor.loaders.pdf_loader import (
-                FactorExperimentLoaderFromPDFfiles,
-            )
-
-            return FactorExperimentLoaderFromPDFfiles().load(source)
         raise ValueError(f"Unsupported factor import kind: {kind!r}")
 
     def is_acceptable(self, expression: str) -> bool:

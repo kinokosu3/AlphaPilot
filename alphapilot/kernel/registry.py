@@ -127,6 +127,10 @@ def _register_builtin_defaults() -> None:
         "alphapilot.modules.alpha_mining.module.AlphaMiningModule",
     )
     register_module(
+        "report_factor",
+        "alphapilot.modules.report_factor.module.ReportFactorModule",
+    )
+    register_module(
         "platform",
         "alphapilot.modules.platform.module.PlatformModule",
     )

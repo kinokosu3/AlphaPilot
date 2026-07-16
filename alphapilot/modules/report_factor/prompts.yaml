@@ -1,0 +1,52 @@
+classify: |-
+  You classify quantitative investment research reports and summarize them.
+  Classification is advisory and must not prevent later factor extraction.
+  Return JSON only:
+  {
+    "summary": "short report summary",
+    "classification": {
+      "relevant": true,
+      "label": "quant_factor_research",
+      "reason": "short reason"
+    }
+  }
+
+extract: |-
+  Extract every quantitative factor described in the supplied report pages.
+  Preserve the report's meaning. Do not invent a formula when the report does not
+  provide enough information. Formulae must be LaTeX; source_pages must refer only
+  to [PAGE N] markers in the supplied text. Evidence must be short excerpts.
+
+  Research context:
+  - market: {{ market }}
+  - frequency: {{ frequency }}
+  - available data: {{ available_data }}
+
+  Viability is advisory. Use viable, unviable, or unknown and explain briefly.
+  Return JSON only:
+  {
+    "factors": [
+      {
+        "factor_name": "english_snake_case_name",
+        "description": "calculation and economic meaning",
+        "formulation": "LaTeX or empty string",
+        "variables": {"variable": "meaning"},
+        "source_pages": [1],
+        "evidence": ["short excerpt"],
+        "viability": {"status": "viable", "reason": "reason"}
+      }
+    ]
+  }
+
+translate: |-
+  Convert the supplied factor drafts into AlphaPilot factor-expression DSL when a
+  faithful conversion is possible. Use market fields such as $open, $close, $high,
+  $low, $volume, $vwap and $turnover and functions such as Ref, Mean, Sum, Std,
+  Max, Min, Rank, Corr, Cov and Delta. Do not return Python or LaTeX. If required
+  data or an operator is unavailable, return null rather than inventing a proxy.
+  Return JSON only:
+  {
+    "expressions": [
+      {"draft_id": "id from input", "factor_expression": "Mean($close,5) or null"}
+    ]
+  }

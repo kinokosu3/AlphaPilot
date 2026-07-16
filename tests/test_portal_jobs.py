@@ -77,6 +77,7 @@ def test_timing_backtest_job_kind_dispatches_to_timing_module(monkeypatch):
     ("kind", "target_name", "method", "kwargs"),
     [
         ("mine", "alpha_mining", "run_mining", {"step_n": 1}),
+        ("report_factor_extract", "report_factor", "extract_pdf", {"source": "report.pdf"}),
         ("factor_backtest", "alpha_mining", "run_backtest", {"mode": "single_ic"}),
         ("strategy_backtest", "strategy_backtest", "strategy_backtest", {"strategy_name": "qa"}),
         ("daily_signals", "daily_trade", "daily_signals", {"strategy_name": "qa"}),
@@ -87,7 +88,7 @@ def test_timing_backtest_job_kind_dispatches_to_timing_module(monkeypatch):
         ("mine_rl", "alphaforge_search", "mine_rl", {"steps": 128}),
     ],
 )
-def test_all_nine_job_kinds_have_stable_dispatch_contract(
+def test_all_job_kinds_have_stable_dispatch_contract(
     monkeypatch, kind: str, target_name: str, method: str, kwargs: dict[str, Any]
 ) -> None:  # noqa: ANN001
     calls: list[tuple[str, str, dict[str, Any]]] = []
@@ -114,6 +115,9 @@ def test_all_nine_job_kinds_have_stable_dispatch_contract(
     result = jobs._run_target(kind, dict(kwargs))
 
     expected_kwargs = {key: value for key, value in kwargs.items() if key != "action"}
+    if kind == "report_factor_extract":
+        callback = calls[0][2].pop("progress_callback")
+        assert callback is jobs.update_current_job_progress
     assert result == {"target": target_name, "method": method}
     assert calls == [(target_name, method, expected_kwargs)]
 

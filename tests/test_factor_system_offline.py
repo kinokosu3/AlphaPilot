@@ -103,6 +103,11 @@ def test_import_factors_from_csv_and_json(factor, tmp_path) -> None:
     assert loaded_json is not None
 
 
+def test_pdf_import_was_removed_from_factor_system(factor) -> None:
+    with pytest.raises(ValueError, match="Unsupported factor import kind"):
+        factor.import_factors("report.pdf", kind="pdf")
+
+
 def test_persistence_across_reload(factor, isolated_env) -> None:
     # Factor zoo is mirrored to CSV under the isolated zoo dir.
     factor.add_factor("persist_me", GOOD_EXPR)

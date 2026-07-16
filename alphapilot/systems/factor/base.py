@@ -1,6 +1,6 @@
 """Factor management system interface.
 
-Provides factor import (from expressions / CSV / JSON / PDF), a factor
+Provides factor import (from expressions / CSV / JSON), a factor
 database (zoo), and expression utilities. The default implementation
 reuses the existing DSL and ``FactorRegulator``.
 """
@@ -20,7 +20,7 @@ class BaseFactorSystem(BaseSystem):
 
     @abstractmethod
     def import_factors(self, source: Any, *, kind: str = "csv") -> Any:
-        """Import factors from a source. ``kind`` in {csv, json, pdf, dict}."""
+        """Import factors from a source. ``kind`` in {csv, json, dict}."""
 
     @abstractmethod
     def is_acceptable(self, expression: str) -> bool:

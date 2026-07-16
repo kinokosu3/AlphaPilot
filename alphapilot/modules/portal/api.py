@@ -11,10 +11,10 @@ import uuid
 from dataclasses import asdict, is_dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
-from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi import FastAPI, File, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -333,7 +333,7 @@ class FactorCategoryEdit(BaseModel):
 
 
 class FactorImport(BaseModel):
-    kind: str = "csv"
+    kind: Literal["csv", "json"] = "csv"
     source: str
 
 
@@ -349,6 +349,26 @@ class FactorBacktestCreate(BaseModel):
     factor_names: list[str] = Field(default_factory=list)
     category: str | None = None
     options: dict[str, Any] = Field(default_factory=dict)
+
+
+class ReportFactorExtractRequest(BaseModel):
+    source: str
+    market: str = "China A-share"
+    frequency: str = "daily"
+    available_data: list[str] = Field(default_factory=list)
+    ocr_mode: str = Field(default="auto", min_length=1, max_length=64)
+
+
+class ReportFactorCommitItem(BaseModel):
+    draft_id: str
+    factor_name: str
+    factor_expression: str
+    categories: list[str] = Field(default_factory=list)
+
+
+class ReportFactorCommitRequest(BaseModel):
+    job_id: str
+    factors: list[ReportFactorCommitItem] = Field(default_factory=list)
 
 
 class StrategySave(BaseModel):
@@ -923,6 +943,94 @@ def create_app(
     def delete_schedule(schedule_id: str) -> dict[str, Any]:
         try:
             return {"schedule_id": schedule_id, "deleted": schedules.delete_schedule(schedule_id)}
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.get("/api/report-factors/ocr-providers")
+    def report_factor_ocr_providers() -> dict[str, Any]:
+        try:
+            return _jsonable(_engine(app).get_module("report_factor").ocr_providers())
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/report-factors/upload")
+    async def upload_report_factor(file: UploadFile = File(...)) -> dict[str, Any]:
+        from alphapilot.modules.report_factor.settings import ReportFactorSettings
+        from alphapilot.modules.report_factor.uploads import save_uploaded_pdf
+
+        try:
+            return _jsonable(
+                await save_uploaded_pdf(file, ReportFactorSettings.load())
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.delete("/api/report-factors/uploads/{upload_id}")
+    def delete_report_factor_upload(upload_id: str) -> dict[str, Any]:
+        from alphapilot.modules.report_factor.settings import ReportFactorSettings
+        from alphapilot.modules.report_factor.uploads import delete_uploaded_pdf
+
+        try:
+            deleted = delete_uploaded_pdf(upload_id, ReportFactorSettings.load())
+            return {"upload_id": upload_id, "deleted": deleted}
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/report-factors/extract")
+    def extract_report_factors(payload: ReportFactorExtractRequest) -> dict[str, Any]:
+        try:
+            source_path = _portal_asset_path(payload.source, must_exist=True)
+            if source_path.suffix.lower() != ".pdf":
+                raise ValueError("Report source must be a single .pdf file")
+            with source_path.open("rb") as handle:
+                header = handle.read(1024)
+            if b"%PDF-" not in header:
+                raise ValueError("Report source does not contain a valid PDF header")
+            kwargs = _model_data(payload)
+            kwargs["source"] = str(source_path)
+            kwargs["ocr_mode"] = _engine(app).get_module(
+                "report_factor"
+            ).validate_ocr_mode(payload.ocr_mode)
+            if not kwargs.get("available_data"):
+                kwargs["available_data"] = None
+            return _jsonable(jobs.start_job("report_factor_extract", kwargs))
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/report-factors/commit")
+    def commit_report_factors(payload: ReportFactorCommitRequest) -> dict[str, Any]:
+        try:
+            if not payload.factors:
+                raise ValueError("At least one factor draft must be selected")
+            job = jobs.get_job(payload.job_id)
+            if job.get("kind") != "report_factor_extract":
+                raise ValueError("job_id does not refer to a report-factor extraction")
+            if job.get("status") != "succeeded":
+                raise ValueError("Report-factor extraction has not succeeded")
+            result_payload = jobs.read_result(payload.job_id) or {}
+            extraction = result_payload.get("result")
+            if not isinstance(extraction, dict):
+                raise ValueError("Report-factor extraction result is unavailable")
+            drafts = extraction.get("factors")
+            if not isinstance(drafts, list):
+                raise ValueError("Report-factor extraction result has no factor drafts")
+            allowed_ids = {
+                str(item.get("draft_id"))
+                for item in drafts
+                if isinstance(item, dict) and item.get("draft_id")
+            }
+            submitted = [_model_data(item) for item in payload.factors]
+            unknown = sorted(
+                {
+                    str(item.get("draft_id") or "")
+                    for item in submitted
+                    if str(item.get("draft_id") or "") not in allowed_ids
+                }
+            )
+            if unknown:
+                raise ValueError(f"Unknown factor draft id(s): {', '.join(unknown)}")
+            module = _engine(app).get_module("report_factor")
+            return _jsonable(module.commit_factors(payload.job_id, submitted))
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
