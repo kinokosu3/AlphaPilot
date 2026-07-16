@@ -156,23 +156,26 @@ class LiveEngine:
         )
 
     # ---- lifecycle ------------------------------------------------------- #
+    def _connect_gateways(self, setting: dict | None) -> None:
+        trade_setting, quote_setting = _split_gateway_settings(setting)
+        if self.quote_gateway is self.trade_gateway:
+            roles = getattr(self.trade_gateway, "roles", frozenset())
+            shared_setting = (
+                {"trade": trade_setting, "quote": quote_setting}
+                if {"trade", "quote"} <= set(roles)
+                and isinstance(setting, dict)
+                and ("trade" in setting or "quote" in setting)
+                else trade_setting
+            )
+            self.trade_gateway.connect(shared_setting)
+        else:
+            self.trade_gateway.connect(trade_setting)
+            self.quote_gateway.connect(quote_setting)
+
     def connect(self, setting: dict | None = None) -> None:
         self.connection.transition(ConnectionState.CONNECTING)
-        trade_setting, quote_setting = _split_gateway_settings(setting)
         try:
-            if self.quote_gateway is self.trade_gateway:
-                roles = getattr(self.trade_gateway, "roles", frozenset())
-                shared_setting = (
-                    {"trade": trade_setting, "quote": quote_setting}
-                    if {"trade", "quote"} <= set(roles)
-                    and isinstance(setting, dict)
-                    and ("trade" in setting or "quote" in setting)
-                    else trade_setting
-                )
-                self.trade_gateway.connect(shared_setting)
-            else:
-                self.trade_gateway.connect(trade_setting)
-                self.quote_gateway.connect(quote_setting)
+            self._connect_gateways(setting)
         except Exception as exc:  # noqa: BLE001 - surface as connection error
             self.connection.transition(ConnectionState.ERROR)
             self._audit(
@@ -329,10 +332,7 @@ class LiveEngine:
             self.runmode.halt("reconnect")
             self._audit("halt", {"reason": "reconnect"})
         self.connection.transition(ConnectionState.CONNECTING)
-        trade_setting, quote_setting = _split_gateway_settings(setting)
-        self.trade_gateway.connect(trade_setting)
-        if self.quote_gateway is not self.trade_gateway:
-            self.quote_gateway.connect(quote_setting)
+        self._connect_gateways(setting)
         self.connection.transition(ConnectionState.CONNECTED)
         self.connection.transition(ConnectionState.LOGGED_IN)
         self.trade_gateway.query_account()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -75,8 +76,7 @@ class AutomatedRouteAuthorizer:
             account_id=context.account_id,
         )
         if blocks:
-            scopes = ", ".join(f"{item['scope_type']}:{item['scope_id']}" for item in blocks)
-            return self._deny("kill_switch", f"route blocked by {scopes}")
+            return self._deny("kill_switch", f"route blocked by {route_block_summary(blocks)}")
 
         heartbeat = _parse_timestamp(runtime.get("runner_heartbeat_at"))
         if heartbeat is None:
@@ -109,3 +109,18 @@ def _parse_timestamp(value: Any) -> datetime | None:
         # a dead runner look fresh for hours.  New runtimes always persist UTC.
         return None
     return parsed.astimezone(timezone.utc)
+
+
+def route_block_summary(blocks: list[dict[str, Any]]) -> str:
+    """Describe active blocks without exposing account or instance identifiers."""
+
+    rows: list[str] = []
+    for item in blocks:
+        scope_type = str(item.get("scope_type") or "unknown")
+        scope_id = str(item.get("scope_id") or "")
+        if scope_type == "global":
+            rows.append("global:*")
+            continue
+        digest = hashlib.sha256(scope_id.encode("utf-8")).hexdigest()[:12]
+        rows.append(f"{scope_type}:sha256:{digest}")
+    return ", ".join(rows)

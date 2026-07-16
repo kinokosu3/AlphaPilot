@@ -111,12 +111,27 @@ class BrokerUATHarness:
                     continue
                 lot = max(int(getattr(contract, "lot_size", 0) or 0), 1)
                 price = float(getattr(tick, "ask_price_1", 0) or getattr(tick, "last_price", 0) or 0)
+                bid = float(getattr(tick, "bid_price_1", 0) or 0)
+                limit_up = float(getattr(tick, "limit_up", 0) or 0)
+                limit_down = float(getattr(tick, "limit_down", 0) or 0)
+                suspended = bool(getattr(tick, "suspended", False))
                 max_volume = int(cap / price / lot) * lot if price > 0 else 0
-                eligible = bool(
-                    price > 0
-                    and float(getattr(tick, "bid_price_1", 0) or 0) > 0
-                    and max_volume >= lot * 2
-                )
+                eligibility_issues: list[str] = []
+                if price <= 0 or bid <= 0:
+                    eligibility_issues.append("two_sided_quote_unavailable")
+                if max_volume < lot * 2:
+                    eligibility_issues.append("notional_cap_below_two_lots")
+                if suspended:
+                    eligibility_issues.append("suspended")
+                if limit_up > 0 and price > limit_up + 1e-9:
+                    eligibility_issues.append("ask_above_limit_up")
+                if limit_down > 0 and bid < limit_down - 1e-9:
+                    eligibility_issues.append("bid_below_limit_down")
+                if limit_up > 0 and price >= limit_up - 1e-9 and bid >= limit_up - 1e-9:
+                    eligibility_issues.append("locked_limit_up")
+                if limit_down > 0 and bid <= limit_down + 1e-9 and price <= limit_down + 1e-9:
+                    eligibility_issues.append("locked_limit_down")
+                eligible = not eligibility_issues
                 rows.append({
                     "symbol": instrument,
                     "product": str(getattr(getattr(contract, "product", ""), "value", "")),
@@ -128,8 +143,12 @@ class BrokerUATHarness:
                     "ask_price_1": float(getattr(tick, "ask_price_1", 0) or 0),
                     "bid_volume_1": float(getattr(tick, "bid_volume_1", 0) or 0),
                     "ask_volume_1": float(getattr(tick, "ask_volume_1", 0) or 0),
+                    "limit_up": limit_up,
+                    "limit_down": limit_down,
+                    "suspended": suspended,
                     "max_volume": max_volume,
                     "eligible": eligible,
+                    "eligibility_issues": eligibility_issues,
                 })
             return _safe_evidence({
                 "broker": selected,
@@ -313,6 +332,9 @@ class BrokerUATHarness:
         }
         runtime = None
         current_step = "connected"
+        plan: dict[str, Any] = {}
+        fill_order_id = ""
+        remainder_order_id = ""
         try:
             runtime = self.runtime_factory(str(run["broker"]))
             runtime.connect()
@@ -604,16 +626,55 @@ class BrokerUATHarness:
                 expires_at=expires.isoformat(timespec="seconds"),
             )
         except Exception as exc:
+            cleanup_states: list[dict[str, Any]] = []
             try:
                 if runtime is not None:
                     latest = self.store.get_broker_uat_run(run_id)
                     owned_order_ids = set(_uat_order_ids(latest))
+                    owned_order_ids.update(
+                        order_id for order_id in (fill_order_id, remainder_order_id)
+                        if order_id
+                    )
                     owned_order_ids.update(_active_uat_order_ids(runtime, run_id))
                     for order_id in sorted(owned_order_ids):
                         if runtime.order_state(order_id).get("active"):
                             runtime.cancel_order(order_id)
                             runtime.wait_for_order_terminal(order_id, timeout=min(timeout, 10.0))
                         self._record_order_events(runtime, run_id, order_id)
+                        cleanup_states.append(_safe_evidence(runtime.order_state(order_id)))
+
+                    price_by_order: dict[str, float] = {}
+                    if fill_order_id:
+                        price_by_order[fill_order_id] = float(
+                            (plan.get("fill") or {}).get("price") or 0
+                        )
+                    if remainder_order_id:
+                        price_by_order[remainder_order_id] = float(
+                            (plan.get("remainder") or {}).get("price") or 0
+                        )
+                    if price_by_order:
+                        self.store.update_broker_uat_filled_notional(
+                            run_id,
+                            _actual_filled_notional(runtime, price_by_order),
+                        )
+
+                    unresolved = sum(
+                        1 for state in cleanup_states if state.get("active")
+                    )
+                    self.store.update_broker_uat_step(
+                        run_id,
+                        "failure_cleanup",
+                        status="failed" if unresolved else "passed",
+                        evidence={
+                            "owned_order_count": len(cleanup_states),
+                            "unresolved_active_order_count": unresolved,
+                            "orders": cleanup_states,
+                        },
+                        error=(
+                            {"message": "Broker UAT failure cleanup left active orders"}
+                            if unresolved else {}
+                        ),
+                    )
             except Exception:  # noqa: BLE001 - retain primary UAT failure
                 pass
             self.store.update_broker_uat_step(
@@ -1076,11 +1137,13 @@ def _build_execution_plan(
         if ask <= 0 or marketable + 1e-12 < ask:
             raise ValueError("buy UAT fill price must cross the current best ask")
         # A best-bid order can become marketable during the required process
-        # restart. Keep the recovery child clearly away from the market while
-        # remaining inside the default 5% fat-finger guard.
+        # restart. Keep the recovery child away from the market, but also keep
+        # it inside the exchanges' dynamic order-price cage.  The previous 4%
+        # offset was inside our 5% fat-finger guard yet was rejected by the XTP
+        # simulator before it could become the recoverable active child.
         resting = min(
             bid - price_tick if bid > price_tick else marketable - price_tick,
-            _align_price(reference * 0.96, price_tick, direction="down"),
+            _align_price(reference * 0.99, price_tick, direction="up"),
         )
     else:
         marketable = requested_price or bid
@@ -1088,7 +1151,7 @@ def _build_execution_plan(
             raise ValueError("sell UAT fill price must cross the current best bid")
         resting = max(
             ask + price_tick if ask > 0 else marketable + price_tick,
-            _align_price(reference * 1.04, price_tick, direction="up"),
+            _align_price(reference * 1.01, price_tick, direction="down"),
         )
     if min(marketable, resting) <= 0:
         raise ValueError("Broker UAT execution prices must be positive")

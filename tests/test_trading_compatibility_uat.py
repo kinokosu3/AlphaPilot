@@ -418,6 +418,7 @@ class _FakeOMS:
         return SimpleNamespace(
             key=symbol, last_price=10.0, bid_price_1=9.99, ask_price_1=10.0,
             bid_volume_1=1000, ask_volume_1=1000,
+            limit_up=11.0, limit_down=9.0, suspended=False,
         )
 
     def get_active_orders(self):  # noqa: ANN201
@@ -428,10 +429,16 @@ class _FakeOMS:
 
 
 class _FakeBrokerState:
-    def __init__(self, *, fail_reconnect_once: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_reconnect_once: bool = False,
+        fill_remainder_immediately: bool = False,
+    ) -> None:
         self.orders: dict[str, dict[str, object]] = {}
         self.subscriptions: list[str] = []
         self.fail_reconnect_once = fail_reconnect_once
+        self.fill_remainder_immediately = fill_remainder_immediately
 
 
 class _FakeEngine:
@@ -470,15 +477,16 @@ class _FakeUATRuntime:
         order_id = f"BROKER-ORDER-{suffix}"
         volume = float(payload["volume"])
         is_fill = reference.endswith("/fill")
+        is_terminal_fill = is_fill or self.state.fill_remainder_immediately
         self.state.orders[order_id] = {
             "order_id": order_id,
             "symbol": symbol,
             "reference": reference,
             "volume": volume,
-            "traded": volume if is_fill else 0.0,
-            "active": not is_fill,
-            "terminal": is_fill,
-            "status": "alltraded" if is_fill else "nottraded",
+            "traded": volume if is_terminal_fill else 0.0,
+            "active": not is_terminal_fill,
+            "terminal": is_terminal_fill,
+            "status": "alltraded" if is_terminal_fill else "nottraded",
         }
         return {"submitted": True, "order_id": order_id}
 
@@ -526,6 +534,7 @@ def _uat_harness(
     monkeypatch: pytest.MonkeyPatch,
     *,
     fail_reconnect_once: bool = False,
+    fill_remainder_immediately: bool = False,
 ) -> tuple[BrokerUATHarness, StrategyRuntimeStore]:
     monkeypatch.setenv("ALPHAPILOT_BROKER_UAT_ENABLED", "true")
     monkeypatch.setenv("ALPHAPILOT_BROKER_UAT_WHITELIST", "600000.SSE")
@@ -543,7 +552,10 @@ def _uat_harness(
         lambda broker: {**metadata, "broker": broker},
     )
     store = StrategyRuntimeStore(tmp_path / "uat.sqlite3")
-    state = _FakeBrokerState(fail_reconnect_once=fail_reconnect_once)
+    state = _FakeBrokerState(
+        fail_reconnect_once=fail_reconnect_once,
+        fill_remainder_immediately=fill_remainder_immediately,
+    )
     process_ids = iter(range(10_000, 10_100))
     harness = BrokerUATHarness(
         store,
@@ -614,6 +626,38 @@ def test_broker_uat_issues_callback_derived_expiring_evidence(
     assert not any(row["active"] for row in store.list_route_blocks())
 
 
+def test_broker_uat_failure_cleanup_persists_actual_filled_notional(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, store = _uat_harness(
+        tmp_path,
+        monkeypatch,
+        fill_remainder_immediately=True,
+    )
+
+    with pytest.raises(RuntimeError, match="did not remain active"):
+        harness.start(
+            broker="xtp",
+            symbol="600000.SSE",
+            side="buy",
+            volume=200,
+            price=10,
+            max_notional=2000,
+            confirmation=CONFIRMATION,
+            timeout=1,
+        )
+
+    failed = store.list_broker_uat_runs("xtp")[0]
+    assert failed["filled_notional"] == pytest.approx(1990.0)
+    cleanup = next(
+        step for step in failed["steps"] if step["step"] == "failure_cleanup"
+    )
+    assert cleanup["status"] == "passed"
+    assert cleanup["evidence"]["owned_order_count"] == 2
+    assert cleanup["evidence"]["unresolved_active_order_count"] == 0
+
+
 def test_broker_uat_query_only_preflight_subscribes_candidates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -627,7 +671,38 @@ def test_broker_uat_query_only_preflight_subscribes_candidates(
     assert result["account_hash"] == broker_uat_module._hash_text("uat-account")
     assert result["candidates"][0]["symbol"] == "600000.SSE"
     assert result["candidates"][0]["eligible"] is True
+    assert result["candidates"][0]["limit_up"] == 11.0
+    assert result["candidates"][0]["limit_down"] == 9.0
     assert result["active_orders"] == 0
+
+
+def test_broker_uat_preflight_rejects_quote_outside_reported_price_limits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, _store = _uat_harness(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        _FakeOMS,
+        "get_tick",
+        lambda _self, symbol: SimpleNamespace(
+            key=symbol,
+            last_price=10.0,
+            bid_price_1=9.99,
+            ask_price_1=10.0,
+            bid_volume_1=1000,
+            ask_volume_1=1000,
+            limit_up=9.95,
+            limit_down=9.0,
+            suspended=False,
+        ),
+    )
+
+    result = harness.preflight(
+        broker="xtp", symbols=["600000.SSE"], max_notional=2000, timeout=1,
+    )
+
+    assert result["candidates"][0]["eligible"] is False
+    assert result["candidates"][0]["limit_up"] == 9.95
 
 
 def test_broker_uat_v2_uses_a_distinct_resting_price_and_actual_trade_amount() -> None:
@@ -644,7 +719,8 @@ def test_broker_uat_v2_uses_a_distinct_resting_price_and_actual_trade_amount() -
     )
 
     assert plan["fill"] == {"volume": 100.0, "price": 10.0}
-    assert plan["remainder"]["price"] <= 9.6
+    assert 9.8 <= plan["remainder"]["price"] < 9.99
+    assert plan["remainder"]["price"] == pytest.approx(9.9)
     assert plan["requested_notional"] <= 2000.0
 
     runtime = SimpleNamespace(
@@ -704,7 +780,8 @@ def test_broker_uat_execution_plan_rejects_unsafe_prices_and_supports_sell() -> 
         contract=contract,
         tick=tick,
     )
-    assert sell["remainder"]["price"] >= 10.4
+    assert 10.0 < sell["remainder"]["price"] <= 10.2
+    assert sell["remainder"]["price"] == pytest.approx(10.1)
     assert broker_uat_module._align_price(10.001, 0.01, direction="up") == 10.01
     with pytest.raises(ValueError, match="direction"):
         broker_uat_module._align_price(10, 0.01, direction="sideways")

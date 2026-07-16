@@ -12,7 +12,10 @@ from alphapilot.systems.live.brokers.paper import PaperBroker
 from alphapilot.systems.live.config import LiveConfig, RunMode, uses_real_providers
 from alphapilot.systems.live.control import DaemonRuntimeControl
 from alphapilot.systems.live.runtime import LiveRuntime
-from alphapilot.systems.trading.authorization import AutomatedRouteAuthorizer
+from alphapilot.systems.trading.authorization import (
+    AutomatedRouteAuthorizer,
+    route_block_summary,
+)
 from alphapilot.systems.trading.contracts import (
     CrossSectionalSignal,
     PortfolioInputs,
@@ -151,8 +154,26 @@ def test_three_level_kill_switches_fail_closed(
     store.set_route_block(scope_type, scope_id, active=True, reason="test")
     denied = authorizer.authorize(context)
     assert denied.allowed is False and denied.rule == "kill_switch"
+    assert scope_id not in denied.reason
+    if scope_type == "global":
+        assert "global:*" in denied.reason
+    else:
+        assert "sha256:" in denied.reason
     store.set_route_block(scope_type, scope_id, active=False)
     assert authorizer.authorize(context).allowed is True
+
+
+def test_route_block_summary_never_exposes_bound_identifiers() -> None:
+    summary = route_block_summary([
+        {"scope_type": "instance", "scope_id": "strategy-secret"},
+        {"scope_type": "account", "scope_id": "account-secret"},
+        {"scope_type": "global", "scope_id": "ignored"},
+    ])
+
+    assert "strategy-secret" not in summary
+    assert "account-secret" not in summary
+    assert summary.count("sha256:") == 2
+    assert summary.endswith("global:*")
 
 
 def test_stale_heartbeat_and_manual_origin_are_rejected_by_automated_authorizer(tmp_path: Path) -> None:

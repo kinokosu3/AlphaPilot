@@ -48,6 +48,7 @@ from alphapilot.systems.live.types import (
     normalize_symbol,
 )
 from alphapilot.systems.trading.ports import RouteContext, RouteOrigin
+from alphapilot.systems.trading.authorization import route_block_summary
 
 
 def clone_config(
@@ -566,13 +567,12 @@ class LiveRuntime:
             return self.engine.submit(request, origin=RouteOrigin.BROKER_UAT.value)
         blocks = self._manual_route_blocks(context)
         if blocks:
-            reason = ", ".join(f"{item['scope_type']}:{item['scope_id']}" for item in blocks)
             self.engine.ledger.record_event(
                 "blocked",
                 {
                     "origin": "manual",
                     "rule": "kill_switch",
-                    "reason": f"route blocked by {reason}",
+                    "reason": f"route blocked by {route_block_summary(blocks)}",
                 },
                 reference=request.reference,
             )
@@ -651,8 +651,7 @@ class LiveRuntime:
             uat_run_id=run_id,
         ))
         if blocks:
-            scopes = ", ".join(f"{item['scope_type']}:{item['scope_id']}" for item in blocks)
-            return "kill_switch", f"route blocked by {scopes}"
+            return "kill_switch", f"route blocked by {route_block_summary(blocks)}"
         writer_lookup = getattr(self.execution_journal, "active_live_writer", None)
         writer = writer_lookup(account_id) if callable(writer_lookup) and account_id else None
         if writer is not None:

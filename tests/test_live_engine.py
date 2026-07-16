@@ -33,9 +33,11 @@ class TrackingGateway(BrokerGateway):
         self.cancels: list[CancelRequest] = []
         self.account_queries = 0
         self.position_queries = 0
+        self.settings: list[dict] = []
 
     def connect(self, setting: dict) -> None:
         self.connected += 1
+        self.settings.append(setting)
         self._emit_account(Account(account_id=self.name, balance=100_000, available=100_000, gateway=self.name))
 
     def close(self) -> None:
@@ -131,14 +133,18 @@ def test_engine_separates_trade_and_quote_gateways(tmp_path: Path) -> None:
 
 def test_engine_reuses_same_gateway_for_trade_and_quote(tmp_path: Path) -> None:
     gateway = TrackingGateway("same")
+    gateway.roles = frozenset({"trade", "quote"})
     cfg = LiveConfig(mode=RunMode.PAPER, ledger_dir=tmp_path / "ledger")
     engine = LiveEngine(cfg, gateway, quote_gateway=gateway, ledger=Ledger(tmp_path / "ledger"))
+    settings = {"trade": {"cash": 1}, "quote": {"cash": 2}}
 
-    engine.connect({"trade": {"cash": 1}, "quote": {"cash": 2}})
+    engine.connect(settings)
+    engine.reconcile_after_reconnect(setting=settings)
     engine.close()
 
-    assert gateway.connected == 1
-    assert gateway.closed == 1
+    assert gateway.connected == 2
+    assert gateway.closed == 2
+    assert gateway.settings == [settings, settings]
 
 
 def test_dry_run_submits_nothing(tmp_path: Path) -> None:

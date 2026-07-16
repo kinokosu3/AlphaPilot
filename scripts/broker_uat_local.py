@@ -136,6 +136,10 @@ def _configure(args: argparse.Namespace) -> None:
     os.environ["ALPHAPILOT_LIVE_STATE_DIR"] = str(state)
     os.environ["ALPHAPILOT_LIVE_LEDGER_DIR"] = str(state / "ledger")
     os.environ["ALPHAPILOT_LIVE_MARKET_DATA_DIR"] = str(state / "market")
+    # The UAT environment is also the compatibility-observation environment.
+    # Keeping both bindings identical prevents a local UAT process from
+    # registering an unintended second environment in the shared runtime DB.
+    os.environ["ALPHAPILOT_ENVIRONMENT_ID"] = str(args.environment)
     os.environ["ALPHAPILOT_BROKER_UAT_ENVIRONMENT"] = str(args.environment)
     os.environ["ALPHAPILOT_BROKER_UAT_MAX_NOTIONAL"] = str(args.max_notional)
     if getattr(args, "symbol", ""):
@@ -148,6 +152,27 @@ def _module() -> Any:
     from alphapilot.kernel import build_engine
 
     return build_engine().get_module("trading_cli")
+
+
+def _bind_persisted_run_symbol(module: Any, args: argparse.Namespace) -> None:
+    """Restore the immutable UAT whitelist binding for recovery commands."""
+
+    if args.command not in {"resume", "abort"}:
+        return
+    run = module._system().get_broker_uat_run(str(args.run_id))
+    persisted_broker = str(run.get("broker") or "").strip().lower()
+    requested_broker = str(args.broker).strip().lower()
+    if persisted_broker != requested_broker:
+        raise ValueError(
+            f"UAT run {args.run_id} belongs to broker {persisted_broker}, "
+            f"not {requested_broker}"
+        )
+    symbol = str(run.get("symbol") or "").strip()
+    if not symbol:
+        raise ValueError(f"UAT run {args.run_id} has no persisted symbol binding")
+    if args.symbol and str(args.symbol).strip() != symbol:
+        raise ValueError("--symbol does not match the persisted UAT run symbol")
+    os.environ["ALPHAPILOT_BROKER_UAT_WHITELIST"] = symbol
 
 
 def main() -> int:
@@ -185,6 +210,7 @@ def main() -> int:
     try:
         _configure(args)
         module = _module()
+        _bind_persisted_run_symbol(module, args)
         if args.command == "preflight":
             module.trading_broker_uat_preflight(
                 args.broker, args.symbols, args.max_notional, args.timeout,

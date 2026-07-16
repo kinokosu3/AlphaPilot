@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -116,6 +118,74 @@ def test_secret_scanner_does_not_match_a_short_pin_inside_a_timestamp() -> None:
         b'{"datetime":"20260715T13:00:00"}',
         {b"20260715"},
     ) == 0
+
+
+def test_recovery_restores_whitelist_from_persisted_uat_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeSystem:
+        def get_broker_uat_run(self, run_id: str) -> dict[str, str]:
+            assert run_id == "run-1"
+            return {"broker": "emt", "symbol": "513100.SSE"}
+
+    module = SimpleNamespace(_system=lambda: FakeSystem())
+    args = SimpleNamespace(
+        command="resume", run_id="run-1", broker="emt", symbol="",
+    )
+    monkeypatch.delenv("ALPHAPILOT_BROKER_UAT_WHITELIST", raising=False)
+
+    broker_uat_local._bind_persisted_run_symbol(module, args)
+
+    assert os.environ["ALPHAPILOT_BROKER_UAT_WHITELIST"] == "513100.SSE"
+
+
+def test_recovery_rejects_broker_or_symbol_mismatch() -> None:
+    class FakeSystem:
+        def get_broker_uat_run(self, run_id: str) -> dict[str, str]:
+            return {"broker": "emt", "symbol": "513100.SSE"}
+
+    module = SimpleNamespace(_system=lambda: FakeSystem())
+    with pytest.raises(ValueError, match="belongs to broker"):
+        broker_uat_local._bind_persisted_run_symbol(
+            module,
+            SimpleNamespace(
+                command="resume", run_id="run-1", broker="xtp", symbol="",
+            ),
+        )
+    with pytest.raises(ValueError, match="does not match"):
+        broker_uat_local._bind_persisted_run_symbol(
+            module,
+            SimpleNamespace(
+                command="abort", run_id="run-1", broker="emt", symbol="510300.SSE",
+            ),
+        )
+
+
+def test_local_wrapper_binds_uat_and_compatibility_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = _private_file(tmp_path / ".env", "unused=value\n")
+    monkeypatch.setattr(
+        broker_uat_local,
+        "_load_xtp",
+        lambda _path: {"ALPHAPILOT_LIVE_XTP_ACCOUNT": "test-account"},
+    )
+    args = SimpleNamespace(
+        broker="xtp",
+        secret_file=str(secret),
+        client_id=1,
+        state_dir=str(tmp_path / "state"),
+        environment="acceptance-host-a",
+        max_notional=20_000,
+        symbol="510300.SSE",
+        command="preflight",
+    )
+
+    broker_uat_local._configure(args)
+
+    assert os.environ["ALPHAPILOT_ENVIRONMENT_ID"] == "acceptance-host-a"
+    assert os.environ["ALPHAPILOT_BROKER_UAT_ENVIRONMENT"] == "acceptance-host-a"
 
 
 @pytest.mark.parametrize("value", (0, -1, 20_000.01))
