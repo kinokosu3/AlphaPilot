@@ -31,7 +31,10 @@ from alphapilot.modules.portal.settings import (
     save_portal_settings,
     settings_path,
 )
-from alphapilot.systems.trading.compatibility import SUNSET_AT
+from alphapilot.systems.trading.compatibility import (
+    SUNSET_AT,
+    compatibility_replacement,
+)
 
 
 def _jsonable(value: Any) -> Any:
@@ -846,8 +849,16 @@ def create_app(
         return _jsonable(jobs.list_jobs())
 
     @app.post("/api/jobs")
-    def start_job(payload: JobCreate) -> dict[str, Any]:
+    def start_job(
+        payload: JobCreate,
+        response: Response,
+        request: Request,
+    ) -> dict[str, Any]:
         try:
+            if payload.kind == "timing_backtest":
+                entrypoint = "POST /api/jobs kind=timing_backtest"
+                _deprecated(response, compatibility_replacement(entrypoint))
+                _record_legacy_entrypoint(app, entrypoint, request)
             return _jsonable(jobs.start_job(payload.kind, payload.kwargs))
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
@@ -1251,7 +1262,7 @@ def create_app(
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
-    @app.get("/api/timing/strategies")
+    @app.get("/api/timing/strategies", deprecated=True)
     def timing_strategies(response: Response, request: Request) -> dict[str, Any]:
         try:
             _deprecated(response, "/api/trading/strategy-definitions")
@@ -1266,7 +1277,7 @@ def create_app(
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
-    @app.post("/api/timing/signal")
+    @app.post("/api/timing/signal", deprecated=True)
     def timing_signal(
         response: Response,
         payload: dict[str, Any],
@@ -1289,7 +1300,7 @@ def create_app(
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
-    @app.post("/api/timing/backtest")
+    @app.post("/api/timing/backtest", deprecated=True)
     def timing_backtest(
         response: Response,
         payload: dict[str, Any],
@@ -1427,7 +1438,10 @@ def create_app(
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
-    @app.post("/api/trading/strategy-instances/{instance_id}/backtest")
+    @app.post(
+        "/api/trading/strategy-instances/{instance_id}/backtest",
+        deprecated=True,
+    )
     def trading_strategy_instance_backtest(
         instance_id: str,
         payload: dict[str, Any],
@@ -1666,7 +1680,7 @@ def create_app(
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
-    @app.post("/api/trading/deployments/{instance_id}/{action}")
+    @app.post("/api/trading/deployments/{instance_id}/{action}", deprecated=True)
     def trading_deployment_action(
         instance_id: str,
         action: str,
@@ -1676,7 +1690,10 @@ def create_app(
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         try:
-            _deprecated(response, f"/api/trading/deployments/{instance_id}/{action}")
+            _deprecated(
+                response,
+                f"/api/trading/deployments/{instance_id}/{{explicit-action}}",
+            )
             _record_legacy_entrypoint(
                 app,
                 "POST /api/trading/deployments/{id}/{action}",
@@ -1701,7 +1718,10 @@ def create_app(
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
-    @app.post("/api/trading/stage-runs/{instance_id}/{stage}/start")
+    @app.post(
+        "/api/trading/stage-runs/{instance_id}/{stage}/start",
+        deprecated=True,
+    )
     def trading_stage_run_start(
         instance_id: str,
         stage: str,
@@ -1723,7 +1743,7 @@ def create_app(
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
-    @app.post("/api/trading/stage-runs/{run_id}/finish")
+    @app.post("/api/trading/stage-runs/{run_id}/finish", deprecated=True)
     def trading_stage_run_finish(
         run_id: str,
         payload: dict[str, Any],
@@ -1746,7 +1766,10 @@ def create_app(
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
-    @app.post("/api/trading/stage-runs/{instance_id}/{stage}/evaluate")
+    @app.post(
+        "/api/trading/stage-runs/{instance_id}/{stage}/evaluate",
+        deprecated=True,
+    )
     def trading_stage_run_evaluate(
         instance_id: str,
         stage: str,
@@ -1819,7 +1842,7 @@ def create_app(
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
-    @app.get("/api/timing/jobs/{job_id}/detail")
+    @app.get("/api/timing/jobs/{job_id}/detail", deprecated=True)
     def timing_job_detail(
         job_id: str,
         response: Response,
@@ -2359,6 +2382,10 @@ def create_app(
                         "name": name,
                         "signature": str(inspect.signature(fn)),
                         "doc": (inspect.getdoc(fn) or "").splitlines()[0] if inspect.getdoc(fn) else "",
+                        "deprecated": bool(
+                            compatibility_replacement(f"CLI {name}")
+                        ),
+                        "replacement": compatibility_replacement(f"CLI {name}"),
                     }
                     for name, fn in commands.items()
                 ]
@@ -2366,14 +2393,25 @@ def create_app(
         return out
 
     @app.post("/api/modules/run")
-    def run_module(payload: ModuleRun) -> Any:
+    def run_module(payload: ModuleRun, response: Response, request: Request) -> Any:
         try:
             module = _engine(app).get_module(payload.module)
             commands = module.commands()
             if payload.command not in commands:
                 raise ValueError(f"Unknown command: {payload.module}.{payload.command}")
             kwargs = _safe_module_run_kwargs(payload)
-            return _jsonable(commands[payload.command](**kwargs))
+            indirect = f"POST /api/modules/run {payload.module}.{payload.command}"
+            replacement = compatibility_replacement(indirect)
+            if replacement:
+                _deprecated(response, replacement)
+                _record_legacy_entrypoint(app, indirect, request)
+                # This is an HTTP compatibility dispatch, not a CLI invocation.
+                # Call the registered module method directly so one request does
+                # not contaminate both compatibility counters.
+                command = getattr(module, payload.command)
+            else:
+                command = commands[payload.command]
+            return _jsonable(command(**kwargs))
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
@@ -2760,7 +2798,7 @@ def create_app(
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
-    @app.post("/api/live/daemon/strategy/status")
+    @app.post("/api/live/daemon/strategy/status", deprecated=True)
     def live_daemon_strategy_status(
         payload: dict[str, Any], response: Response, request: Request,
     ) -> dict[str, Any]:
@@ -2777,7 +2815,7 @@ def create_app(
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
-    @app.post("/api/live/daemon/strategy/start")
+    @app.post("/api/live/daemon/strategy/start", deprecated=True)
     def live_daemon_strategy_start(
         payload: dict[str, Any], response: Response, request: Request,
     ) -> dict[str, Any]:
@@ -2803,7 +2841,7 @@ def create_app(
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
-    @app.post("/api/live/daemon/strategy/pause")
+    @app.post("/api/live/daemon/strategy/pause", deprecated=True)
     def live_daemon_strategy_pause(
         payload: dict[str, Any], response: Response, request: Request,
     ) -> dict[str, Any]:
@@ -2820,7 +2858,7 @@ def create_app(
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
-    @app.post("/api/live/daemon/strategy/resume")
+    @app.post("/api/live/daemon/strategy/resume", deprecated=True)
     def live_daemon_strategy_resume(
         payload: dict[str, Any], response: Response, request: Request,
     ) -> dict[str, Any]:
@@ -2838,7 +2876,7 @@ def create_app(
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
-    @app.post("/api/live/daemon/strategy/stop")
+    @app.post("/api/live/daemon/strategy/stop", deprecated=True)
     def live_daemon_strategy_stop(
         payload: dict[str, Any], response: Response, request: Request,
     ) -> dict[str, Any]:

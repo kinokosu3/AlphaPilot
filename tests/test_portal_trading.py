@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
+from alphapilot.modules.portal import jobs
 from alphapilot.modules.portal.api import create_app, _import_completed_timing_jobs
 
 
@@ -70,6 +71,66 @@ def test_legacy_timing_catalog_declares_compatibility_route(engine) -> None:
         row["entrypoint"]: row for row in compatibility["entrypoints"]
     }
     assert catalog["GET /api/timing/strategies"]["call_count"] >= 1
+
+
+def test_indirect_legacy_dispatches_warn_and_use_distinct_counters(
+    engine,
+    monkeypatch,
+) -> None:  # noqa: ANN001
+    trading = engine.get_system("trading")
+    client = TestClient(create_app(engine=engine))
+    before = {
+        row["entrypoint"]: row["call_count"]
+        for row in trading.compatibility_status()["entrypoints"]
+    }
+    monkeypatch.setattr(
+        jobs,
+        "start_job",
+        lambda kind, kwargs: {
+            "job_id": "legacy-indirect",
+            "kind": kind,
+            "params": kwargs,
+            "status": "running",
+        },
+    )
+
+    job = client.post(
+        "/api/jobs",
+        json={"kind": "timing_backtest", "kwargs": {"strategy_name": "sma_filter"}},
+        headers={"X-Request-ID": "legacy-job-kind"},
+    )
+    assert job.status_code == 200
+    assert job.headers["Deprecation"] == "true"
+    assert "/api/trading/strategy-instances/" in job.headers["Link"]
+
+    modules = client.get("/api/modules")
+    timing_commands = {
+        item["name"]: item
+        for item in modules.json()["timing"]["commands"]
+    }
+    assert timing_commands["timing_strategies"]["deprecated"] is True
+    assert timing_commands["timing_strategies"]["replacement"] == "trading_definitions"
+    dispatched = client.post(
+        "/api/modules/run",
+        json={"module": "timing", "command": "timing_strategies", "kwargs": {}},
+        headers={"X-Request-ID": "legacy-module-run"},
+    )
+    assert dispatched.status_code == 200
+    assert dispatched.headers["Deprecation"] == "true"
+
+    after = {
+        row["entrypoint"]: row["call_count"]
+        for row in trading.compatibility_status()["entrypoints"]
+    }
+    assert (
+        after["POST /api/jobs kind=timing_backtest"]
+        == before["POST /api/jobs kind=timing_backtest"] + 1
+    )
+    assert (
+        after["POST /api/modules/run timing.timing_strategies"]
+        == before["POST /api/modules/run timing.timing_strategies"] + 1
+    )
+    assert after["CLI timing_strategies"] == before["CLI timing_strategies"]
 
 
 def test_broker_uat_http_surface_is_strictly_read_only(engine) -> None:

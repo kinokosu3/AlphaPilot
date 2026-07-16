@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import socket
+from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -28,6 +29,36 @@ class LiveModule(BaseModule):
 
     def _system(self):
         return self.context.system("live")
+
+    def _deprecated_strategy_command(self, command: str) -> None:
+        successor = {
+            "live_daemon_strategy_status": "trading_status",
+            "live_daemon_strategy_start": "trading_start",
+            "live_daemon_strategy_pause": "trading_pause",
+            "live_daemon_strategy_resume": "trading_resume",
+            "live_daemon_strategy_stop": "trading_stop",
+        }[command]
+        print(
+            f"DEPRECATED: {command} bypasses deployment coordination; "
+            f"successor: {successor}. Removal is planned for 0.2.0."
+        )
+        try:
+            self.context.system("trading").store.record_legacy_usage(
+                f"CLI {command}",
+                client_kind="cli",
+                client_version="0.1.x",
+                source="local",
+            )
+        except (AttributeError, KeyError):
+            pass
+
+    def _compatibility_command(self, command: str, fn: Callable[..., Any]) -> Callable[..., Any]:
+        @wraps(fn)
+        def invoke(*args: Any, **kwargs: Any) -> Any:
+            self._deprecated_strategy_command(command)
+            return fn(*args, **kwargs)
+
+        return invoke
 
     def _runtime(
         self,
@@ -608,7 +639,7 @@ class LiveModule(BaseModule):
         wait: bool = True,
         timeout: float = 5.0,
     ) -> dict[str, Any]:
-        """Ask the running daemon for strategy runner status."""
+        """Deprecated: use ``trading_status`` for a persisted deployment."""
         from alphapilot.systems.live.daemon import send_daemon_command
 
         return send_daemon_command(
@@ -634,7 +665,7 @@ class LiveModule(BaseModule):
         timeout: float = 5.0,
         confirm_live: bool = False,
     ) -> dict[str, Any]:
-        """Start a timing strategy runner inside the running daemon."""
+        """Deprecated: use ``trading_start`` for a persisted deployment."""
         from alphapilot.systems.live.daemon import send_daemon_command
 
         _require_daemon_live_confirmation(self.live_daemon_status(state_dir=state_dir), confirm_live=confirm_live)
@@ -663,7 +694,7 @@ class LiveModule(BaseModule):
         wait: bool = True,
         timeout: float = 5.0,
     ) -> dict[str, Any]:
-        """Pause the daemon strategy runner."""
+        """Deprecated: use ``trading_pause`` for a persisted deployment."""
         from alphapilot.systems.live.daemon import send_daemon_command
 
         return send_daemon_command(
@@ -681,7 +712,7 @@ class LiveModule(BaseModule):
         timeout: float = 5.0,
         confirm_live: bool = False,
     ) -> dict[str, Any]:
-        """Resume the daemon strategy runner."""
+        """Deprecated: reconcile and use ``trading_resume``."""
         from alphapilot.systems.live.daemon import send_daemon_command
 
         _require_daemon_live_confirmation(
@@ -703,7 +734,7 @@ class LiveModule(BaseModule):
         wait: bool = True,
         timeout: float = 5.0,
     ) -> dict[str, Any]:
-        """Stop the daemon strategy runner."""
+        """Deprecated: use ``trading_stop`` for a persisted deployment."""
         from alphapilot.systems.live.daemon import send_daemon_command
 
         return send_daemon_command(
@@ -1102,11 +1133,21 @@ class LiveModule(BaseModule):
             "live_daemon_refresh": self.live_daemon_refresh,
             "live_daemon_reconnect": self.live_daemon_reconnect,
             "live_daemon_cancel": self.live_daemon_cancel,
-            "live_daemon_strategy_status": self.live_daemon_strategy_status,
-            "live_daemon_strategy_start": self.live_daemon_strategy_start,
-            "live_daemon_strategy_pause": self.live_daemon_strategy_pause,
-            "live_daemon_strategy_resume": self.live_daemon_strategy_resume,
-            "live_daemon_strategy_stop": self.live_daemon_strategy_stop,
+            "live_daemon_strategy_status": self._compatibility_command(
+                "live_daemon_strategy_status", self.live_daemon_strategy_status,
+            ),
+            "live_daemon_strategy_start": self._compatibility_command(
+                "live_daemon_strategy_start", self.live_daemon_strategy_start,
+            ),
+            "live_daemon_strategy_pause": self._compatibility_command(
+                "live_daemon_strategy_pause", self.live_daemon_strategy_pause,
+            ),
+            "live_daemon_strategy_resume": self._compatibility_command(
+                "live_daemon_strategy_resume", self.live_daemon_strategy_resume,
+            ),
+            "live_daemon_strategy_stop": self._compatibility_command(
+                "live_daemon_strategy_stop", self.live_daemon_strategy_stop,
+            ),
             "live_daemon_order": self.live_daemon_order,
             "live_daemon_submit_target": self.live_daemon_submit_target,
             "live_order": self.live_order,

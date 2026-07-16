@@ -19,7 +19,9 @@ from alphapilot.systems.trading.parity import (
     DeploymentQualificationService,
 )
 from alphapilot.systems.trading.compatibility import (
+    ENTRYPOINTS,
     RemovalReadinessService,
+    compatibility_matrix,
     compatibility_environment_report_hash,
     validate_compatibility_environment_report,
 )
@@ -67,6 +69,44 @@ def _make_v5_database(path: Path) -> None:
         connection.commit()
     finally:
         connection.close()
+
+
+def test_compatibility_equivalence_matrix_is_complete_and_machine_readable() -> None:
+    expected_entrypoints = {
+        "GET /api/timing/strategies",
+        "POST /api/timing/signal",
+        "POST /api/timing/backtest",
+        "GET /api/timing/jobs/{id}/detail",
+        "CLI timing_strategies",
+        "CLI timing_signal",
+        "CLI timing_backtest",
+        "POST /api/jobs kind=timing_backtest",
+        "POST /api/modules/run timing.timing_strategies",
+        "POST /api/live/daemon/strategy/status",
+        "POST /api/live/daemon/strategy/start",
+        "POST /api/live/daemon/strategy/pause",
+        "POST /api/live/daemon/strategy/resume",
+        "POST /api/live/daemon/strategy/stop",
+        "CLI live_daemon_strategy_status",
+        "CLI live_daemon_strategy_start",
+        "CLI live_daemon_strategy_pause",
+        "CLI live_daemon_strategy_resume",
+        "CLI live_daemon_strategy_stop",
+        "daemon --timing-strategy",
+        "POST /api/trading/strategy-instances/{id}/backtest",
+        "POST /api/trading/deployments/{id}/{action}",
+        "POST /api/trading/stage-runs/*",
+    }
+    matrix = compatibility_matrix()
+
+    assert len(ENTRYPOINTS) == len(expected_entrypoints) == 23
+    assert {row["entrypoint"] for row in matrix} == expected_entrypoints
+    assert all(row["replacement"] for row in matrix)
+    assert all(row["classification"] for row in matrix)
+    assert all(row["semantic_fields"] for row in matrix)
+    assert all(row["test_id"] for row in matrix)
+    assert all(row["disposition"] == "remove_in_0.2.0" for row in matrix)
+    assert len({row["test_id"] for row in matrix}) == len(matrix)
 
 
 def _observation(

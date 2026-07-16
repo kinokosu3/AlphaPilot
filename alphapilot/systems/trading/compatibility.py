@@ -81,56 +81,189 @@ class CompatibilityEntrypoint:
     entrypoint: str
     kind: str
     replacement: str
+    classification: str = "compatibility_adapter"
+    semantic_fields: tuple[str, ...] = ()
+    side_effects: tuple[str, ...] = ()
+    auth: str = "same_as_replacement"
+    test_id: str = ""
+    disposition: str = "remove_in_0.2.0"
+
+    def matrix_row(self) -> dict[str, Any]:
+        return {
+            "entrypoint": self.entrypoint,
+            "kind": self.kind,
+            "replacement": self.replacement,
+            "classification": self.classification,
+            "semantic_fields": list(self.semantic_fields),
+            "side_effects": list(self.side_effects),
+            "auth": self.auth,
+            "test_id": self.test_id,
+            "disposition": self.disposition,
+        }
 
 
 ENTRYPOINTS = (
     CompatibilityEntrypoint(
         "GET /api/timing/strategies", "api", "/api/trading/strategy-definitions",
+        semantic_fields=("strategy_id", "parameter_schema", "required_history", "version"),
+        test_id="timing_catalog_equivalence",
     ),
     CompatibilityEntrypoint(
         "POST /api/timing/signal", "api", "/api/trading/strategy-instances/{id}/preview",
+        semantic_fields=("as_of", "states", "scores", "weights", "provenance"),
+        side_effects=("replay_only_temporary_instance", "decision_artifacts"),
+        test_id="timing_preview_equivalence",
     ),
     CompatibilityEntrypoint(
         "POST /api/timing/backtest", "api", "/api/trading/strategy-instances/{id}/backtest-runs",
+        semantic_fields=(
+            "signals", "weights", "targets", "plans", "orders", "fills",
+            "positions", "equity", "fees", "summary",
+        ),
+        side_effects=("replay_only_temporary_instance", "backtest_artifacts"),
+        test_id="timing_backtest_equivalence",
     ),
     CompatibilityEntrypoint(
         "GET /api/timing/jobs/{id}/detail", "api", "/api/trading/backtest-runs/{id}/detail",
+        semantic_fields=("summary", "signals", "fills", "positions", "equity"),
+        side_effects=("legacy_job_import",),
+        test_id="legacy_job_detail_equivalence",
     ),
-    CompatibilityEntrypoint("CLI timing_strategies", "cli", "trading_definitions"),
-    CompatibilityEntrypoint("CLI timing_signal", "cli", "trading_preview"),
-    CompatibilityEntrypoint("CLI timing_backtest", "cli", "trading_backtest"),
+    CompatibilityEntrypoint(
+        "CLI timing_strategies", "cli", "trading_definitions",
+        semantic_fields=("strategy_id", "parameter_schema", "required_history", "version"),
+        test_id="timing_catalog_cli_equivalence",
+    ),
+    CompatibilityEntrypoint(
+        "CLI timing_signal", "cli", "trading_preview",
+        semantic_fields=("as_of", "states", "scores", "weights"),
+        side_effects=("replay_only_temporary_instance", "decision_artifacts"),
+        test_id="timing_preview_cli_equivalence",
+    ),
+    CompatibilityEntrypoint(
+        "CLI timing_backtest", "cli", "trading_backtest",
+        semantic_fields=("signals", "weights", "targets", "fills", "equity", "summary"),
+        side_effects=("replay_only_temporary_instance", "backtest_artifacts"),
+        test_id="timing_backtest_cli_equivalence",
+    ),
+    CompatibilityEntrypoint(
+        "POST /api/jobs kind=timing_backtest", "api",
+        "/api/trading/strategy-instances/{id}/backtest-runs",
+        classification="indirect_compatibility_dispatch",
+        semantic_fields=("run_status", "artifacts", "summary"),
+        side_effects=("background_job", "backtest_run"),
+        test_id="timing_job_dispatch_equivalence",
+    ),
+    CompatibilityEntrypoint(
+        "POST /api/modules/run timing.timing_strategies", "api",
+        "/api/trading/strategy-definitions",
+        classification="indirect_compatibility_dispatch",
+        semantic_fields=("strategy_id", "parameter_schema", "required_history", "version"),
+        test_id="timing_module_dispatch_equivalence",
+    ),
     CompatibilityEntrypoint(
         "POST /api/live/daemon/strategy/status", "api", "/api/trading/deployments/{id}/status",
+        classification="legacy_runtime_control",
+        semantic_fields=("instance_id", "config_hash", "heartbeat", "runtime_id", "runner_status"),
+        side_effects=("daemon_ipc",),
+        auth="operator_token",
+        test_id="deployment_status_superset",
     ),
     CompatibilityEntrypoint(
         "POST /api/live/daemon/strategy/start", "api", "/api/trading/deployments/{id}/start",
+        classification="legacy_runtime_control",
+        semantic_fields=("instance_id", "config_hash", "heartbeat", "runtime_id", "runner_status"),
+        side_effects=("daemon_ipc", "runner_start"),
+        auth="operator_token",
+        test_id="deployment_start_superset",
     ),
     CompatibilityEntrypoint(
         "POST /api/live/daemon/strategy/pause", "api", "/api/trading/deployments/{id}/pause",
+        classification="legacy_runtime_control",
+        semantic_fields=("runner_status", "observed_state"),
+        side_effects=("daemon_ipc", "cancel_instance_orders", "route_block"),
+        auth="operator_token",
+        test_id="deployment_pause_superset",
     ),
     CompatibilityEntrypoint(
         "POST /api/live/daemon/strategy/resume", "api", "/api/trading/deployments/{id}/resume",
+        classification="legacy_runtime_control",
+        semantic_fields=("runner_status", "observed_state"),
+        side_effects=("daemon_ipc", "route_authorization"),
+        auth="operator_token",
+        test_id="deployment_resume_superset",
     ),
     CompatibilityEntrypoint(
         "POST /api/live/daemon/strategy/stop", "api", "/api/trading/deployments/{id}/stop",
+        classification="legacy_runtime_control",
+        semantic_fields=("runner_status", "observed_state"),
+        side_effects=("daemon_ipc", "cancel_instance_orders", "route_block", "stage_finish"),
+        auth="operator_token",
+        test_id="deployment_stop_superset",
+    ),
+    *(
+        CompatibilityEntrypoint(
+            f"CLI live_daemon_strategy_{action}",
+            "cli",
+            f"trading_{action}",
+            classification="legacy_runtime_control",
+            semantic_fields=("instance_id", "config_hash", "runtime_id", "runner_status"),
+            side_effects=("daemon_ipc",),
+            auth="local_operator_audit",
+            test_id=f"deployment_{action}_cli_superset",
+        )
+        for action in ("status", "start", "pause", "resume", "stop")
     ),
     CompatibilityEntrypoint(
         "daemon --timing-strategy", "daemon", "daemon --strategy-instance-id",
+        classification="legacy_anonymous_runner",
+        semantic_fields=("strategy_id", "params", "universe", "frequency"),
+        side_effects=("temporary_paper_instance", "daemon_runner"),
+        test_id="persistent_instance_runner_superset",
     ),
     CompatibilityEntrypoint(
         "POST /api/trading/strategy-instances/{id}/backtest",
         "api",
         "/api/trading/strategy-instances/{id}/backtest-runs",
+        semantic_fields=("run_status", "artifacts", "summary"),
+        side_effects=("backtest_run",),
+        auth="operator_token",
+        test_id="async_backtest_superset",
     ),
     CompatibilityEntrypoint(
         "POST /api/trading/deployments/{id}/{action}",
         "api",
         "/api/trading/deployments/{id}/{explicit-action}",
+        classification="generic_route_fallback",
+        semantic_fields=("desired_state", "observed_state", "runtime_id", "runner_status"),
+        side_effects=("deployment_lifecycle", "operator_audit"),
+        auth="operator_token",
+        test_id="explicit_lifecycle_route_equivalence",
     ),
     CompatibilityEntrypoint(
         "POST /api/trading/stage-runs/*", "api", "/api/trading/deployments/{id}/stage-runs",
+        classification="manual_evidence_write",
+        semantic_fields=("stage", "trading_sessions", "metrics", "passed"),
+        side_effects=("stage_evidence",),
+        auth="operator_token",
+        test_id="runtime_stage_evidence_superset",
     ),
 )
+
+
+def compatibility_matrix() -> list[dict[str, Any]]:
+    """Return the fixed, machine-readable replacement and removal contract."""
+
+    return [item.matrix_row() for item in ENTRYPOINTS]
+
+
+def compatibility_replacement(entrypoint: str) -> str:
+    """Resolve the successor for one compatibility surface, if registered."""
+
+    return next(
+        (item.replacement for item in ENTRYPOINTS if item.entrypoint == entrypoint),
+        "",
+    )
 
 
 def register_manifest(store: Any) -> None:

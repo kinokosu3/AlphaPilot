@@ -6,18 +6,28 @@ import ast
 import hashlib
 import json
 import os
+import sys
+from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from alphapilot.modules.report_factor.module import ReportFactorModule
+from alphapilot.modules.report_factor.module import ReportFactorModule, _result_dict
+from alphapilot.modules.report_factor.readers.azure import (
+    AzureDocumentIntelligenceOCRProvider,
+    read_pdf_with_azure,
+)
 from alphapilot.modules.report_factor.readers.base import PageText, PDFReadResult
 from alphapilot.modules.report_factor.readers.ocr import (
     OCRProvider,
     OCRProviderRegistry,
+    _entry_point_factory,
+    _validate_ocr_result,
     discover_ocr_providers,
+    normalize_provider_id,
 )
 from alphapilot.modules.report_factor.service import ReportFactorService
 from alphapilot.modules.report_factor.settings import ReportFactorSettings
@@ -157,6 +167,247 @@ def test_llm_json_is_retried_twice(tmp_path) -> None:
 
     assert service._chat_json("system", "user") == {"ok": True}
     assert llm.calls == 3
+
+
+def test_module_result_conversion_delegation_and_commit_rejections(
+    tmp_path,
+    monkeypatch,
+) -> None:  # noqa: ANN001
+    from alphapilot.modules.report_factor import service as service_module
+
+    @dataclass
+    class DataclassResult:
+        acceptable: bool
+
+    class UnknownResult:
+        def __repr__(self) -> str:
+            return "unknown-value"
+
+    assert _result_dict(DataclassResult(True)) == {"acceptable": True}
+    assert _result_dict({"acceptable": True}) == {"acceptable": True}
+    assert _result_dict(UnknownResult()) == {
+        "acceptable": False,
+        "code": "unknown_result",
+        "message": "unknown-value",
+    }
+
+    calls: dict[str, Any] = {}
+
+    class FakeExtraction:
+        def to_dict(self) -> dict[str, Any]:
+            return {"schema_version": "test"}
+
+    class FakeService:
+        def __init__(self, **kwargs: Any) -> None:
+            calls["init"] = kwargs
+
+        def extract(self, source: str, **kwargs: Any) -> FakeExtraction:
+            calls["extract"] = {"source": source, **kwargs}
+            return FakeExtraction()
+
+    monkeypatch.setattr(service_module, "ReportFactorService", FakeService)
+    monkeypatch.setenv("ALPHAPILOT_IMPORTANT_DATA_DIR", str(tmp_path / "important_data"))
+    factor = FakeFactorSystem()
+    llm = object()
+    module = ReportFactorModule()
+    module.setup(SimpleNamespace(get_llm=lambda: llm, factor=lambda: factor))
+
+    assert module.validate_ocr_mode(" LOCAL ") == "local"
+    with pytest.raises(ValueError, match="Unknown OCR mode/provider"):
+        module.validate_ocr_mode("missing")
+    result = module.extract_pdf(
+        "report.pdf",
+        market="A-share",
+        frequency="week",
+        available_data=["close"],
+        ocr_mode="local",
+        progress_callback=lambda *_args, **_kwargs: None,
+    )
+    assert result == {"schema_version": "test"}
+    assert calls["init"]["llm"] is llm
+    assert calls["init"]["factor_system"] is factor
+    assert calls["extract"]["frequency"] == "week"
+
+    commit = module.commit_factors(
+        "job-edge",
+        [
+            {},
+            {"draft_id": "same", "factor_name": "one", "factor_expression": "$close"},
+            {"draft_id": "same", "factor_name": "two", "factor_expression": "$open"},
+        ],
+    )
+    assert commit["n_committed"] == 1
+    assert [item["code"] for item in commit["rejected"]] == [
+        "invalid_commit_item",
+        "duplicate_draft_id",
+    ]
+
+
+def test_local_pdf_reader_handles_encryption_page_failures_and_empty_documents(
+    tmp_path,
+    monkeypatch,
+) -> None:  # noqa: ANN001
+    import pypdf
+
+    from alphapilot.modules.report_factor.readers.local import read_pdf_locally
+
+    class RaisingEncryptedReader:
+        is_encrypted = True
+        pages: list[Any] = []
+
+        def decrypt(self, _password: str) -> int:
+            raise RuntimeError("locked")
+
+    monkeypatch.setattr(pypdf, "PdfReader", lambda _path: RaisingEncryptedReader())
+    with pytest.raises(ValueError, match="Encrypted PDF"):
+        read_pdf_locally(tmp_path / "locked.pdf")
+
+    class LockedReader(RaisingEncryptedReader):
+        def decrypt(self, _password: str) -> int:
+            return 0
+
+    monkeypatch.setattr(pypdf, "PdfReader", lambda _path: LockedReader())
+    with pytest.raises(ValueError, match="Encrypted PDF"):
+        read_pdf_locally(tmp_path / "locked.pdf")
+
+    class BrokenPage:
+        def extract_text(self) -> str:
+            raise RuntimeError("bad page")
+
+    class PartialReader:
+        is_encrypted = False
+        pages = [BrokenPage()]
+
+    monkeypatch.setattr(pypdf, "PdfReader", lambda _path: PartialReader())
+    partial = read_pdf_locally(tmp_path / "partial.pdf")
+    assert partial.pages[0].text == ""
+    assert partial.warnings == ["Page 1 text extraction failed: RuntimeError"]
+
+    class EmptyReader:
+        is_encrypted = False
+        pages: list[Any] = []
+
+    monkeypatch.setattr(pypdf, "PdfReader", lambda _path: EmptyReader())
+    with pytest.raises(ValueError, match="no pages"):
+        read_pdf_locally(tmp_path / "empty.pdf")
+
+
+def test_ocr_registry_rejects_invalid_registration_factory_and_result_shapes(tmp_path) -> None:
+    assert normalize_provider_id(" Vendor-1 ") == "vendor-1"
+    for invalid in ("", "1vendor", "local", "auto", "bad space"):
+        with pytest.raises(ValueError):
+            normalize_provider_id(invalid)
+
+    registry = OCRProviderRegistry()
+    with pytest.raises(TypeError, match="factory must be callable"):
+        registry.register("vendor", object())  # type: ignore[arg-type]
+    registry.register("vendor", lambda: object())  # type: ignore[arg-type]
+    assert registry.has("bad space") is False
+    with pytest.raises(ValueError, match="already registered"):
+        registry.register("vendor", lambda: object())  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="Unknown OCR provider"):
+        registry.create("missing")
+    with pytest.raises(TypeError, match="expected OCRProvider"):
+        registry.create("vendor")
+
+    class DifferentProvider(OCRProvider):
+        provider_id = "different"
+
+        def extract_pdf(self, _source: Path) -> PDFReadResult:
+            raise AssertionError("not reached")
+
+    registry.register("vendor", DifferentProvider, replace=True)
+    with pytest.raises(ValueError, match="does not match"):
+        registry.create("vendor")
+
+    invalid_results = [
+        (object(), TypeError, "expected PDFReadResult"),
+        (PDFReadResult([PageText(1, "text")], "", True), ValueError, "empty parser"),
+        (PDFReadResult([], "parser", True), ValueError, "no pages"),
+        (PDFReadResult(["bad"], "parser", True), TypeError, "non-PageText"),  # type: ignore[list-item]
+        (PDFReadResult([PageText(True, "text")], "parser", True), TypeError, "non-integer"),
+        (PDFReadResult([PageText(0, "text")], "parser", True), ValueError, "invalid page"),
+        (
+            PDFReadResult([PageText(1, "one"), PageText(1, "two")], "parser", True),
+            ValueError,
+            "duplicate page",
+        ),
+        (PDFReadResult([PageText(1, 42)], "parser", True), TypeError, "text must be str"),  # type: ignore[arg-type]
+        (PDFReadResult([PageText(1, "  ")], "parser", True), ValueError, "no readable text"),
+    ]
+    for payload, error, match in invalid_results:
+        with pytest.raises(error, match=match):
+            _validate_ocr_result("vendor", payload)
+
+
+def test_azure_ocr_adapter_maps_pages_content_fallback_and_empty_result(
+    tmp_path,
+    monkeypatch,
+) -> None:  # noqa: ANN001
+    source = tmp_path / "report.pdf"
+    source.write_bytes(b"%PDF-test")
+    results = iter(
+        [
+            SimpleNamespace(
+                pages=[
+                    SimpleNamespace(
+                        page_number=3,
+                        lines=[SimpleNamespace(content="line one"), SimpleNamespace(content="line two")],
+                    )
+                ],
+                content="",
+            ),
+            SimpleNamespace(pages=[], content="fallback text"),
+            SimpleNamespace(pages=[], content=""),
+        ]
+    )
+
+    class Poller:
+        def result(self) -> Any:
+            return next(results)
+
+    class Client:
+        def __init__(self, *, endpoint: str, credential: Any) -> None:
+            assert endpoint == "https://azure.example"
+            assert credential.key == "secret"
+
+        def begin_analyze_document(self, model: str, handle: Any) -> Poller:
+            assert model == "prebuilt-layout"
+            assert handle.read().startswith(b"%PDF")
+            return Poller()
+
+    class Credential:
+        def __init__(self, key: str) -> None:
+            self.key = key
+
+    formrecognizer = ModuleType("azure.ai.formrecognizer")
+    formrecognizer.DocumentAnalysisClient = Client  # type: ignore[attr-defined]
+    credentials = ModuleType("azure.core.credentials")
+    credentials.AzureKeyCredential = Credential  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "azure", ModuleType("azure"))
+    monkeypatch.setitem(sys.modules, "azure.ai", ModuleType("azure.ai"))
+    monkeypatch.setitem(sys.modules, "azure.ai.formrecognizer", formrecognizer)
+    monkeypatch.setitem(sys.modules, "azure.core", ModuleType("azure.core"))
+    monkeypatch.setitem(sys.modules, "azure.core.credentials", credentials)
+
+    provider = AzureDocumentIntelligenceOCRProvider(
+        endpoint="https://azure.example",
+        key="secret",
+    )
+    page_result = provider.extract_pdf(source)
+    assert [(page.page_number, page.text) for page in page_result.pages] == [
+        (3, "line one\nline two")
+    ]
+    fallback = read_pdf_with_azure(
+        source,
+        endpoint="https://azure.example",
+        key="secret",
+    )
+    assert fallback.pages == [PageText(1, "fallback text")]
+    with pytest.raises(ValueError, match="no readable pages"):
+        provider.extract_pdf(source)
+    with pytest.raises(RuntimeError, match="credentials are not configured"):
+        AzureDocumentIntelligenceOCRProvider(endpoint="", key="").extract_pdf(source)
 
 
 def test_auto_ocr_requires_credentials_for_sparse_pdf(tmp_path, monkeypatch) -> None:  # noqa: ANN001
@@ -338,6 +589,47 @@ def test_ocr_entry_point_is_discovered_but_loaded_only_when_selected(
 
     assert loaded == ["vendor"]
     assert result.pages[0].page_number == 1
+
+
+def test_ocr_entry_point_factory_and_discovery_isolate_all_invalid_plugins(
+    monkeypatch,
+) -> None:  # noqa: ANN001
+    from alphapilot.modules.report_factor.readers import ocr
+
+    class Provider(OCRProvider):
+        provider_id = "vendor"
+
+        def extract_pdf(self, _source: Path) -> PDFReadResult:
+            return PDFReadResult([PageText(1, "text")], "vendor", True)
+
+    class EntryPoint:
+        def __init__(self, name: str, loaded: Any) -> None:
+            self.name = name
+            self.loaded = loaded
+
+        def load(self) -> Any:
+            return self.loaded
+
+    provider = Provider()
+    assert _entry_point_factory(EntryPoint("vendor", provider)) is provider
+    with pytest.raises(TypeError, match="returned object"):
+        _entry_point_factory(EntryPoint("bad-factory", lambda: object()))
+    with pytest.raises(TypeError, match="expected an OCRProvider"):
+        _entry_point_factory(EntryPoint("bad-value", object()))
+
+    registry = OCRProviderRegistry()
+    registry.register("vendor", Provider)
+    monkeypatch.setattr(
+        ocr,
+        "_entry_points",
+        lambda: [
+            EntryPoint("vendor", Provider),
+            EntryPoint("bad name", Provider),
+        ],
+    )
+    skipped = discover_ocr_providers(registry)
+    assert skipped[0] == "vendor: duplicate provider id"
+    assert "bad name: ValueError" in skipped[1]
 
 
 def test_commit_is_explicit_and_returns_partial_failures(tmp_path, monkeypatch) -> None:  # noqa: ANN001

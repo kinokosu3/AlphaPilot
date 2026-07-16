@@ -14,6 +14,22 @@ EXPECTED_OPERATION_COUNT = 165
 EXPECTED_PATH_COUNT = 150
 EXPECTED_CONTRACT_SHA256 = "473700062213573050785caa1093d5ee52aca1edc13b49d5fe9b061387d29b30"
 HTTP_METHODS = {"get", "post", "put", "patch", "delete"}
+LEGACY_HTTP_OPERATIONS = {
+    ("get", "/api/timing/strategies"),
+    ("post", "/api/timing/signal"),
+    ("post", "/api/timing/backtest"),
+    ("get", "/api/timing/jobs/{job_id}/detail"),
+    ("post", "/api/trading/strategy-instances/{instance_id}/backtest"),
+    ("post", "/api/trading/deployments/{instance_id}/{action}"),
+    ("post", "/api/trading/stage-runs/{instance_id}/{stage}/start"),
+    ("post", "/api/trading/stage-runs/{run_id}/finish"),
+    ("post", "/api/trading/stage-runs/{instance_id}/{stage}/evaluate"),
+    ("post", "/api/live/daemon/strategy/status"),
+    ("post", "/api/live/daemon/strategy/start"),
+    ("post", "/api/live/daemon/strategy/pause"),
+    ("post", "/api/live/daemon/strategy/resume"),
+    ("post", "/api/live/daemon/strategy/stop"),
+}
 
 
 def _operation_contract(spec: dict) -> list[dict]:
@@ -62,6 +78,18 @@ def test_all_typed_operations_declare_validation_errors() -> None:
         if has_typed_input:
             assert "422" in operation["responses"], item
         assert "200" in operation["responses"], item
+
+
+def test_all_legacy_http_operations_are_marked_deprecated() -> None:
+    spec = create_app().openapi()
+    deprecated = {
+        (method, path)
+        for path, path_item in spec["paths"].items()
+        for method, operation in path_item.items()
+        if method in HTTP_METHODS and operation.get("deprecated") is True
+    }
+
+    assert deprecated == LEGACY_HTTP_OPERATIONS
 
 
 def test_representative_resource_and_validation_failures_never_return_500(isolated_env) -> None:

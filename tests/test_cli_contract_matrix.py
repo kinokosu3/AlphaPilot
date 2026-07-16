@@ -12,6 +12,18 @@ import pytest
 from conftest import EXPECTED_CLI_COMMANDS
 
 
+LEGACY_CLI_COMMANDS = {
+    "timing_strategies",
+    "timing_signal",
+    "timing_backtest",
+    "live_daemon_strategy_status",
+    "live_daemon_strategy_start",
+    "live_daemon_strategy_pause",
+    "live_daemon_strategy_resume",
+    "live_daemon_strategy_stop",
+}
+
+
 def _fire_exit_code(commands, command: list[str]) -> tuple[int, str]:  # noqa: ANN001
     output = io.StringIO()
     with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
@@ -41,6 +53,54 @@ def test_cli_unknown_command_has_nonzero_stable_error(engine) -> None:  # noqa: 
     code, output = _fire_exit_code(engine.collect_commands(), ["__not_a_command__"])
     assert code != 0
     assert "Could not consume arg" in output or "ERROR" in output
+
+
+def test_all_legacy_cli_help_declares_deprecation_and_successor(engine) -> None:  # noqa: ANN001
+    commands = engine.collect_commands()
+    for name in sorted(LEGACY_CLI_COMMANDS):
+        code, help_text = _fire_exit_code(commands, [name, "--", "--help"])
+        assert code == 0, name
+        assert "Deprecated" in help_text, name
+        assert "trading_" in help_text, name
+
+
+def test_legacy_cli_execution_warns_and_records_the_exact_surface(
+    engine,
+    monkeypatch,
+    capsys,
+) -> None:  # noqa: ANN001
+    trading = engine.get_system("trading")
+    before = {
+        row["entrypoint"]: row["call_count"]
+        for row in trading.compatibility_status()["entrypoints"]
+    }
+    modules = {
+        "timing": engine.get_module("timing"),
+        "live": engine.get_module("live"),
+    }
+    for module in modules.values():
+        for command in LEGACY_CLI_COMMANDS:
+            if hasattr(module, command):
+                monkeypatch.setattr(
+                    module,
+                    command,
+                    lambda **_kwargs: {"ok": True},
+                )
+
+    for module in modules.values():
+        commands = module.commands()
+        for name in sorted(LEGACY_CLI_COMMANDS & commands.keys()):
+            assert commands[name]() == {"ok": True}
+
+    output = capsys.readouterr().out
+    after = {
+        row["entrypoint"]: row["call_count"]
+        for row in trading.compatibility_status()["entrypoints"]
+    }
+    for name in LEGACY_CLI_COMMANDS:
+        entrypoint = f"CLI {name}"
+        assert f"DEPRECATED: {name}" in output
+        assert after[entrypoint] == before[entrypoint] + 1
 
 
 @pytest.mark.parametrize("command_name", ["pool_create", "live_order", "backtest", "timing_signal"])

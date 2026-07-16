@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -65,9 +66,16 @@ class TimingModule(BaseModule):
         except (AttributeError, KeyError):
             pass
 
+    def _compatibility_command(self, command: str, fn: Callable[..., Any]) -> Callable[..., Any]:
+        @wraps(fn)
+        def invoke(*args: Any, **kwargs: Any) -> Any:
+            self._deprecated(command)
+            return fn(*args, **kwargs)
+
+        return invoke
+
     def timing_strategies(self) -> list[dict[str, Any]]:
-        """List built-in timing strategies and default parameters."""
-        self._deprecated("timing_strategies")
+        """Deprecated: use ``trading_definitions``."""
         rows = self._system().list_strategies()
         for row in rows:
             print(f"{row['name']}: {row['description']} defaults={row['defaults']}")
@@ -89,8 +97,7 @@ class TimingModule(BaseModule):
         strategy_params: Any = None,
         output: str | None = None,
     ) -> dict[str, Any]:
-        """Generate timing signals from local CSV bars."""
-        self._deprecated("timing_signal")
+        """Deprecated: create an instance and use ``trading_preview``."""
         req = TimingBacktestRequest(
             strategy_name=strategy_name,
             symbols=_parse_symbols(symbols),
@@ -141,8 +148,7 @@ class TimingModule(BaseModule):
         strategy_params: Any = None,
         output_dir: str | None = None,
     ) -> dict[str, Any]:
-        """Run a long-only timing backtest and write artifacts."""
-        self._deprecated("timing_backtest")
+        """Deprecated: create an instance and use ``trading_backtest --wait``."""
         req = TimingBacktestRequest(
             strategy_name=strategy_name,
             symbols=_parse_symbols(symbols),
@@ -170,7 +176,13 @@ class TimingModule(BaseModule):
 
     def commands(self) -> dict[str, Callable[..., Any]]:
         return {
-            "timing_strategies": self.timing_strategies,
-            "timing_signal": self.timing_signal,
-            "timing_backtest": self.timing_backtest,
+            "timing_strategies": self._compatibility_command(
+                "timing_strategies", self.timing_strategies,
+            ),
+            "timing_signal": self._compatibility_command(
+                "timing_signal", self.timing_signal,
+            ),
+            "timing_backtest": self._compatibility_command(
+                "timing_backtest", self.timing_backtest,
+            ),
         }

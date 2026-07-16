@@ -46,6 +46,7 @@ from alphapilot.systems.trading.operators import OperatorAuthService
 from alphapilot.systems.trading.compatibility import (
     ENVIRONMENT_REPORT_SCHEMA,
     RemovalReadinessService,
+    compatibility_matrix,
     compatibility_environment_report_hash,
     register_manifest as register_compatibility_manifest,
     validate_compatibility_environment_report,
@@ -832,11 +833,21 @@ class TradingStrategySystem(BaseSystem):
 
     def compatibility_status(self) -> dict[str, Any]:
         local_report = self._refresh_local_compatibility_report()
+        matrix = compatibility_matrix()
+        matrix_by_entrypoint = {item["entrypoint"]: item for item in matrix}
+        entrypoints = [
+            {
+                **row,
+                "equivalence": matrix_by_entrypoint.get(str(row["entrypoint"]), {}),
+            }
+            for row in self.store.compatibility_status()
+        ]
         return {
             "schema_version": self.store.schema_version,
             "environment_id": self.compatibility_environment_id,
             "environments": self.store.compatibility_environment_status(),
-            "entrypoints": self.store.compatibility_status(),
+            "entrypoints": entrypoints,
+            "equivalence_matrix": matrix,
             "timing_equivalence": self._timing_equivalence_status(),
             "local_environment_report": local_report,
         }

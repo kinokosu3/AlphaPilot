@@ -33,14 +33,21 @@ provider -> SignalEnvelope -> PortfolioPolicy -> PortfolioDecision
 | `/api/timing/signal`、`timing_signal` | 创建实例后调用实例 `/preview`、`trading_preview` |
 | `/api/timing/backtest`、`timing_backtest` | 实例异步 `/backtest-runs`、`trading_backtest --wait` |
 | `/api/timing/jobs/{id}/detail` | `/api/trading/backtest-runs/{run_id}/detail` |
+| `/api/jobs` 的 `timing_backtest` kind | 实例异步 `/backtest-runs` |
+| `/api/modules/run` 的 timing 兼容命令 | 正式 `/api/trading` 资源接口 |
 | `/api/live/daemon/strategy/*` | `/api/trading/deployments/{id}/{start,pause,reconcile,resume,stop,status}` |
+| `live_daemon_strategy_*` CLI | `trading_{status,start,pause,reconcile,resume,stop}` |
 | daemon strategy-name 参数 | `strategy_instance_id` |
 | 同步实例 backtest | 异步 backtest run |
 | 泛化 deployment action | 五个显式生命周期路由 |
 | 手工 stage start/finish/evaluate | runtime 自动 stage run + 只读 qualification |
 
-兼容 HTTP 响应固定返回 `Deprecation: true`、发布清单中的 `Sunset` 和 successor `Link`。调用事件
-记录入口、环境、客户端类型/版本、来源和请求 ID 哈希。Sunset 不能通过环境变量修改。
+兼容 HTTP 响应固定返回 `Deprecation: true`、发布清单中的 `Sunset` 和 successor `Link`；14 个
+旧 HTTP 操作也在 OpenAPI 中标记 `deprecated: true`。8 个旧 CLI 的 help 和执行输出均显示 successor。
+`/api/trading/compatibility` 暴露 23 个兼容面的机器可读等价矩阵，包含输入/输出语义、状态副作用、
+权限边界、测试 ID 和最终处置。调用事件记录真实入口、环境、客户端类型/版本、来源和请求 ID 哈希；
+通用 job、module dispatcher 与 CLI 分开计数，避免一次请求污染多个零调用指标。Sunset 不能通过环境
+变量修改。
 
 ## REPLAY 与 SHADOW 一致性
 
