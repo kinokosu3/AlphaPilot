@@ -689,7 +689,7 @@ def test_broker_uat_failure_cleanup_persists_actual_filled_notional(
         )
 
     failed = store.list_broker_uat_runs("xtp")[0]
-    assert failed["filled_notional"] == pytest.approx(1990.0)
+    assert failed["filled_notional"] == pytest.approx(1998.0)
     cleanup = next(
         step for step in failed["steps"] if step["step"] == "failure_cleanup"
     )
@@ -759,8 +759,8 @@ def test_broker_uat_v2_uses_a_distinct_resting_price_and_actual_trade_amount() -
     )
 
     assert plan["fill"] == {"volume": 100.0, "price": 10.0}
-    assert 9.8 <= plan["remainder"]["price"] < 9.99
-    assert plan["remainder"]["price"] == pytest.approx(9.9)
+    assert plan["remainder"]["price"] < 9.99
+    assert plan["remainder"]["price"] == pytest.approx(9.98)
     assert plan["requested_notional"] <= 2000.0
 
     runtime = SimpleNamespace(
@@ -820,8 +820,8 @@ def test_broker_uat_execution_plan_rejects_unsafe_prices_and_supports_sell() -> 
         contract=contract,
         tick=tick,
     )
-    assert 10.0 < sell["remainder"]["price"] <= 10.2
-    assert sell["remainder"]["price"] == pytest.approx(10.1)
+    assert sell["remainder"]["price"] > 10.0
+    assert sell["remainder"]["price"] == pytest.approx(10.01)
     assert broker_uat_module._align_price(10.001, 0.01, direction="up") == 10.01
     with pytest.raises(ValueError, match="direction"):
         broker_uat_module._align_price(10, 0.01, direction="sideways")
@@ -891,6 +891,11 @@ def test_broker_uat_quote_wait_and_legacy_order_helpers_cover_empty_state() -> N
         ["600000.SSE"],
         timeout=0.001,
     ) is None
+    assert broker_uat_module._wait_for_quotes(
+        runtime,
+        ["600000.SSE"],
+        timeout=0.001,
+    ) == set()
     assert broker_uat_module._primary_order_id({
         "scenario_version": 2,
         "steps": [{
@@ -905,6 +910,29 @@ def test_broker_uat_quote_wait_and_legacy_order_helpers_cover_empty_state() -> N
             "evidence": {"order_id": "primary-id"},
         }],
     }) == "primary-id"
+
+
+def test_broker_uat_preflight_waits_for_all_candidate_quotes() -> None:
+    callbacks = {"count": 0}
+
+    def settle(_timeout: float) -> None:
+        callbacks["count"] += 1
+
+    def get_tick(symbol: str) -> object | None:
+        required = {"510300.SSE": 1, "512480.SSE": 2}[symbol]
+        return object() if callbacks["count"] >= required else None
+
+    runtime = SimpleNamespace(
+        settle_broker_events=settle,
+        engine=SimpleNamespace(oms=SimpleNamespace(get_tick=get_tick)),
+    )
+
+    assert broker_uat_module._wait_for_quotes(
+        runtime,
+        ["510300.SSE", "512480.SSE"],
+        timeout=0.5,
+    ) == {"510300.SSE", "512480.SSE"}
+    assert callbacks["count"] >= 2
 
 
 def test_broker_uat_read_only_preflight_rejects_invalid_or_unready_inputs(

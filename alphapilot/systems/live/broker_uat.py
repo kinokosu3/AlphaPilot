@@ -102,7 +102,7 @@ class BrokerUATHarness:
             candidates = [item for item in candidates if oms.get_contract(item) is not None][:30]
             if candidates:
                 runtime.engine.subscribe_market_data(candidates)
-                _wait_for_any_quote(runtime, candidates, timeout=min(float(timeout), 15.0))
+                _wait_for_quotes(runtime, candidates, timeout=min(float(timeout), 15.0))
             rows = []
             for instrument in candidates:
                 contract = oms.get_contract(instrument)
@@ -1136,22 +1136,22 @@ def _build_execution_plan(
         marketable = requested_price or ask
         if ask <= 0 or marketable + 1e-12 < ask:
             raise ValueError("buy UAT fill price must cross the current best ask")
-        # A best-bid order can become marketable during the required process
-        # restart. Keep the recovery child away from the market, but also keep
-        # it inside the exchanges' dynamic order-price cage.  The previous 4%
-        # offset was inside our 5% fat-finger guard yet was rejected by the XTP
-        # simulator before it could become the recoverable active child.
-        resting = min(
-            bid - price_tick if bid > price_tick else marketable - price_tick,
-            _align_price(reference * 0.99, price_tick, direction="up"),
+        # Keep the recovery child one tick behind the best bid.  Percentage
+        # offsets are not portable: the XTP simulator can reject even a 1%
+        # passive order through its dynamic exchange price cage.
+        resting = _align_price(
+            (bid if bid > price_tick else min(marketable, reference)) - price_tick,
+            price_tick,
+            direction="down",
         )
     else:
         marketable = requested_price or bid
         if bid <= 0 or marketable - 1e-12 > bid:
             raise ValueError("sell UAT fill price must cross the current best bid")
-        resting = max(
-            ask + price_tick if ask > 0 else marketable + price_tick,
-            _align_price(reference * 1.01, price_tick, direction="down"),
+        resting = _align_price(
+            (ask if ask > 0 else max(marketable, reference)) + price_tick,
+            price_tick,
+            direction="up",
         )
     if min(marketable, resting) <= 0:
         raise ValueError("Broker UAT execution prices must be positive")
@@ -1193,6 +1193,26 @@ def _wait_for_any_quote(runtime: Any, symbols: list[str], *, timeout: float) -> 
         if any(runtime.engine.oms.get_tick(item) is not None for item in symbols):
             return
         time.sleep(0.05)
+
+
+def _wait_for_quotes(runtime: Any, symbols: list[str], *, timeout: float) -> set[str]:
+    """Wait for every subscribed candidate until the shared deadline.
+
+    Some native gateways deliver subscriptions one callback at a time.  The
+    preflight must not stop after the first callback because doing so can hide
+    cheaper, risk-compatible candidates later in the subscription batch.
+    """
+    pending = set(symbols)
+    deadline = time.monotonic() + max(float(timeout), 0.1)
+    while pending and time.monotonic() < deadline:
+        runtime.settle_broker_events(0.1)
+        pending = {
+            item for item in pending
+            if runtime.engine.oms.get_tick(item) is None
+        }
+        if pending:
+            time.sleep(0.05)
+    return set(symbols) - pending
 
 
 def _default_candidate_symbols(contracts: dict[str, Any]) -> list[str]:
