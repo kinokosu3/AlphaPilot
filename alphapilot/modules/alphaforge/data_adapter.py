@@ -139,8 +139,29 @@ def get_data_splits(
     )
 
 
-def default_target() -> Any:
-    """The default forward-return label used by AlphaForge."""
-    from alphagen_generic.features import target
+def default_target(
+    target_horizon: int = 20,
+    target_price: str = "vwap",
+) -> Any:
+    """Build an AlphaForge forward-return label without changing legacy defaults.
 
-    return target
+    AlphaForge aligns a decision at D with prices from D+1 through D+horizon;
+    consequently the expression is ``Ref(price, -(horizon+1)) / Ref(price, -1) - 1``.
+    """
+
+    if isinstance(target_horizon, bool) or not isinstance(target_horizon, int):
+        raise ValueError("target_horizon must be an integer")
+    if not 1 <= target_horizon <= 29:
+        raise ValueError("target_horizon must be between 1 and 29")
+    normalized_price = str(target_price).strip().lower()
+    if normalized_price not in {"close", "vwap"}:
+        raise ValueError("target_price must be one of: close, vwap")
+
+    from alphagen.data.expression import Feature, Ref
+    from alphagen_qlib.stock_data import FeatureType
+
+    feature_type = (
+        FeatureType.CLOSE if normalized_price == "close" else FeatureType.VWAP
+    )
+    price = Feature(feature_type)
+    return Ref(price, -(target_horizon + 1)) / Ref(price, -1) - 1

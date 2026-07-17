@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import datetime
+import hashlib
+import json
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -96,12 +98,28 @@ class StrategySystem(BaseStrategySystem):
         rows = {row.get("factor_name"): row for row in self.context.factor().list_factors()}
         formulas: list[str] = []
         missing: list[str] = []
+        factor_assets: list[dict[str, Any]] = []
         for n in wanted:
             row = rows.get(n)
             if row is None:
                 missing.append(n)
                 continue
-            formulas.append(row.get("factor_expression"))
+            if row.get("metadata_integrity", True) is not True:
+                raise ValueError(f"Factor research metadata failed integrity check: {n}")
+            expression = str(row.get("factor_expression") or "").strip()
+            if not expression:
+                raise ValueError(f"Factor has no expression: {n}")
+            formulas.append(expression)
+            factor_assets.append(
+                {
+                    "factor_name": n,
+                    "factor_expression_sha256": hashlib.sha256(
+                        expression.encode("utf-8")
+                    ).hexdigest(),
+                    "metadata_sha256": str(row.get("metadata_sha256") or ""),
+                    "metadata": dict(row.get("metadata") or {}),
+                }
+            )
         if missing:
             raise ValueError(f"Factors not found in library: {missing}")
 
@@ -109,12 +127,86 @@ class StrategySystem(BaseStrategySystem):
         metadata: dict[str, Any] = {
             "source": "factor_library",
             "factor_names": wanted,
+            "factor_assets": factor_assets,
+            "factor_formula_hash": self._json_sha256(formulas),
+            "factor_asset_fingerprint": self._json_sha256(factor_assets),
             "created_at": datetime.now().isoformat(timespec="seconds"),
         }
-        if market and market.strip():
-            metadata["market"] = market.strip()
+
+        research_metadata = [item["metadata"] for item in factor_assets]
+
+        def unique_values(key: str) -> list[Any]:
+            values = [item.get(key) for item in research_metadata]
+            return list(
+                {
+                    json.dumps(value, ensure_ascii=False, sort_keys=True, default=str): value
+                    for value in values
+                    if value not in (None, "", {}, [])
+                }.values()
+            )
+
+        factor_markets = [str(value) for value in unique_values("market")]
+        requested_market = str(market or "").strip()
+        if len(factor_markets) > 1:
+            raise ValueError(f"Selected factors use different markets: {factor_markets}")
+        if requested_market and factor_markets and requested_market != factor_markets[0]:
+            raise ValueError("Requested market does not match selected factor metadata")
+        resolved_market = requested_market or (factor_markets[0] if factor_markets else "")
+        if resolved_market:
+            metadata["market"] = resolved_market
+
+        for key in ("provider_uri", "factor_data_fingerprint"):
+            values = [str(value) for value in unique_values(key)]
+            if len(values) > 1:
+                raise ValueError(f"Selected factors use different {key} values")
+            if values:
+                metadata[key] = values[0]
+
+        metadata["hypotheses"] = unique_values("hypothesis")
+        metadata["mining_rounds"] = unique_values("mining_round")
+        metadata["random_seeds"] = unique_values("seed")
+        metadata["source_data_splits"] = unique_values("data_split")
+        metadata["source_model_fingerprints"] = unique_values("model_fingerprint")
+        metadata["source_template_fingerprints"] = unique_values(
+            "qlib_template_fingerprint"
+        )
         if yaml_params:
-            metadata["yaml_params"] = yaml_params
+            frozen_yaml = dict(yaml_params)
+            yaml_market = str(frozen_yaml.get("market") or "").strip()
+            if yaml_market and resolved_market and yaml_market != resolved_market:
+                raise ValueError("yaml_params.market does not match selected factors")
+            if resolved_market:
+                frozen_yaml["market"] = resolved_market
+            yaml_provider = str(frozen_yaml.get("provider_uri") or "").strip()
+            bound_provider = str(metadata.get("provider_uri") or "").strip()
+            if yaml_provider and bound_provider:
+                if str(Path(yaml_provider).expanduser().resolve()) != str(
+                    Path(bound_provider).expanduser().resolve()
+                ):
+                    raise ValueError(
+                        "yaml_params.provider_uri does not match selected factors"
+                    )
+            if bound_provider:
+                frozen_yaml["provider_uri"] = bound_provider
+            metadata["yaml_params"] = frozen_yaml
+            metadata["data_split"] = {
+                key: frozen_yaml[key]
+                for key in (
+                    "train_start",
+                    "train_end",
+                    "valid_start",
+                    "valid_end",
+                    "test_start",
+                    "test_end",
+                    "backtest_start",
+                    "backtest_end",
+                    "label_expression",
+                )
+                if key in frozen_yaml
+            }
+            metadata["qlib_template_fingerprint"] = str(
+                frozen_yaml.get("qlib_template_fingerprint") or ""
+            )
 
         record = StrategyRecord(
             strategy_name=name,
@@ -215,6 +307,160 @@ class StrategySystem(BaseStrategySystem):
             extra={k: v for k, v in source.items() if k not in {"IC", "ic", "ICIR", "information_ratio", "icir", "Rank IC", "rank_ic", "rankIC", "Rank ICIR", "rank_icir", "rankICIR"}},
         )
 
+    @staticmethod
+    def _file_sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _json_sha256(value: Any) -> str:
+        payload = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    def _register_retrained_asset(
+        self,
+        *,
+        source_record: StrategyRecord,
+        request: StrategyBacktestRequest,
+        run: Any,
+        metrics: StrategyMetrics | None,
+        qlib_config_name: str | None,
+        qlib_template_dir: str | Path | None,
+        yaml_params: dict[str, Any] | None,
+    ) -> StrategyRecord:
+        """Freeze a successful retrain workspace into a new deployable asset."""
+
+        target_name = str(request.save_as or "").strip()
+        if not target_name:
+            raise ValueError("save_as must be a non-empty strategy name")
+        if self.get_strategy(target_name) is not None:
+            raise ValueError(f"Strategy asset already exists: {target_name}")
+        workspace_value = getattr(run, "workspace_path", None)
+        if not workspace_value:
+            raise ValueError("successful retrain did not expose a workspace")
+        workspace = Path(workspace_value).expanduser().resolve()
+        if not workspace.is_dir():
+            raise ValueError(f"retrain workspace is missing: {workspace}")
+
+        experiment = run.result.experiment
+        from alphapilot.systems.backtest.qlib_config import resolve_qlib_config_name
+        from alphapilot.systems.backtest.scoring_model_export import (
+            export_scoring_model_artifacts,
+        )
+
+        resolved_config = resolve_qlib_config_name(experiment, qlib_config_name)
+        artifact_dir = export_scoring_model_artifacts(workspace, resolved_config)
+        model_path = artifact_dir / "fitted_model.pkl"
+        if not model_path.is_file():
+            raise ValueError("retrain completed without a fitted_model.pkl artifact")
+
+        factor_ctx = getattr(experiment, "factor_data_context", None)
+        provider_uri = str(
+            Path(
+                request.qlib_data_dir
+                or getattr(getattr(factor_ctx, "spec", None), "qlib_dir", "")
+                or (source_record.metadata or {}).get("provider_uri")
+                or self.context.config.data.qlib_data_dir
+            ).expanduser().resolve()
+        )
+        market = str(
+            getattr(getattr(factor_ctx, "spec", None), "market", "")
+            or (source_record.metadata or {}).get("market")
+            or ""
+        ).strip()
+        if not market:
+            raise ValueError("retrained strategy has no bound market")
+
+        factor_fingerprint = str(getattr(factor_ctx, "fingerprint", "") or "")
+        if not factor_fingerprint:
+            from alphapilot.systems.data.factor_h5 import FactorDataSpec
+
+            factor_fingerprint = FactorDataSpec(
+                qlib_dir=Path(provider_uri),
+                market=market,
+            ).fingerprint()
+
+        frozen_yaml = dict(yaml_params or {})
+        for key, expected in (("market", market), ("provider_uri", provider_uri)):
+            supplied = frozen_yaml.get(key)
+            if supplied and str(Path(supplied).expanduser().resolve() if key == "provider_uri" else supplied) != expected:
+                raise ValueError(f"yaml_params.{key} does not match the trained data context")
+            frozen_yaml[key] = expected
+
+        model_config_path = artifact_dir / "model_config.json"
+        fitted_state_path = artifact_dir / "fitted_training_state.json"
+        model_config = (
+            json.loads(model_config_path.read_text(encoding="utf-8"))
+            if model_config_path.is_file()
+            else {}
+        )
+        fitted_state = (
+            json.loads(fitted_state_path.read_text(encoding="utf-8"))
+            if fitted_state_path.is_file()
+            else {}
+        )
+        config_path = workspace / resolved_config
+        config_hash = self._file_sha256(config_path) if config_path.is_file() else ""
+        model_hash = self._file_sha256(model_path)
+        factor_hash = self._json_sha256(source_record.factor_formulas)
+        metadata = {
+            **dict(source_record.metadata or {}),
+            "source": "strategy_retrain",
+            "parent_strategy": source_record.strategy_name,
+            "created_at": datetime.now().astimezone().isoformat(),
+            "market": market,
+            "provider_uri": provider_uri,
+            "factor_data_fingerprint": factor_fingerprint,
+            "factor_data_freq": str(
+                getattr(getattr(factor_ctx, "spec", None), "freq", "day")
+            ),
+            "factor_data_start_date": str(
+                getattr(
+                    getattr(factor_ctx, "spec", None),
+                    "start_date",
+                    "2015-01-01",
+                )
+            ),
+            "factor_formula_hash": factor_hash,
+            "model_hash": model_hash,
+            "qlib_config_name": resolved_config,
+            "qlib_config_fingerprint": config_hash,
+            "qlib_template_dir": str(qlib_template_dir) if qlib_template_dir else None,
+            "qlib_template_source_dir": str(workspace),
+            "yaml_params": frozen_yaml,
+            "run_tag": request.run_tag,
+        }
+        saved = StrategyRecord(
+            strategy_name=target_name,
+            factor_formulas=list(source_record.factor_formulas),
+            model=StrategyModelSpec(
+                model_name=(
+                    source_record.model.model_name
+                    if source_record.model and source_record.model.model_name
+                    else "lightgbm"
+                ),
+                hyper_params=model_config,
+                trained_artifact_uri=str(model_path),
+                fitted_params=fitted_state,
+            ),
+            metrics=metrics,
+            metadata=metadata,
+        )
+        self.register_strategy(saved)
+        persisted = self.get_strategy(target_name)
+        if persisted is None or not persisted.model or not persisted.model.trained_artifact_uri:
+            raise RuntimeError("saved retrained strategy could not be reloaded")
+        return persisted
+
     def train_and_register(
         self,
         *,
@@ -268,6 +514,14 @@ class StrategySystem(BaseStrategySystem):
         mode = request.mode.lower()
         if mode not in {"retrain", "reuse_model"}:
             raise ValueError(f"Unsupported mode: {request.mode}")
+        if request.save_as:
+            request.save_as = request.save_as.strip()
+            if mode != "retrain":
+                raise ValueError("save_as is only valid with mode=retrain")
+            if not request.save_as:
+                raise ValueError("save_as must be a non-empty strategy name")
+            if self.get_strategy(request.save_as) is not None:
+                raise ValueError(f"Strategy asset already exists: {request.save_as}")
         modes = [mode]
 
         factors = self._factors_to_defs(record.factor_formulas)
@@ -295,9 +549,6 @@ class StrategySystem(BaseStrategySystem):
         )
         outcomes: list[StrategyBacktestOutcome] = []
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        old_qlib_data_dir = os.environ.get("ALPHAPILOT_QLIB_DATA_DIR")
-        if request.qlib_data_dir:
-            os.environ["ALPHAPILOT_QLIB_DATA_DIR"] = str(request.qlib_data_dir)
         for m in modes:
             try:
                 logger.info(
@@ -312,19 +563,29 @@ class StrategySystem(BaseStrategySystem):
                         raise ValueError(
                             f"Strategy {record.strategy_name} has no trained_artifact_uri for reuse_model mode."
                         )
-                run = run_strategy_asset_backtest(
-                    self.context,
-                    mode=m,
-                    factors=factors,
-                    scenario=request.scenario,
-                    qlib_config_name=qlib_config_name,
-                    qlib_template_dir=qlib_template_dir,
-                    qlib_data_dir=request.qlib_data_dir,
-                    use_local=use_local,
-                    model_pickle_path=model_uri,
-                    market=asset_market,
-                    yaml_params=yaml_params,
-                )
+                old_qlib_data_dir = os.environ.get("ALPHAPILOT_QLIB_DATA_DIR")
+                if request.qlib_data_dir:
+                    os.environ["ALPHAPILOT_QLIB_DATA_DIR"] = str(request.qlib_data_dir)
+                try:
+                    run = run_strategy_asset_backtest(
+                        self.context,
+                        mode=m,
+                        factors=factors,
+                        scenario=request.scenario,
+                        qlib_config_name=qlib_config_name,
+                        qlib_template_dir=qlib_template_dir,
+                        qlib_data_dir=request.qlib_data_dir,
+                        use_local=use_local,
+                        model_pickle_path=model_uri,
+                        market=asset_market,
+                        yaml_params=yaml_params,
+                    )
+                finally:
+                    if request.qlib_data_dir:
+                        if old_qlib_data_dir is None:
+                            os.environ.pop("ALPHAPILOT_QLIB_DATA_DIR", None)
+                        else:
+                            os.environ["ALPHAPILOT_QLIB_DATA_DIR"] = old_qlib_data_dir
                 metrics = self._extract_metrics(run.result.experiment)
                 details: dict[str, Any] = {
                     "qlib_config_name": qlib_config_name,
@@ -346,6 +607,29 @@ class StrategySystem(BaseStrategySystem):
                     workspace_path=run.workspace_path,
                     details=details,
                 )
+                if request.save_as:
+                    saved = self._register_retrained_asset(
+                        source_record=record,
+                        request=request,
+                        run=run,
+                        metrics=metrics,
+                        qlib_config_name=qlib_config_name,
+                        qlib_template_dir=qlib_template_dir,
+                        yaml_params=yaml_params if isinstance(yaml_params, dict) else None,
+                    )
+                    out.details.update(
+                        {
+                            "saved_strategy_name": saved.strategy_name,
+                            "model_hash": (saved.metadata or {}).get("model_hash"),
+                            "factor_hash": (saved.metadata or {}).get("factor_formula_hash"),
+                            "factor_data_fingerprint": (saved.metadata or {}).get(
+                                "factor_data_fingerprint"
+                            ),
+                            "qlib_config_fingerprint": (saved.metadata or {}).get(
+                                "qlib_config_fingerprint"
+                            ),
+                        }
+                    )
             except Exception as e:
                 out = StrategyBacktestOutcome(
                     strategy_name=record.strategy_name,
@@ -375,11 +659,10 @@ class StrategySystem(BaseStrategySystem):
                     "details": out.details,
                 },
             )
-        if request.qlib_data_dir:
-            if old_qlib_data_dir is None:
-                os.environ.pop("ALPHAPILOT_QLIB_DATA_DIR", None)
-            else:
-                os.environ["ALPHAPILOT_QLIB_DATA_DIR"] = old_qlib_data_dir
+        if request.save_as:
+            error = outcomes[0].details.get("error") if outcomes else "no outcome"
+            if error:
+                raise RuntimeError(f"retrain save_as failed: {error}")
         return outcomes
 
     @property

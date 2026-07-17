@@ -142,6 +142,7 @@ class StrategyInstanceRunner:
         self.planner = ExecutionPlanner(
             lot_size=self.engine.config.risk.lot_size,
             max_order_value=self.engine.config.risk.max_order_value,
+            max_order_equity_pct=self.engine.config.risk.max_order_equity_pct,
         )
         automated_router = runtime.automated_order_router(
             instance_id=instance.instance_id,
@@ -581,7 +582,7 @@ class StrategyInstanceRunner:
                     self.instance.instance_id,
                     stage=self.mode,
                 )
-                if self.mode in {"paper", "shadow"}
+                if self.mode in {"paper", "shadow", "live"}
                 else None
             )
             result = self.pipeline.evaluate(
@@ -597,7 +598,7 @@ class StrategyInstanceRunner:
                 ),
             )
             self._last_decision_id = result.decision.decision_id
-            if self.mode in {"paper", "shadow"}:
+            if self.mode in {"paper", "shadow", "live"}:
                 self.store.record_stage_session(
                     self.instance.instance_id,
                     config_hash=self.instance.config_hash,

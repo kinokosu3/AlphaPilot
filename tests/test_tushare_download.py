@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -17,6 +18,7 @@ from alphapilot.systems.data.prepare_tushare import (
     _query_trade_dates,
     baostock_to_tushare,
     download_tushare_data,
+    ensure_tushare_benchmark_index,
     tushare_to_baostock,
 )
 
@@ -41,6 +43,20 @@ class _FakeTushareClient:
         self.daily_calls: list[dict] = []
         self.adj_calls: list[dict] = []
         self.basic_calls: list[dict] = []
+        self.stock_basic_calls: list[str] = []
+        self.index_daily_calls: list[dict] = []
+
+    def stock_basic(
+        self, exchange: str, list_status: str, fields: str
+    ) -> pd.DataFrame:
+        del exchange, fields
+        self.stock_basic_calls.append(list_status)
+        rows = {
+            "L": [{"ts_code": "000001.SZ", "list_status": "L", "list_date": "19910403"}],
+            "D": [{"ts_code": "600001.SH", "list_status": "D", "list_date": "19901219", "delist_date": "20050404"}],
+            "P": [{"ts_code": "000002.SZ", "list_status": "P", "list_date": "19910129"}],
+        }
+        return pd.DataFrame(rows.get(list_status, []))
 
     def trade_cal(self, exchange: str, start_date: str, end_date: str) -> pd.DataFrame:
         rows = []
@@ -56,6 +72,14 @@ class _FakeTushareClient:
         )
         if ts_code in self.fail_codes:
             raise RuntimeError(f"daily failed for {ts_code}")
+        return pd.DataFrame(self.daily_rows.get(ts_code, []))
+
+    def index_daily(
+        self, ts_code: str, start_date: str, end_date: str
+    ) -> pd.DataFrame:
+        self.index_daily_calls.append(
+            {"ts_code": ts_code, "start_date": start_date, "end_date": end_date}
+        )
         return pd.DataFrame(self.daily_rows.get(ts_code, []))
 
     def adj_factor(self, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -491,6 +515,99 @@ def test_tushare_adapter_is_registered() -> None:
     adapter = get_data_source("tushare_cn")
     assert adapter.default_output_dir().name == "raw_data_no_adjust"
     assert "tushare" in str(adapter.default_output_dir())
+
+
+def test_all_market_include_delisted_queries_l_d_p_and_freezes_metadata(
+    tmp_path: Path,
+) -> None:
+    client = _FakeTushareClient(trade_dates=[])
+    output_dir = tmp_path / "raw"
+
+    codes = download_tushare_data(
+        start_date="2005-01-01",
+        end_date="2005-01-02",
+        output_dir=output_dir,
+        all_market=True,
+        include_delisted=True,
+        factor_dir=tmp_path / "factors",
+        client=client,
+    )
+
+    assert client.stock_basic_calls == ["L", "D", "P"]
+    assert codes == ["sz.000001", "sh.600001", "sz.000002"]
+    metadata = json.loads((output_dir / "_universe_membership.json").read_text())
+    assert metadata["statuses"] == ["L", "D", "P"]
+    assert metadata["record_count"] == 3
+    assert len(metadata["records_sha256"]) == 64
+    assert {row["list_status"] for row in metadata["records"]} == {"L", "D", "P"}
+
+
+def test_tushare_benchmark_is_dumped_with_frozen_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    qlib = tmp_path / "qlib"
+    (qlib / "calendars").mkdir(parents=True)
+    (qlib / "calendars" / "day.txt").write_text(
+        "2026-06-10\n2026-06-11\n",
+        encoding="utf-8",
+    )
+    client = _FakeTushareClient(
+        daily_rows={
+            "000905.SH": _sample_daily_rows("2026-06-10", "2026-06-11")
+        }
+    )
+    captured: dict[str, object] = {}
+
+    class _Dump:
+        def __init__(self, **kwargs):  # noqa: ANN003
+            captured["kwargs"] = kwargs
+            [csv_path] = list(Path(kwargs["data_path"]).glob("*.csv"))
+            captured["frame"] = pd.read_csv(csv_path)
+
+        def dump(self) -> None:
+            captured["dumped"] = True
+
+    monkeypatch.setattr(
+        "alphapilot.systems.data.qlib_convert.DumpDataUpdate",
+        _Dump,
+    )
+
+    result = ensure_tushare_benchmark_index(
+        qlib_dir=qlib,
+        start_date="2026-06-10",
+        end_date="2026-06-11",
+        client=client,
+    )
+
+    assert client.index_daily_calls == [
+        {
+            "ts_code": "000905.SH",
+            "start_date": "20260610",
+            "end_date": "20260611",
+        }
+    ]
+    frame = captured["frame"]
+    assert isinstance(frame, pd.DataFrame)
+    assert frame["code"].unique().tolist() == ["sh000905"]
+    assert frame["factor"].eq(1.0).all()
+    assert captured["dumped"] is True
+    metadata = json.loads(Path(result["metadata_path"]).read_text(encoding="utf-8"))
+    assert metadata["source"] == "tushare_cn"
+    assert metadata["instrument"] == "SH000905"
+    assert len(metadata["fingerprint"]) == 64
+
+
+def test_include_delisted_rejects_non_all_market_request(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="requires all_market"):
+        download_tushare_data(
+            start_date="2005-01-01",
+            end_date="2005-01-02",
+            output_dir=tmp_path / "raw",
+            symbols=["000001.SZ"],
+            include_delisted=True,
+            client=_FakeTushareClient(trade_dates=[]),
+        )
 
 
 def test_live_tushare_download_single_symbol(tmp_path: Path) -> None:

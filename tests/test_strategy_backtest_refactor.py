@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -171,6 +172,245 @@ class StrategySystemBacktestFromAssetTests(unittest.TestCase):
         self.assertEqual(outcomes[0].strategy_name, "test_strat")
         self.assertEqual(outcomes[0].metrics.get("IC"), 0.1)
         system._param_db.append_retest.assert_called_once()
+
+    @patch("alphapilot.systems.backtest.scoring_model_export.export_scoring_model_artifacts")
+    @patch("alphapilot.systems.strategy.service.run_strategy_asset_backtest")
+    def test_retrain_save_as_freezes_deployable_model_and_data_binding(
+        self,
+        mock_run: MagicMock,
+        mock_export: MagicMock,
+    ) -> None:
+        from alphapilot.systems.strategy.backtest import StrategyAssetBacktestRun
+        from alphapilot.systems.strategy.base import (
+            StrategyBacktestRequest,
+            StrategyModelSpec,
+            StrategyRecord,
+        )
+        from alphapilot.systems.strategy.service import StrategySystem
+
+        root = Path(tempfile.mkdtemp(prefix="strategy_save_as_test_"))
+        workspace = root / "workspace"
+        artifact_dir = workspace / "artifacts" / "scoring_model"
+        artifact_dir.mkdir(parents=True)
+        (artifact_dir / "fitted_model.pkl").write_bytes(b"trained-model")
+        (artifact_dir / "model_config.json").write_text('{"class":"LGBModel"}')
+        (artifact_dir / "fitted_training_state.json").write_text('{"trees":12}')
+        config_name = "conf_cn_combined_kdd_ver.yaml"
+        (workspace / config_name).write_text("task: {}\n")
+        (workspace / "read_exp_res.py").write_text("# snapshot\n")
+        qlib_dir = root / "qlib"
+        qlib_dir.mkdir()
+
+        system = StrategySystem()
+        ctx = MagicMock()
+        ctx.config.backtest.use_local = True
+        ctx.config.data.qlib_data_dir = qlib_dir
+        ctx.config.strategy.database_backend = "file"
+        ctx.config.strategy.param_dir = root / "strategy_zoo"
+        system.setup(ctx)
+        system.register_strategy(
+            StrategyRecord(
+                strategy_name="candidate",
+                factor_formulas=["$close/$open", "$volume/Mean($volume,20)"],
+                model=StrategyModelSpec(model_name="LGBModel"),
+                metadata={"market": "main_stock_pit"},
+            )
+        )
+
+        factor_ctx = SimpleNamespace(
+            fingerprint="factor-fingerprint",
+            spec=SimpleNamespace(market="main_stock_pit", qlib_dir=qlib_dir),
+        )
+        experiment = SimpleNamespace(
+            result={"IC": 0.03, "ICIR": 0.6},
+            factor_data_context=factor_ctx,
+            qlib_config_name=config_name,
+            based_experiments=[object()],
+        )
+        mock_run.return_value = StrategyAssetBacktestRun(
+            mode="retrain",
+            result=MagicMock(experiment=experiment),
+            workspace_path=str(workspace),
+        )
+        mock_export.return_value = artifact_dir
+
+        outcomes = system.backtest_from_asset(
+            StrategyBacktestRequest(
+                strategy_name="candidate",
+                mode="retrain",
+                save_as="candidate_deployable",
+                qlib_data_dir=str(qlib_dir),
+                options={"yaml_params": {"label_expression": "five-day"}},
+            )
+        )
+
+        saved = system.get_strategy("candidate_deployable")
+        self.assertIsNotNone(saved)
+        assert saved is not None and saved.model is not None
+        saved_model = Path(saved.model.trained_artifact_uri or "").resolve()
+        saved_dir = (root / "strategy_zoo" / "candidate_deployable").resolve()
+        self.assertTrue(saved_model.is_file())
+        self.assertTrue(saved_model.is_relative_to(saved_dir / "artifacts"))
+        self.assertNotEqual(saved_model, (artifact_dir / "fitted_model.pkl").resolve())
+        self.assertTrue((saved_dir / "qlib_template" / config_name).is_file())
+        self.assertEqual(saved.metadata["qlib_template_snapshot_dir"], "qlib_template")
+        self.assertEqual(saved.metadata["market"], "main_stock_pit")
+        self.assertEqual(saved.metadata["factor_data_fingerprint"], "factor-fingerprint")
+        self.assertEqual(saved.metadata["yaml_params"]["provider_uri"], str(qlib_dir.resolve()))
+        self.assertEqual(len(saved.metadata["model_hash"]), 64)
+        self.assertEqual(outcomes[0].details["saved_strategy_name"], "candidate_deployable")
+
+    def test_save_as_rejects_reuse_model_and_duplicate_name(self) -> None:
+        from alphapilot.systems.strategy.base import (
+            StrategyBacktestRequest,
+            StrategyModelSpec,
+            StrategyRecord,
+        )
+        from alphapilot.systems.strategy.service import StrategySystem
+
+        root = Path(tempfile.mkdtemp(prefix="strategy_save_as_invalid_"))
+        system = StrategySystem()
+        ctx = MagicMock()
+        ctx.config.backtest.use_local = True
+        ctx.config.strategy.database_backend = "file"
+        ctx.config.strategy.param_dir = root
+        system.setup(ctx)
+        record = StrategyRecord(
+            strategy_name="existing",
+            factor_formulas=["$close"],
+            model=StrategyModelSpec(model_name="lgb", trained_artifact_uri="/tmp/model.pkl"),
+            metadata={"market": "main_stock_pit"},
+        )
+        system.register_strategy(record)
+
+        with self.assertRaisesRegex(ValueError, "only valid with mode=retrain"):
+            system.backtest_from_asset(
+                StrategyBacktestRequest(
+                    strategy_name="existing",
+                    mode="reuse_model",
+                    save_as="new",
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            system.backtest_from_asset(
+                StrategyBacktestRequest(
+                    strategy_name="existing",
+                    mode="retrain",
+                    save_as="existing",
+                )
+            )
+
+    @patch("alphapilot.systems.strategy.service.run_strategy_asset_backtest")
+    def test_save_as_training_failure_creates_no_asset(self, mock_run: MagicMock) -> None:
+        import os
+
+        from alphapilot.systems.strategy.base import (
+            StrategyBacktestRequest,
+            StrategyModelSpec,
+            StrategyRecord,
+        )
+        from alphapilot.systems.strategy.service import StrategySystem
+
+        root = Path(tempfile.mkdtemp(prefix="strategy_save_as_train_failure_"))
+        system = StrategySystem()
+        ctx = MagicMock()
+        ctx.config.backtest.use_local = True
+        ctx.config.strategy.database_backend = "file"
+        ctx.config.strategy.param_dir = root
+        system.setup(ctx)
+        system.register_strategy(
+            StrategyRecord(
+                strategy_name="source",
+                factor_formulas=["$close"],
+                model=StrategyModelSpec(model_name="lgb"),
+                metadata={"market": "main_stock_pit"},
+            )
+        )
+        mock_run.side_effect = RuntimeError("training failed")
+        os.environ["ALPHAPILOT_QLIB_DATA_DIR"] = "original-provider"
+
+        try:
+            with self.assertRaisesRegex(RuntimeError, "retrain save_as failed"):
+                system.backtest_from_asset(
+                    StrategyBacktestRequest(
+                        strategy_name="source",
+                        mode="retrain",
+                        save_as="must_not_exist",
+                        qlib_data_dir=str(root / "failed-provider"),
+                    )
+                )
+            self.assertEqual(
+                os.environ.get("ALPHAPILOT_QLIB_DATA_DIR"),
+                "original-provider",
+            )
+        finally:
+            os.environ.pop("ALPHAPILOT_QLIB_DATA_DIR", None)
+
+        self.assertIsNone(system.get_strategy("must_not_exist"))
+
+    @patch("alphapilot.systems.backtest.scoring_model_export.export_scoring_model_artifacts")
+    @patch("alphapilot.systems.strategy.service.run_strategy_asset_backtest")
+    def test_save_as_missing_fitted_model_creates_no_asset(
+        self,
+        mock_run: MagicMock,
+        mock_export: MagicMock,
+    ) -> None:
+        from alphapilot.systems.strategy.backtest import StrategyAssetBacktestRun
+        from alphapilot.systems.strategy.base import (
+            StrategyBacktestRequest,
+            StrategyModelSpec,
+            StrategyRecord,
+        )
+        from alphapilot.systems.strategy.service import StrategySystem
+
+        root = Path(tempfile.mkdtemp(prefix="strategy_save_as_missing_model_"))
+        workspace = root / "workspace"
+        artifact_dir = workspace / "artifacts" / "scoring_model"
+        artifact_dir.mkdir(parents=True)
+        qlib_dir = root / "qlib"
+        qlib_dir.mkdir()
+        system = StrategySystem()
+        ctx = MagicMock()
+        ctx.config.backtest.use_local = True
+        ctx.config.data.qlib_data_dir = qlib_dir
+        ctx.config.strategy.database_backend = "file"
+        ctx.config.strategy.param_dir = root / "strategy_zoo"
+        system.setup(ctx)
+        system.register_strategy(
+            StrategyRecord(
+                strategy_name="source",
+                factor_formulas=["$close"],
+                model=StrategyModelSpec(model_name="lgb"),
+                metadata={"market": "main_stock_pit"},
+            )
+        )
+        experiment = SimpleNamespace(
+            result={"IC": 0.02},
+            factor_data_context=SimpleNamespace(
+                fingerprint="pit-fingerprint",
+                spec=SimpleNamespace(market="main_stock_pit", qlib_dir=qlib_dir),
+            ),
+            qlib_config_name="conf.yaml",
+            based_experiments=[object()],
+        )
+        mock_run.return_value = StrategyAssetBacktestRun(
+            mode="retrain",
+            result=MagicMock(experiment=experiment),
+            workspace_path=str(workspace),
+        )
+        mock_export.return_value = artifact_dir
+
+        with self.assertRaisesRegex(RuntimeError, "fitted_model.pkl"):
+            system.backtest_from_asset(
+                StrategyBacktestRequest(
+                    strategy_name="source",
+                    mode="retrain",
+                    save_as="must_not_exist",
+                    qlib_data_dir=str(qlib_dir),
+                )
+            )
+
+        self.assertIsNone(system.get_strategy("must_not_exist"))
 
 
 class EngineSmokeTests(unittest.TestCase):

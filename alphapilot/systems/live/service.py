@@ -260,6 +260,8 @@ class LiveSystem(BaseSystem):
                 "max_order_value": cfg.risk.max_order_value,
                 "max_daily_value": cfg.risk.max_daily_value,
                 "max_position_pct": cfg.risk.max_position_pct,
+                "max_total_position_pct": cfg.risk.max_total_position_pct,
+                "max_position_count": cfg.risk.max_position_count,
                 "price_guard_pct": cfg.risk.price_guard_pct,
                 "max_orders_per_day": cfg.risk.max_orders_per_day,
                 "lot_size": cfg.risk.lot_size,

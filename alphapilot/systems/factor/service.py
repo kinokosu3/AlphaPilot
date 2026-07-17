@@ -60,6 +60,7 @@ class FactorSystem(BaseFactorSystem):
         factor_expression: str,
         *,
         categories: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
         save: bool = True,
     ) -> FactorValidationResult:
         """Validate then add a factor; return structured result on failure.
@@ -99,7 +100,7 @@ class FactorSystem(BaseFactorSystem):
                     details={"factor_name": item["factor_name"]},
                 )
 
-        self._database.add(name, expr)
+        self._database.add(name, expr, metadata=metadata)
         if categories and getattr(self._database, "supports_categories", False):
             self._database.set_factor_categories(name, categories)
         if save:
@@ -108,8 +109,24 @@ class FactorSystem(BaseFactorSystem):
             acceptable=True,
             code=OK_CODE,
             message=f"Factor '{name}' added.",
-            details={"factor_name": name, "categories": categories or []},
+            details={
+                "factor_name": name,
+                "categories": categories or [],
+                "metadata_sha256": next(
+                    (
+                        item.get("metadata_sha256", "")
+                        for item in self.list_factors()
+                        if item["factor_name"] == name
+                    ),
+                    "",
+                ),
+            },
         )
+
+    def verify_factor_asset(self, factor_name: str) -> dict[str, Any]:
+        """Verify the frozen research metadata sidecar for one factor."""
+
+        return self._database.verify_asset(factor_name.strip())
 
     def evaluate_expression(self, expression: str) -> Any:
         from alphapilot.systems.factor.expression import parse_expression

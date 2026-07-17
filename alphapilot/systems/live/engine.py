@@ -110,6 +110,11 @@ class LiveEngine:
     def on_account(self, account: Account) -> None:
         self.oms.on_account(account)
         self._publish("account", account, source=_source(account, self))
+        if self.risk is not None and hasattr(self.risk, "check_equity"):
+            verdict = self.risk.check_equity(self.oms)
+            if not verdict.ok and verdict.rule in {"daily_loss", "canary_loss"}:
+                if not self.runmode.halted:
+                    self.halt(f"risk:{verdict.rule}:{verdict.reason}")
 
     def on_contract(self, contract: Contract) -> None:
         self.oms.on_contract(contract)
@@ -242,6 +247,8 @@ class LiveEngine:
                     {"origin": origin, "rule": verdict.rule, "reason": verdict.reason, "req": _req(req)},
                     reference=req.reference,
                 )
+                if verdict.rule in {"daily_loss", "canary_loss"}:
+                    self.halt(verdict.reason)
                 return None
         order_id = self.trade_gateway.send_order(req)
         self._audit(
@@ -299,6 +306,16 @@ class LiveEngine:
                 self._audit("halt_cancel_error", {"order_id": order.order_id, "error": str(exc)}, order_id=order.order_id)
 
     def resume(self) -> None:
+        if self.risk is not None and hasattr(self.risk, "acknowledge_loss_halt"):
+            self.risk.acknowledge_loss_halt()
+            verdict = self.risk.check_equity(self.oms)
+            if not verdict.ok:
+                self.runmode.halt(f"risk:{verdict.rule}:{verdict.reason}")
+                self._audit(
+                    "resume_blocked",
+                    {"rule": verdict.rule, "reason": verdict.reason},
+                )
+                raise ValueError("loss halt remains active; account equity has not recovered")
         self.runmode.resume()
         self._audit("resume", {})
 
@@ -338,7 +355,15 @@ class LiveEngine:
         self.trade_gateway.query_account()
         self.trade_gateway.query_position()
         if auto_resume:
-            self.runmode.resume()
+            verdict = (
+                self.risk.check_equity(self.oms)
+                if self.risk is not None and hasattr(self.risk, "check_equity")
+                else None
+            )
+            if verdict is None or verdict.ok:
+                self.runmode.resume()
+            else:
+                self.runmode.halt(f"risk:{verdict.rule}:{verdict.reason}")
         report = {
             "buying_power": self.oms.buying_power(),
             "auto_resume": bool(auto_resume),

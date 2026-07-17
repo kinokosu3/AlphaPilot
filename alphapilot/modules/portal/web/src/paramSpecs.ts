@@ -214,13 +214,14 @@ export const dataActionSpecs: FieldSpec[] = [
   },
   { key: "start_date", label: "开始日期 Start Date", type: "date", defaultValue: "2005-01-01", visibleWhen: (v) => ["pipeline", "download"].includes(String(v.action)) },
   { key: "end_date", label: "结束日期 End Date", type: "date", visibleWhen: (v) => ["pipeline", "download"].includes(String(v.action)) },
+  { key: "all_market", label: "全市场 All Market", type: "checkbox", defaultValue: false, visibleWhen: (v) => ["pipeline", "download", "convert"].includes(String(v.action)) },
   {
     key: "stock_csv",
     label: "股票池 CSV Stock CSV",
     type: "text",
     defaultValue: "important_data/stock_lists/main_stock_2026_4_27.csv",
     helpText: "股票池 CSV 路径，通常位于 important_data/stock_lists/ 下，每行一个代码。",
-    visibleWhen: (v) => ["pipeline", "download", "convert"].includes(String(v.action)),
+    visibleWhen: (v) => ["pipeline", "download", "convert"].includes(String(v.action)) && !v.all_market,
   },
   {
     key: "adjust_mode",
@@ -250,6 +251,7 @@ export const dataActionSpecs: FieldSpec[] = [
   },
   { key: "token", label: "Tushare Token", type: "password", visibleWhen: (v) => v.source === "tushare_cn" && ["pipeline", "download"].includes(String(v.action)) },
   { key: "include_daily_basic", label: "包含 daily_basic", type: "checkbox", defaultValue: false, visibleWhen: (v) => v.source === "tushare_cn" && ["pipeline", "download"].includes(String(v.action)) },
+  { key: "include_delisted", label: "纳入退市/暂停上市（PIT）", type: "checkbox", defaultValue: false, helpText: "仅全市场 Tushare 有效；同时获取 L/D/P 状态并冻结上市/退市元数据。", visibleWhen: (v) => v.source === "tushare_cn" && Boolean(v.all_market) && ["pipeline", "download"].includes(String(v.action)) },
 ];
 
 // Strategy / money / cost overrides shared by mining, backtest and daily-trade forms. Fields use
@@ -307,8 +309,11 @@ export const llmMiningSpecs: FieldSpec[] = [
   // by the instrument sets on disk; empty = default universe. First-class option (previously hidden
   // behind the strategy-overrides toggle).
   { key: "market", label: "股票池 Stock pool", type: "text", placeholder: "默认股票池", helpText: "挖掘使用的股票池（instrument set），留空使用默认股票池；可在“市场数据”页管理股票池。" },
+  { key: "qlib_dir", label: "Qlib数据目录", type: "text", placeholder: "~/.qlib/qlib_data/cn_data/tushare/qlib", helpText: "与 YAML provider_uri 必须一致，避免研究数据上下文串用。" },
   // Auto-add each round's mined factors to the factor library (zoo) under a "mined" category.
   { key: "save_factors_to_library", label: "自动加入因子库", type: "checkbox", defaultValue: false, helpText: "每轮挖出的因子表达式会校验去重后存入因子库（mined 分类）。" },
+  { key: "random_seed", label: "随机种子 Seed", type: "number", placeholder: "101", helpText: "记录到研究资产元数据；同一假说会话固定使用一个种子。" },
+  { key: "campaign_id", label: "研究批次 Campaign", type: "text", placeholder: "alpha_pilot_5d_20260716" },
   ...strategyParamFields(),
 ];
 
@@ -327,6 +332,10 @@ export const alphaForgeSpecs: FieldSpec[] = [
   { key: "instruments", label: "股票池 Instruments", type: "text", defaultValue: "test_stock_pool_80" },
   { key: "train_end_year", label: "训练截止年 Train End Year", type: "number", defaultValue: 2020 },
   { key: "seed", label: "随机种子 Seed", type: "number", defaultValue: 0 },
+  { key: "steps", label: "RL训练步数 Steps", type: "number", defaultValue: 200000, visibleWhen: (v) => v.method === "mine_rl" },
+  { key: "pool_capacity", label: "RL因子池容量", type: "number", defaultValue: 10, visibleWhen: (v) => v.method === "mine_rl" },
+  { key: "target_horizon", label: "目标持有期（交易日）", type: "number", defaultValue: 20, helpText: "本测试计划使用5；默认20保持旧任务兼容。", visibleWhen: (v) => v.method === "mine_rl" },
+  { key: "target_price", label: "目标价格", type: "select", defaultValue: "vwap", options: [{ label: "close", value: "close" }, { label: "vwap", value: "vwap" }], visibleWhen: (v) => v.method === "mine_rl" },
   { key: "top_n", label: "候选数 Top N", type: "number", defaultValue: 50, helpText: "保留得分最高的前 N 个候选因子，数值越大搜索/回测耗时越长。", visibleWhen: (v) => ["mine_aff", "mine_gp"].includes(String(v.method)) },
   { key: "raw", label: "原始输出 Raw output", type: "checkbox", defaultValue: false, helpText: "仅当 qlib 数据带 $factor 复权因子字段时勾选；baostock 数据无此字段，勾选会导致取数为空。" },
   { key: "backtest", label: "挖掘后回测 Run backtest", type: "checkbox", defaultValue: false },
@@ -421,6 +430,7 @@ export const strategyBacktestSpecs: FieldSpec[] = [
       { label: "reuse_model", value: "reuse_model" },
     ],
   },
+  { key: "save_as", label: "另存为可部署策略", type: "text", helpText: "仅 retrain 有效；成功后固化模型、因子、Qlib模板和数据指纹。", visibleWhen: (v) => v.mode === "retrain" },
   { key: "scenario", label: "场景 Scenario", type: "text", defaultValue: "factor_backtest" },
   backtestMarketField,
   ...strategyParamFields(),
@@ -657,6 +667,7 @@ export function scheduleSpecsFor(kind: string, strategyNames: string[] = []): Fi
     return alphaForgeSpecs
       .filter((field) => field.key !== "method")
       .map((field) => {
+        if (kind === "mine_rl" && ["steps", "pool_capacity", "target_horizon", "target_price"].includes(field.key)) return { ...field, visibleWhen: undefined };
         if (field.key === "top_n" && ["mine_aff", "mine_gp"].includes(kind)) return { ...field, visibleWhen: undefined };
         if (field.key === "tournament_size" && kind === "mine_gp") return { ...field, visibleWhen: undefined };
         if (["num_epochs_g", "max_loops"].includes(field.key) && kind === "mine_aff") return { ...field, visibleWhen: undefined };

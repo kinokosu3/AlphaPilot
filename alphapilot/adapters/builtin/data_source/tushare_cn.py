@@ -44,6 +44,7 @@ class TushareDataSourceAdapter(BaseDataSourceAdapter):
         download_state_path = options.pop("download_state_path", None)
         token = options.pop("token", None)
         include_daily_basic = _parse_bool(options.pop("include_daily_basic", False))
+        include_delisted = _parse_bool(options.pop("include_delisted", False))
         parallel_price_factor = _parse_bool(options.pop("parallel_price_factor", False))
 
         raw_dir = (
@@ -66,6 +67,7 @@ class TushareDataSourceAdapter(BaseDataSourceAdapter):
             download_state_path=download_state_path,
             token=token,
             include_daily_basic=include_daily_basic,
+            include_delisted=include_delisted,
             parallel_price_factor=parallel_price_factor,
         )
         return DataDownloadResult(

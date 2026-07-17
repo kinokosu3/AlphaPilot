@@ -1,0 +1,252 @@
+{
+  "schema_version": 1,
+  "campaign_id": "alpha_pilot_5d_20260716",
+  "as_of": "2026-07-16",
+  "benchmark": "SH000905",
+  "market": "main_stock_pit",
+  "provider_uri": "~/.qlib/qlib_data/cn_data/tushare/qlib",
+  "raw_uri": "~/.qlib/qlib_data/cn_data/tushare/raw_data_no_adjust",
+  "data": {
+    "source": "tushare_cn",
+    "start": "2005-01-01",
+    "include_delisted": true,
+    "statuses": ["L", "D", "P"],
+    "target_adjustment": "backward",
+    "economic_acceptance_source": "tushare",
+    "smoke_only_source": "baostock"
+  },
+  "splits": {
+    "warmup_start": "2005-01-01",
+    "train": ["2017-01-01", "2021-12-31"],
+    "validation": ["2022-01-01", "2022-12-31"],
+    "development": ["2023-01-01", "2024-12-31"],
+    "sealed_blind": ["2025-01-01", "2026-07-16"]
+  },
+  "target": {
+    "horizon": 5,
+    "price": "close",
+    "expression": "Ref($close,-6)/Ref($close,-1)-1"
+  },
+  "frozen_template": {
+    "path": "alphapilot/systems/backtest/qlib_yaml/templates/conf_cn_combined_kdd_ver.yaml.j2",
+    "sha256": "c6cb8284e92eaec5c5320d18d82e0ee10e1483abfb36d9243f94e61cb43458f8"
+  },
+  "qlib_params": {
+    "template_type": "combined",
+    "freq": "day",
+    "provider_uri": "~/.qlib/qlib_data/cn_data/tushare/qlib",
+    "region": "cn",
+    "market": "main_stock_pit",
+    "benchmark": "SH000905",
+    "start_time": "2017-01-01",
+    "end_time": "2024-12-31",
+    "label_expression": "Ref($close,-6)/Ref($close,-1)-1",
+    "train_start": "2017-01-01",
+    "train_end": "2021-12-31",
+    "valid_start": "2022-01-01",
+    "valid_end": "2022-12-31",
+    "test_start": "2023-01-01",
+    "test_end": "2024-12-31",
+    "backtest_start": "2023-01-01",
+    "backtest_end": "2024-12-31",
+    "loss": "mse",
+    "colsample_bytree": 0.8879,
+    "learning_rate": 0.1,
+    "subsample": 0.8789,
+    "lambda_l1": 205.6999,
+    "lambda_l2": 580.9768,
+    "max_depth": 4,
+    "num_leaves": 210,
+    "num_threads": 20,
+    "topk": 15,
+    "n_drop": 3,
+    "hold_thresh": 1,
+    "risk_degree": 0.9,
+    "account": 50000,
+    "limit_threshold": 0.095,
+    "open_cost": 0.0002,
+    "close_cost": 0.0008,
+    "min_cost": 5
+  },
+  "llm": {
+    "rounds_per_hypothesis": 3,
+    "steps_per_round": 5,
+    "candidates_per_round": 10,
+    "save_factors_to_library": true,
+    "hypotheses": [
+      {
+        "id": "short_term_overreaction_reversal",
+        "seed": 101,
+        "direction": "仅使用OHLCV，研究短期过度反应与反转：极端收益、跳空、成交量和振幅衰竭。每轮提出约10个互异因子；禁止未来引用；最长回看120个交易日。"
+      },
+      {
+        "id": "attention_price_volume_confirmation",
+        "seed": 202,
+        "direction": "仅使用OHLCV，研究注意力与量价确认：异常成交量、积累/派发、有效突破与假突破。每轮提出约10个互异因子；禁止未来引用；最长回看120个交易日。"
+      },
+      {
+        "id": "volatility_contraction_trend_quality",
+        "seed": 303,
+        "direction": "仅使用OHLCV，研究波动收缩与趋势质量：低噪声窄幅整理后的突破或持续动量。每轮提出约10个互异因子；禁止未来引用；最长回看120个交易日。"
+      }
+    ]
+  },
+  "rl": {
+    "smoke": {
+      "instruments": "test_stock_pool_30",
+      "seed": 0,
+      "steps": 5000,
+      "pool_capacity": 20,
+      "save": false
+    },
+    "production": {
+      "instruments": "main_stock_pit",
+      "train_end_year": 2022,
+      "seeds": [11, 29, 47],
+      "steps": 200000,
+      "pool_capacity": 20,
+      "save": true,
+      "serial": true
+    }
+  },
+  "factor_gates": {
+    "min_finite_coverage": 0.95,
+    "min_nonconstant_day_ratio": 0.95,
+    "min_abs_mean_rank_ic": 0.015,
+    "min_abs_rank_icir": 0.3,
+    "min_month_direction_ratio": 0.55,
+    "max_lookback": 120,
+    "max_abs_spearman": 0.75
+  },
+  "candidates": {
+    "baseline_factor_count": 4,
+    "baseline_factors": [
+      {"name": "baseline_intraday_return", "expression": "($close-$open)/$open"},
+      {"name": "baseline_volume_surge_20", "expression": "$volume/Mean($volume,20)"},
+      {"name": "baseline_amplitude", "expression": "($high-$low)/Ref($close,1)"},
+      {"name": "baseline_one_day_return", "expression": "$close/Ref($close,1)-1"}
+    ],
+    "llm_max_per_hypothesis": 2,
+    "llm_max_total": 6,
+    "rl_max_total": 6,
+    "mixed_max_total": 10,
+    "selection_order": ["net_information_ratio_desc", "factor_count_asc", "turnover_asc"],
+    "ablation_required": true,
+    "portfolio_policy": {
+      "topk": 15,
+      "n_drop": 3,
+      "cash_buffer": 0.1,
+      "max_position_weight": 0.1,
+      "max_average_daily_turnover": 0.2
+    }
+  },
+  "blind_gates": {
+    "min_annualized_excess": 0.03,
+    "min_information_ratio": 0.5,
+    "max_drawdown": 0.15,
+    "double_cost_positive": true,
+    "min_positive_six_month_ratio": 0.6,
+    "max_average_daily_turnover": 0.2,
+    "not_below_baseline": true,
+    "champion_and_baseline_only": true,
+    "fallback_to_runner_up": false
+  },
+  "deployment": {
+    "portfolio_policy": {
+      "policy_id": "selection_topk_dropout_equal_weight",
+      "params": {
+        "topk": 5,
+        "n_drop": 1,
+        "cash_buffer": 0.9,
+        "max_position_weight": 0.02
+      }
+    },
+    "whitelist_size": 50,
+    "whitelist_liquidity_days": 60,
+    "minimum_trading_age": 120,
+    "lot_size": 100,
+    "max_one_lot_equity_ratio": 0.02,
+    "full_cross_section_before_whitelist": true,
+    "refit": {
+      "as_of": "2026-07-16",
+      "label_ready_through": "2026-07-08",
+      "qlib_config_name": "conf_cn_combined_kdd_ver.yaml",
+      "params_patch": {
+        "refit_all_labeled": true,
+        "start_time": "2017-01-01",
+        "end_time": "2026-07-16",
+        "train_start": "2017-01-01",
+        "train_end": "2026-07-08",
+        "valid_start": "2026-01-01",
+        "valid_end": "2026-06-30",
+        "test_start": "2026-07-01",
+        "test_end": "2026-07-08",
+        "backtest_start": "2026-07-01",
+        "backtest_end": "2026-07-08"
+      }
+    }
+  },
+  "timing_validation": {
+    "combined_with_selection": false,
+    "dual_ma": {
+      "strategy_id": "dual_ma",
+      "params": {"short_window": 10, "long_window": 50}
+    },
+    "dual_ma_volume_confirmed": {
+      "strategy_id": "dual_ma_volume_confirmed",
+      "params": {
+        "short_window": 10,
+        "long_window": 50,
+        "volume_window": 20
+      },
+      "minimum_history": 51
+    },
+    "paper_smoke_sessions": 5,
+    "future_live_requires_full_promotion": true
+  },
+  "risk_policy": {
+    "max_order_value": 10000,
+    "max_order_equity_pct": 0.02,
+    "max_daily_value": 0,
+    "max_daily_equity_pct": 0.1,
+    "max_position_pct": 0.02,
+    "max_total_position_pct": 0.1,
+    "max_position_count": 5,
+    "price_guard_pct": 0.02,
+    "max_orders_per_day": 20,
+    "lot_size": 100,
+    "max_quote_age_seconds": 3,
+    "max_daily_loss_pct": 0.01,
+    "max_canary_loss_pct": 0.03
+  },
+  "execution_quality": {
+    "max_median_implementation_shortfall_bp": 20,
+    "max_p95_implementation_shortfall_bp": 50
+  },
+  "promotion": {
+    "minimum_sessions": {
+      "paper": 20,
+      "shadow": 5,
+      "live": 5
+    },
+    "uat_scenario_version": 2,
+    "broker": "xtp",
+    "replay_required_checks": [
+      "offline_formal_factor_values",
+      "offline_formal_scores",
+      "offline_formal_ranking",
+      "offline_formal_target_weights",
+      "factor_context_isolation",
+      "d_signal_d1_order",
+      "adjustment_conversion",
+      "board_lot",
+      "t_plus_one",
+      "fees",
+      "suspension_and_price_limits"
+    ],
+    "live_total_exposure": 0.1,
+    "live_max_positions": 5,
+    "requires_dedicated_empty_account": true,
+    "automatic_scale_up": false
+  }
+}

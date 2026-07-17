@@ -178,6 +178,13 @@ describe("freq (minute K-line) entry points", () => {
     expect(keys({ action: "apply_adjust", source: "baostock_cn" })).not.toContain("freq");
   });
 
+  it("PIT delisted option is only exposed for Tushare all-market jobs", () => {
+    const keys = (v: Record<string, string | boolean>) => visibleFields(dataActionSpecs, v).map((f) => f.key);
+    expect(keys({ action: "pipeline", source: "tushare_cn", all_market: true })).toContain("include_delisted");
+    expect(keys({ action: "pipeline", source: "tushare_cn", all_market: false })).not.toContain("include_delisted");
+    expect(keys({ action: "pipeline", source: "baostock_cn", all_market: true })).not.toContain("include_delisted");
+  });
+
   it("a 5min selection is sent through to the backend kwargs", () => {
     const params = buildParams(dataActionSpecs, { action: "pipeline", source: "baostock_cn", freq: "5min" });
     expect(params.freq).toBe("5min");

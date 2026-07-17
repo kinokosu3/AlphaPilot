@@ -175,6 +175,9 @@ class DeploymentCoordinator:
         # WARMING_UP remains fail-closed through the desired/observed lifecycle
         # checks and will become routable only after a matching runner heartbeat.
         self._block(instance_id, False)
+        if instance["deployment_level"] == DeploymentLevel.LIVE.value:
+            if self.store.get_active_stage_run(instance_id, stage="live") is None:
+                self.store.start_stage_run(instance_id, "live")
         return self._response(instance_id, "resume", result, runtime)
 
     def stop(self, instance_id: str) -> dict[str, Any]:

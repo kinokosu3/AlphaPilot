@@ -2,6 +2,8 @@ qlib_init:
     provider_uri: "{{ p.provider_uri }}"
     region: {{ p.region }}
 
+alphapilot_refit_all_labeled: {{ p.refit_all_labeled | tojson }}
+
 market: &market {{ p.market }}
 benchmark: &benchmark {{ p.benchmark }}
 

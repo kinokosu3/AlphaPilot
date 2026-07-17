@@ -3,13 +3,15 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from alphapilot.systems.live.brokers.paper import PaperBroker
 from alphapilot.systems.live.clock import SimulatedClock
 from alphapilot.systems.live.config import LiveConfig, RiskLimits, RunMode
 from alphapilot.systems.live.ledger import Ledger
 from alphapilot.systems.live.recovery import recover_risk_state_from_ledger, reconcile_ledger_with_oms
 from alphapilot.systems.live.runtime import LiveRuntime
-from alphapilot.systems.live.types import Exchange, OrderRequest
+from alphapilot.systems.live.types import Account, Exchange, OrderRequest
 
 
 class UnsupportedSnapshotBroker(PaperBroker):
@@ -110,6 +112,52 @@ def test_runtime_recovery_restores_risk_duplicate_refs(tmp_path: Path) -> None:
     assert rejected["submitted"] is False
     assert second.engine.ledger.events(kind="rejected")[-1]["payload"]["rule"] == "duplicate"
     assert second.snapshot()["recovery"]["risk_restored"] is True
+    second.close()
+
+
+def test_runtime_recovery_preserves_loss_latch_and_canary_baseline(
+    tmp_path: Path,
+) -> None:
+    cfg = LiveConfig(
+        mode=RunMode.PAPER,
+        broker="paper",
+        ledger_dir=tmp_path / "loss-ledger",
+        state_dir=tmp_path / "loss-state",
+        risk=RiskLimits(
+            max_order_value=10_000,
+            max_daily_value=0,
+            max_position_pct=0.02,
+            price_guard_pct=0.02,
+            max_orders_per_day=20,
+            lot_size=100,
+            max_daily_loss_pct=0.01,
+            max_canary_loss_pct=0.03,
+        ),
+    )
+    first = LiveRuntime.create(
+        cfg,
+        broker=PaperBroker(cash=100_000.0),
+    )
+    first.connect(paper_cash=100_000)
+    first.engine.on_account(
+        Account("paper", balance=98_900, available=98_900, gateway="paper")
+    )
+    assert first.engine.runmode.halted
+    first.write_state()
+    first.close()
+
+    second = LiveRuntime.create(
+        cfg,
+        broker=PaperBroker(cash=98_900.0),
+    )
+    second.connect(paper_cash=98_900)
+
+    risk = second.engine.risk.snapshot()
+    assert second.engine.runmode.halted
+    assert risk["loss_halt_rule"] == "daily_loss"
+    assert risk["canary_start_equity"] == 100_000
+    with pytest.raises(ValueError, match="has not recovered"):
+        second.engine.resume()
     second.close()
 
 

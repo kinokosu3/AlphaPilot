@@ -29,6 +29,7 @@ def reconcile(
     *,
     lot_size: int = 100,
     max_order_value: float = 0.0,
+    max_order_equity_pct: float = 0.0,
 ) -> list[OrderRequest]:
     """Diff target shares vs real OMS positions -> buy/sell requests (lot-rounded).
 
@@ -40,6 +41,7 @@ def reconcile(
     return ExecutionPlanner(
         lot_size=lot_size,
         max_order_value=max_order_value,
+        max_order_equity_pct=max_order_equity_pct,
     ).plan(target, oms).requests
 
 

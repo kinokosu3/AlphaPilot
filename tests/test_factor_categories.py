@@ -42,6 +42,34 @@ def test_add_list_and_categories_many_to_many(db: SqliteFactorDatabase) -> None:
     }
 
 
+def test_research_metadata_is_frozen_and_tampering_is_detected(
+    db: SqliteFactorDatabase,
+) -> None:
+    metadata = {
+        "market": "main_stock_pit",
+        "data_split": {"train": ["2017-01-01", "2021-12-31"]},
+        "hypothesis": "short-term reversal",
+        "mining_round": 2,
+        "seed": 11,
+        "model_fingerprint": "model-hash",
+    }
+    assert db.add("frozen", "$close/$open-1", metadata=metadata) is True
+
+    stored = db.list_factors()[0]
+    assert stored["metadata"] == metadata
+    assert stored["metadata_integrity"] is True
+    assert len(stored["metadata_sha256"]) == 64
+    assert db.verify_asset("frozen")["ok"] is True
+
+    with db._connect() as conn:  # simulate an out-of-band database edit
+        conn.execute(
+            "UPDATE factors SET metadata_json = ? WHERE name = ?",
+            ('{"market":"other"}', "frozen"),
+        )
+        conn.commit()
+    assert db.verify_asset("frozen")["ok"] is False
+
+
 def test_create_empty_category_and_rename(db: SqliteFactorDatabase) -> None:
     assert db.create_category("ideas") is True
     assert db.create_category("ideas") is False  # idempotent

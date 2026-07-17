@@ -15,6 +15,7 @@ routes an order only on ``ok``. Rules (fail-fast, each names itself):
 * **max_order_value** — single-order notional cap;
 * **insufficient_cash** / **insufficient_position** — buying power & T+1 sellable;
 * **max_position_pct** — single-name concentration cap;
+* **max_total_position_pct / max_position_count** — canary portfolio caps;
 * **max_daily_value** — cumulative daily turnover cap.
 
 The gate keeps small per-day mutable state (counts / turnover / seen references);
@@ -56,11 +57,16 @@ class RiskGate:
         self._orders_today = 0
         self._value_today = 0.0
         self._seen_refs: set[str] = set()
+        self._day_start_equity = 0.0
+        self._canary_start_equity = 0.0
+        self._loss_halt_rule = ""
+        self._loss_halt_reason = ""
 
     def reset_day(self) -> None:
         self._orders_today = 0
         self._value_today = 0.0
         self._seen_refs.clear()
+        self._day_start_equity = 0.0
 
     def snapshot(self) -> dict[str, Any]:
         """Return the mutable risk state for runtime status/recovery."""
@@ -70,20 +76,81 @@ class RiskGate:
             "orders_today": int(self._orders_today),
             "value_today": float(self._value_today),
             "seen_refs": sorted(self._seen_refs),
+            "day_start_equity": float(self._day_start_equity),
+            "canary_start_equity": float(self._canary_start_equity),
+            "loss_halt_rule": self._loss_halt_rule,
+            "loss_halt_reason": self._loss_halt_reason,
         }
 
     def restore(self, state: dict[str, Any] | None) -> None:
         """Restore mutable counters from a trusted recovery snapshot."""
         if not state:
             return
-        self._orders_today = int(state.get("orders_today") or 0)
-        self._value_today = float(state.get("value_today") or 0.0)
-        refs = state.get("seen_refs") or []
-        self._seen_refs = {str(ref) for ref in refs if str(ref)}
+        if "orders_today" in state:
+            self._orders_today = int(state.get("orders_today") or 0)
+        if "value_today" in state:
+            self._value_today = float(state.get("value_today") or 0.0)
+        if "seen_refs" in state:
+            refs = state.get("seen_refs") or []
+            self._seen_refs = {str(ref) for ref in refs if str(ref)}
+        if "day_start_equity" in state:
+            self._day_start_equity = float(state.get("day_start_equity") or 0.0)
+        if "canary_start_equity" in state:
+            self._canary_start_equity = float(state.get("canary_start_equity") or 0.0)
+        if "loss_halt_rule" in state:
+            self._loss_halt_rule = str(state.get("loss_halt_rule") or "")
+        if "loss_halt_reason" in state:
+            self._loss_halt_reason = str(state.get("loss_halt_reason") or "")
+
+    def acknowledge_loss_halt(self) -> None:
+        """Clear only the latch; unchanged loss thresholds are re-evaluated immediately."""
+
+        self._loss_halt_rule = ""
+        self._loss_halt_reason = ""
+
+    def check_equity(self, oms: Any) -> RiskVerdict:
+        """Evaluate loss stops on every account update as well as every order."""
+
+        if self._loss_halt_rule:
+            return RiskVerdict.reject(self._loss_halt_rule, self._loss_halt_reason)
+        lim = self.limits
+        equity = self._equity(oms)
+        if equity <= 0:
+            return RiskVerdict.passed()
+        if self._day_start_equity <= 0:
+            self._day_start_equity = equity
+        if self._canary_start_equity <= 0:
+            self._canary_start_equity = equity
+        if (
+            lim.max_daily_loss_pct > 0
+            and equity <= self._day_start_equity * (1.0 - lim.max_daily_loss_pct)
+        ):
+            self._loss_halt_rule = "daily_loss"
+            self._loss_halt_reason = (
+                f"equity loss reached {1 - equity / self._day_start_equity:.2%} "
+                f">= {lim.max_daily_loss_pct:.2%}"
+            )
+            return RiskVerdict.reject(self._loss_halt_rule, self._loss_halt_reason)
+        if (
+            lim.max_canary_loss_pct > 0
+            and equity <= self._canary_start_equity * (1.0 - lim.max_canary_loss_pct)
+        ):
+            self._loss_halt_rule = "canary_loss"
+            self._loss_halt_reason = (
+                f"canary loss reached {1 - equity / self._canary_start_equity:.2%} "
+                f">= {lim.max_canary_loss_pct:.2%}"
+            )
+            return RiskVerdict.reject(self._loss_halt_rule, self._loss_halt_reason)
+        return RiskVerdict.passed()
 
     # ------------------------------------------------------------------ #
     def check(self, req: OrderRequest, oms, session, runmode) -> RiskVerdict:
         lim = self.limits
+
+        equity_verdict = self.check_equity(oms)
+        if not equity_verdict.ok:
+            return equity_verdict
+        equity = self._equity(oms)
 
         if self.enforce_session and session is not None and not session.can_submit():
             return RiskVerdict.reject("session", f"submission not allowed in {session.state.value}")
@@ -142,8 +209,11 @@ class RiskGate:
 
         notional = req.volume * (req.price if req.price > 0 else ref)
 
-        if lim.max_order_value > 0 and notional > lim.max_order_value:
-            return RiskVerdict.reject("max_order_value", f"notional {notional:.0f} > cap {lim.max_order_value:.0f}")
+        order_cap = self.effective_order_cap(equity)
+        if order_cap > 0 and notional > order_cap:
+            return RiskVerdict.reject(
+                "max_order_value", f"notional {notional:.0f} > cap {order_cap:.0f}"
+            )
 
         if req.direction == Direction.LONG:                 # buy
             if notional > oms.buying_power() + 1e-6:
@@ -151,6 +221,9 @@ class RiskGate:
                     "insufficient_cash", f"notional {notional:.0f} > buying power {oms.buying_power():.0f}"
                 )
             verdict = self._check_concentration(req, oms, ref, notional)
+            if not verdict.ok:
+                return verdict
+            verdict = self._check_portfolio_limits(req, oms, ref, notional, equity)
             if not verdict.ok:
                 return verdict
         else:                                               # sell
@@ -161,10 +234,11 @@ class RiskGate:
                     f"sell {req.volume} > sellable {available} (T+1 / frozen)",
                 )
 
-        if lim.max_daily_value > 0 and self._value_today + notional > lim.max_daily_value:
+        daily_cap = self.effective_daily_cap(equity)
+        if daily_cap > 0 and self._value_today + notional > daily_cap:
             return RiskVerdict.reject(
                 "max_daily_value",
-                f"daily turnover {self._value_today + notional:.0f} > cap {lim.max_daily_value:.0f}",
+                f"daily turnover {self._value_today + notional:.0f} > cap {daily_cap:.0f}",
             )
 
         # accepted — record for the daily counters / idempotency
@@ -173,6 +247,28 @@ class RiskGate:
         if req.reference:
             self._seen_refs.add(req.reference)
         return RiskVerdict.passed()
+
+    def effective_order_cap(self, equity: float) -> float:
+        caps = [
+            float(value)
+            for value in (
+                self.limits.max_order_value,
+                equity * self.limits.max_order_equity_pct,
+            )
+            if float(value) > 0
+        ]
+        return min(caps) if caps else 0.0
+
+    def effective_daily_cap(self, equity: float) -> float:
+        caps = [
+            float(value)
+            for value in (
+                self.limits.max_daily_value,
+                equity * self.limits.max_daily_equity_pct,
+            )
+            if float(value) > 0
+        ]
+        return min(caps) if caps else 0.0
 
     @staticmethod
     def _check_contract_price(req: OrderRequest, oms, contract) -> RiskVerdict:
@@ -207,6 +303,87 @@ class RiskGate:
                 f"post-trade {req.key} weight {resulting_value / equity:.1%} > cap {lim.max_position_pct:.1%}",
             )
         return RiskVerdict.passed()
+
+    def _check_portfolio_limits(
+        self,
+        req: OrderRequest,
+        oms: Any,
+        ref: float,
+        notional: float,
+        equity: float,
+    ) -> RiskVerdict:
+        """Conservatively include holdings and every working buy before accepting a buy."""
+
+        lim = self.limits
+        if lim.max_total_position_pct <= 0 and lim.max_position_count <= 0:
+            return RiskVerdict.passed()
+        if equity <= 0:
+            return RiskVerdict.reject(
+                "portfolio_equity",
+                "positive account equity is required for portfolio exposure limits",
+            )
+
+        symbols: set[str] = set()
+        total_value = 0.0
+        positions = oms.get_positions() if hasattr(oms, "get_positions") else []
+        for position in positions:
+            volume = max(float(getattr(position, "volume", 0.0) or 0.0), 0.0)
+            if volume <= 0:
+                continue
+            key = str(getattr(position, "key", "") or "")
+            price = self._position_price(oms, key, getattr(position, "price", 0.0))
+            if price <= 0:
+                return RiskVerdict.reject(
+                    "portfolio_valuation",
+                    f"cannot value existing position {key}",
+                )
+            symbols.add(key)
+            total_value += volume * price
+
+        active_orders = (
+            oms.get_active_orders() if hasattr(oms, "get_active_orders") else []
+        )
+        for order in active_orders:
+            if getattr(order, "direction", None) != Direction.LONG:
+                continue
+            remaining = max(float(getattr(order, "remaining", 0.0) or 0.0), 0.0)
+            if remaining <= 0:
+                continue
+            key = str(getattr(order, "key", "") or "")
+            price = float(getattr(order, "price", 0.0) or 0.0)
+            if price <= 0:
+                price = self._position_price(oms, key, 0.0)
+            if price <= 0:
+                return RiskVerdict.reject(
+                    "portfolio_valuation",
+                    f"cannot value pending buy {key}",
+                )
+            symbols.add(key)
+            total_value += remaining * price
+
+        symbols.add(req.key)
+        if lim.max_position_count > 0 and len(symbols) > lim.max_position_count:
+            return RiskVerdict.reject(
+                "max_position_count",
+                f"post-trade position count {len(symbols)} > cap {lim.max_position_count}",
+            )
+        resulting_weight = (total_value + notional) / equity
+        if (
+            lim.max_total_position_pct > 0
+            and resulting_weight > lim.max_total_position_pct + 1e-12
+        ):
+            return RiskVerdict.reject(
+                "max_total_position_pct",
+                f"post-trade total exposure {resulting_weight:.1%} > "
+                f"cap {lim.max_total_position_pct:.1%}",
+            )
+        return RiskVerdict.passed()
+
+    @staticmethod
+    def _position_price(oms: Any, key: str, fallback: Any) -> float:
+        tick = oms.get_tick(key) if key and hasattr(oms, "get_tick") else None
+        price = float(getattr(tick, "last_price", 0.0) or 0.0)
+        return price if price > 0 else float(fallback or 0.0)
 
     @staticmethod
     def _ref_price(oms, req: OrderRequest) -> float:

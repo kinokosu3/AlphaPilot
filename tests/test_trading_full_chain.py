@@ -468,6 +468,9 @@ def test_qlib_selection_snapshot_replay_outputs_only_bound_topk(
         "universe": list(universe),
         "yaml_params": {},
         "use_local": True,
+        "provider_uri": str(tmp_path / "qlib"),
+        "market": "main_stock_pit",
+        "factor_data_fingerprint": "training-factor-fingerprint",
     }
 
     def fake_scores(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202

@@ -84,10 +84,26 @@ class RiskLimits:
 
     #: Max notional of a single order.
     max_order_value: float = field(default_factory=lambda: _env_float("ALPHAPILOT_LIVE_MAX_ORDER_VALUE", 200_000.0))
+    #: Optional dynamic single-order cap as a fraction of current account equity.
+    max_order_equity_pct: float = field(
+        default_factory=lambda: _env_float("ALPHAPILOT_LIVE_MAX_ORDER_EQUITY_PCT", 0.0)
+    )
     #: Max total notional traded in one day (buys + sells).
     max_daily_value: float = field(default_factory=lambda: _env_float("ALPHAPILOT_LIVE_MAX_DAILY_VALUE", 2_000_000.0))
+    #: Optional dynamic daily turnover cap as a fraction of current account equity.
+    max_daily_equity_pct: float = field(
+        default_factory=lambda: _env_float("ALPHAPILOT_LIVE_MAX_DAILY_EQUITY_PCT", 0.0)
+    )
     #: Max fraction of account equity in a single instrument (0..1).
     max_position_pct: float = field(default_factory=lambda: _env_float("ALPHAPILOT_LIVE_MAX_POSITION_PCT", 0.30))
+    #: Max aggregate long-equity exposure as a fraction of account equity.
+    max_total_position_pct: float = field(
+        default_factory=lambda: _env_float("ALPHAPILOT_LIVE_MAX_TOTAL_POSITION_PCT", 0.0)
+    )
+    #: Max number of instruments with holdings or pending buy orders.
+    max_position_count: int = field(
+        default_factory=lambda: _env_int("ALPHAPILOT_LIVE_MAX_POSITION_COUNT", 0)
+    )
     #: Reject a limit price deviating more than this fraction from the reference.
     price_guard_pct: float = field(default_factory=lambda: _env_float("ALPHAPILOT_LIVE_PRICE_GUARD_PCT", 0.05))
     #: Max number of orders accepted in one day (throttle / runaway guard).
@@ -107,6 +123,14 @@ class RiskLimits:
     )
     min_fee: float = field(
         default_factory=lambda: _env_float("ALPHAPILOT_LIVE_MIN_FEE", 5.0)
+    )
+    #: Halt when account equity falls this far from the first observed equity today.
+    max_daily_loss_pct: float = field(
+        default_factory=lambda: _env_float("ALPHAPILOT_LIVE_MAX_DAILY_LOSS_PCT", 0.0)
+    )
+    #: Halt when equity falls this far from the persisted canary starting equity.
+    max_canary_loss_pct: float = field(
+        default_factory=lambda: _env_float("ALPHAPILOT_LIVE_MAX_CANARY_LOSS_PCT", 0.0)
     )
 
 
@@ -193,6 +217,8 @@ class LiveConfig:
             f"market_data_dir={self.market_data.data_dir}, "
             f"risk=[max_order_value={self.risk.max_order_value}, "
             f"max_position_pct={self.risk.max_position_pct}, "
+            f"max_total_position_pct={self.risk.max_total_position_pct}, "
+            f"max_position_count={self.risk.max_position_count}, "
             f"price_guard_pct={self.risk.price_guard_pct}, lot_size={self.risk.lot_size}]"
             ")"
         )

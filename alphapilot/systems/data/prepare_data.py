@@ -314,8 +314,23 @@ class PrepareDataCLI:
         index_code: str = DEFAULT_BENCHMARK_INDEX,
         start_date: str = "2015-01-01",
         end_date: str | None = None,
+        source: str = "baostock_cn",
+        token: str | None = None,
     ) -> None:
         """Download the backtest benchmark index (default 中证500/SH000905) into qlib_dir."""
+        if source == "tushare_cn":
+            from alphapilot.systems.data.prepare_tushare import (
+                ensure_tushare_benchmark_index,
+            )
+
+            ensure_tushare_benchmark_index(
+                qlib_dir=qlib_dir,
+                index_code=index_code,
+                start_date=start_date,
+                end_date=end_date,
+                token=token,
+            )
+            return
         ensure_benchmark_index(
             qlib_dir=qlib_dir,
             index_code=index_code,
@@ -347,6 +362,31 @@ class PrepareDataCLI:
         removed = clean_factor_h5_cache(market=market)
         logger.info(f"removed {removed} factor h5 cache entr{'y' if removed == 1 else 'ies'}")
 
+    def validate_pit(
+        self,
+        qlib_dir: str,
+        raw_dir: str,
+        market: str = "main_stock_pit",
+        as_of: str = "2026-07-16",
+        metadata_path: str | None = None,
+        benchmark: str = "SH000905",
+        strict: bool = True,
+    ) -> dict:
+        """Run the fail-closed point-in-time data quality gate."""
+        from alphapilot.systems.data.pit_validation import validate_pit_dataset
+
+        report = validate_pit_dataset(
+            qlib_dir=qlib_dir,
+            raw_dir=raw_dir,
+            market=market,
+            as_of=as_of,
+            metadata_path=metadata_path,
+            benchmark=benchmark,
+            strict=strict,
+        )
+        logger.info(f"PIT dataset validation: {report}")
+        return report
+
     def convert(
         self,
         stock_csv: str = str(DEFAULT_STOCK_CSV),
@@ -363,6 +403,8 @@ class PrepareDataCLI:
         sync_instruments: bool = True,
         max_workers: int = 16,
         include_benchmark: bool = True,
+        benchmark_source: str = "baostock_cn",
+        benchmark_token: str | None = None,
         freq: str = "day",
     ) -> None:
         """Run dump + calendar + benchmark (skip download).
@@ -425,7 +467,13 @@ class PrepareDataCLI:
             # Supplementary: the main conversion already succeeded, so a benchmark
             # download failure (e.g. baostock offline) must not abort the pipeline.
             try:
-                self.benchmark(qlib_dir=qlib_dir, end_date=end)
+                self.benchmark(
+                    qlib_dir=qlib_dir,
+                    start_date=start_date,
+                    end_date=end,
+                    source=benchmark_source,
+                    token=benchmark_token,
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"基准指数写入失败（行情转换已完成，可稍后单独运行 benchmark）: {exc}")
 
@@ -515,6 +563,8 @@ class PrepareDataCLI:
         apply_adjust_after_download: bool = True,
         source: str = "baostock_cn",
         token: str | None = None,
+        include_daily_basic: bool = False,
+        include_delisted: bool = False,
         parallel_price_factor: bool = False,
         freq: str = "day",
     ) -> None:
@@ -594,9 +644,11 @@ class PrepareDataCLI:
                 factor_dir=factor_path,
                 download_state_path=download_state_path,
                 token=token,
+                include_daily_basic=include_daily_basic,
+                include_delisted=include_delisted,
                 parallel_price_factor=parallel_price_factor,
             )
-            if sync_instruments and not all_market:
+            if sync_instruments:
                 update_current_job_progress(
                     76,
                     "pipeline:instruments",
@@ -611,6 +663,11 @@ class PrepareDataCLI:
                     start_date=start_date,
                     end_date=end,
                     data_dir=raw_none_dir,
+                    membership_metadata_path=(
+                        raw_none_dir / prepare_tushare.UNIVERSE_METADATA_FILE
+                        if include_delisted
+                        else None
+                    ),
                 )
         else:
             resolved_qlib = qlib_dir or str(DEFAULT_QLIB_DIR)
@@ -681,6 +738,8 @@ class PrepareDataCLI:
             end_date=end,
             sync_instruments=False,
             max_workers=dump_workers,
+            benchmark_source=source,
+            benchmark_token=token,
         )
         update_current_job_progress(
             98,
@@ -689,6 +748,17 @@ class PrepareDataCLI:
             source=source,
             market=pool,
         )
+        if is_tushare and include_delisted:
+            self.validate_pit(
+                qlib_dir=str(resolved_qlib),
+                raw_dir=str(raw_none_dir),
+                market=pool,
+                as_of=end,
+                metadata_path=str(
+                    raw_none_dir / prepare_tushare.UNIVERSE_METADATA_FILE
+                ),
+                strict=True,
+            )
         logger.info(f"全流程完成。source={source} market={pool!r}，请确认 conf.yaml 一致。")
 
 

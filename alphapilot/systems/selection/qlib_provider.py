@@ -20,6 +20,10 @@ class QlibSelectionProvider:
         self._initialized = False
         self._stopped = False
         self._last_as_of = ""
+        self._last_factor_values_hash = ""
+        self._last_full_score_hash = ""
+        self._last_filtered_score_hash = ""
+        self._runtime_factor_data_fingerprint = ""
 
     def initialize(self, context: StrategyEvaluationContext) -> None:
         del context
@@ -52,8 +56,15 @@ class QlibSelectionProvider:
             qlib_template_dir=self.binding.get("qlib_template_dir"),
             use_local=bool(self.binding.get("use_local", True)),
             provider_uri=self.binding.get("provider_uri"),
+            market=self.binding.get("market"),
+            factor_data_fingerprint=self.binding.get("factor_data_fingerprint"),
+            factor_data_freq=str(self.binding.get("factor_data_freq") or "day"),
+            factor_data_start_date=str(
+                self.binding.get("factor_data_start_date") or "2015-01-01"
+            ),
             start_date=start_date,
         )
+        evidence = dict(getattr(scores, "attrs", {}) or {})
         series = scores.iloc[:, 0] if hasattr(scores, "columns") else scores
         if hasattr(series, "index") and getattr(series.index, "nlevels", 1) > 1:
             latest = series.index.get_level_values(0).max()
@@ -69,8 +80,18 @@ class QlibSelectionProvider:
         }
         if not normalized:
             raise ValueError("Qlib prediction returned no scores inside the bound universe")
+        from alphapilot.systems.research.inference_parity import numeric_mapping_hash
+
         ordered = sorted(normalized, key=lambda key: (-normalized[key], key))
         self._last_as_of = context.as_of
+        self._last_factor_values_hash = str(evidence.get("factor_values_hash") or "")
+        self._last_full_score_hash = str(evidence.get("full_score_hash") or "")
+        self._last_filtered_score_hash = numeric_mapping_hash(
+            normalized, name="filtered_scores"
+        )
+        self._runtime_factor_data_fingerprint = str(
+            evidence.get("runtime_factor_data_fingerprint") or ""
+        )
         return SignalEnvelope(
             kind=SignalKind.CROSS_SECTIONAL_SELECTION,
             source_instance_id=context.instance_id,
@@ -86,12 +107,25 @@ class QlibSelectionProvider:
         )
 
     def snapshot(self) -> dict[str, Any]:
-        return {"version": 1, "last_as_of": self._last_as_of}
+        return {
+            "version": 1,
+            "last_as_of": self._last_as_of,
+            "factor_values_hash": self._last_factor_values_hash,
+            "full_score_hash": self._last_full_score_hash,
+            "filtered_score_hash": self._last_filtered_score_hash,
+            "runtime_factor_data_fingerprint": self._runtime_factor_data_fingerprint,
+        }
 
     def restore(self, state: dict[str, Any]) -> None:
         if int(state.get("version") or 0) != 1:
             raise ValueError("unsupported Qlib provider state version")
         self._last_as_of = str(state.get("last_as_of") or "")
+        self._last_factor_values_hash = str(state.get("factor_values_hash") or "")
+        self._last_full_score_hash = str(state.get("full_score_hash") or "")
+        self._last_filtered_score_hash = str(state.get("filtered_score_hash") or "")
+        self._runtime_factor_data_fingerprint = str(
+            state.get("runtime_factor_data_fingerprint") or ""
+        )
 
     def stop(self, reason: str) -> None:
         del reason
@@ -101,3 +135,13 @@ class QlibSelectionProvider:
         from alphapilot.systems.trading.artifacts import verify_artifact_binding
 
         verify_artifact_binding(self.binding)
+        missing = [
+            key
+            for key in ("provider_uri", "market", "factor_data_fingerprint")
+            if not str(self.binding.get(key) or "").strip()
+        ]
+        if missing:
+            raise ValueError(
+                "Qlib artifact binding is missing data context fields: "
+                + ", ".join(missing)
+            )

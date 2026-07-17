@@ -8,6 +8,8 @@ downstream of here speaks alphapilot's native factor language only.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from typing import TYPE_CHECKING, Any, Sequence
 
@@ -35,6 +37,7 @@ def emit_factors(
     backtest: bool = False,
     save: bool = True,
     qlib_config_name: str | None = None,
+    research_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Translate -> validate/add -> (optional) backtest a batch of mined factors.
 
@@ -42,7 +45,7 @@ def emit_factors(
     rejected/untranslatable details, and backtest metrics when requested.
     """
     factor_sys = context.factor()
-    run_id = time.strftime("%m%d%H%M%S")
+    run_id = time.strftime("%m%d%H%M%S") + f"_{time.time_ns() % 1_000_000:06d}"
 
     accepted: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
@@ -55,16 +58,38 @@ def emit_factors(
             continue
 
         name = f"{source}_{run_id}_{i:03d}"
+        factor_metadata = _factor_metadata(
+            research_metadata,
+            source=source,
+            factor_name=name,
+            expression=dsl,
+            score=score,
+        )
         if save:
             try:
                 # Auto-tag every mined factor with its source method (e.g.
                 # ``alphaforge_gp``). Defer the CSV mirror to one save after the loop.
-                result = factor_sys.add_factor(name, dsl, categories=[source], save=False)
+                result = factor_sys.add_factor(
+                    name,
+                    dsl,
+                    categories=[source],
+                    metadata=factor_metadata,
+                    save=False,
+                )
             except Exception as exc:  # noqa: BLE001 - never let one factor abort the batch
                 rejected.append({"name": name, "dsl": dsl, "reason": f"add_factor error: {exc}"})
                 continue
             if getattr(result, "acceptable", False):
-                accepted.append({"name": name, "dsl": dsl, "score": score})
+                accepted.append(
+                    {
+                        "name": name,
+                        "dsl": dsl,
+                        "score": score,
+                        "metadata_sha256": (result.details or {}).get(
+                            "metadata_sha256", ""
+                        ),
+                    }
+                )
             else:
                 rejected.append({
                     "name": name, "dsl": dsl,
@@ -88,12 +113,59 @@ def emit_factors(
         "rejected": rejected,
         "n_accepted": len(accepted),
         "n_rejected": len(rejected),
+        "research_metadata": dict(research_metadata or {}),
+        "research_metadata_sha256": hashlib.sha256(
+            json.dumps(
+                research_metadata or {},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest(),
     }
 
     if backtest and accepted:
         summary["backtest"] = _run_backtest(context, accepted, source, qlib_config_name)
 
     return summary
+
+
+def _factor_metadata(
+    base: dict[str, Any] | None,
+    *,
+    source: str,
+    factor_name: str,
+    expression: str,
+    score: float | None,
+) -> dict[str, Any]:
+    metadata = dict(base or {})
+    try:
+        from alphapilot.components.coder.factor_coder.factor_ast import parse_expression
+
+        factor_ast = str(parse_expression(expression))
+    except Exception:  # noqa: BLE001 - the normal factor validator remains authoritative
+        factor_ast = ""
+    expression_hash = hashlib.sha256(expression.encode("utf-8")).hexdigest()
+    metadata.update(
+        {
+            "source": source,
+            "factor_name": factor_name,
+            "factor_ast": factor_ast,
+            "factor_expression_sha256": expression_hash,
+            "source_score": score,
+        }
+    )
+    metadata["asset_fingerprint"] = hashlib.sha256(
+        json.dumps(
+            metadata,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+    return metadata
 
 
 def _run_backtest(

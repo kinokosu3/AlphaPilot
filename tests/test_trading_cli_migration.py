@@ -55,6 +55,15 @@ class _TradingCLISystem:
     def validate_instance(self, instance_id):  # noqa: ANN001, ANN201
         return self._result("validate", instance_id)
 
+    def start_stage_run(self, instance_id, stage):  # noqa: ANN001, ANN201
+        return self._result("stage-start", {"instance_id": instance_id, "stage": stage})
+
+    def finish_stage_run(self, run_id, payload):  # noqa: ANN001, ANN201
+        return self._result("stage-finish", {"run_id": run_id, **payload})
+
+    def evaluate_stage(self, instance_id, stage):  # noqa: ANN001, ANN201
+        return self._result("stage-evaluate", {"instance_id": instance_id, "stage": stage})
+
     def preview_instance(self, instance_id, payload):  # noqa: ANN001, ANN201
         self.calls.append(("preview", {"instance_id": instance_id, "payload": payload}))
         return {"signal": {"payload": dict(payload.get("signal_payload") or {})}}
@@ -116,8 +125,8 @@ class _TradingCLISystem:
     def get_parity_run(self, run_id):  # noqa: ANN001, ANN201
         return self._result("parity-status", run_id)
 
-    def qualification(self, instance_id):  # noqa: ANN001, ANN201
-        return self._result("qualification", instance_id)
+    def qualification(self, instance_id, **payload):  # noqa: ANN001, ANN201
+        return self._result("qualification", {"instance_id": instance_id, **payload})
 
     def start_broker_uat(self, payload):  # noqa: ANN001, ANN201
         if self.fail_uat:
@@ -178,6 +187,12 @@ def test_trading_cli_formal_surface_and_file_outputs(
         "selection", "research-a", ["600000.SSE"], '{"policy_id":"selection"}',
     )
     module.trading_instance_validate("alpha")
+    module.trading_stage_start("alpha", "paper")
+    finished_stage = module.trading_stage_finish(
+        "stage-1", 1, metrics='{"unresolved_errors": 0}',
+    )
+    assert finished_stage["payload"]["metrics"]["unresolved_errors"] == 0
+    module.trading_stage_evaluate("alpha", "paper")
 
     json_path = tmp_path / "preview.json"
     module.trading_preview("alpha", '{"signal_payload":{"score":1}}', str(json_path))

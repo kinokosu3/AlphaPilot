@@ -164,17 +164,34 @@ def run_static_validation(config_path: Path, workspace: Path | None = None) -> V
             valid = segments.get("valid", [])
             test = segments.get("test", [])
             if len(train) == 2 and len(valid) == 2 and len(test) == 2:
-                ok = (
-                    _parse_date(train[1]) < _parse_date(valid[0])
-                    and _parse_date(valid[1]) < _parse_date(test[0])
-                )
+                refit_all_labeled = conf.get("alphapilot_refit_all_labeled") is True
+                if refit_all_labeled:
+                    ok = (
+                        _parse_date(train[0]) <= _parse_date(valid[0])
+                        and _parse_date(valid[1]) < _parse_date(test[0])
+                        and _parse_date(train[1]) >= _parse_date(test[1])
+                    )
+                    success_message = (
+                        "final refit train segment covers all validation/test rows"
+                    )
+                    failure_message = (
+                        "Final refit train must cover ordered validation/test segments"
+                    )
+                else:
+                    ok = (
+                        _parse_date(train[1]) < _parse_date(valid[0])
+                        and _parse_date(valid[1]) < _parse_date(test[0])
+                    )
+                    success_message = "train/valid/test segments are ordered correctly"
+                    failure_message = (
+                        "Segment dates must satisfy train_end < valid_start and "
+                        "valid_end < test_start"
+                    )
                 _add(
                     checks,
                     "segment_order",
                     ok,
-                    "train/valid/test segments are ordered correctly"
-                    if ok
-                    else "Segment dates must satisfy train_end < valid_start and valid_end < test_start",
+                    success_message if ok else failure_message,
                 )
             else:
                 _add(checks, "segment_order", False, "segments.train/valid/test must each have [start, end]")

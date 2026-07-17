@@ -38,7 +38,34 @@ class ResearchArtifactSnapshotter:
         strategy_dir = self.strategy_system.param_database.strategy_dir(strategy_name)
         extra_roots = [strategy_dir] if strategy_dir is not None else []
         model_hash = verify_trusted_model(model_uri, extra_roots=extra_roots)
-        members = self._resolve_universe(record, universe)
+        metadata = dict(record.metadata or {})
+        expected_model_hash = str(metadata.get("model_hash") or "").strip()
+        if expected_model_hash and model_hash != expected_model_hash:
+            raise ValueError("research strategy model has changed since it was frozen")
+        expected_factor_hash = str(metadata.get("factor_formula_hash") or "").strip()
+        if expected_factor_hash and _canonical_json_sha256(
+            list(record.factor_formulas)
+        ) != expected_factor_hash:
+            raise ValueError("research strategy factors have changed since they were frozen")
+        provider_uri = str(
+            Path(
+                metadata.get("provider_uri") or self.config.data.qlib_data_dir
+            ).expanduser().resolve()
+        )
+        market = str(metadata.get("market") or "").strip()
+        if not market:
+            raise ValueError("research strategy has no bound market")
+        factor_data_fingerprint = str(
+            metadata.get("factor_data_fingerprint") or ""
+        ).strip()
+        if not factor_data_fingerprint:
+            from alphapilot.systems.data.factor_h5 import FactorDataSpec
+
+            factor_data_fingerprint = FactorDataSpec(
+                qlib_dir=Path(provider_uri),
+                market=market,
+            ).fingerprint()
+        members = self._resolve_universe(record, universe, provider_uri=provider_uri)
         if not members:
             raise ValueError("selection strategy universe must not be empty")
         template_source: Path | None = None
@@ -56,6 +83,21 @@ class ResearchArtifactSnapshotter:
             if not template_source.is_dir():
                 raise ValueError("declared Qlib template snapshot directory is missing")
             template_hash = _tree_sha256(template_source)
+        expected_config_hash = str(metadata.get("qlib_config_fingerprint") or "").strip()
+        if expected_config_hash:
+            if strategy_dir is None:
+                raise ValueError("research strategy has no directory for its frozen Qlib config")
+            config_name = str(metadata.get("qlib_config_path") or "").strip()
+            if not config_name:
+                raise ValueError("research strategy has no frozen Qlib config path")
+            strategy_root = Path(strategy_dir).expanduser().resolve()
+            config_path = (strategy_root / config_name).resolve()
+            try:
+                config_path.relative_to(strategy_root)
+            except ValueError as exc:
+                raise ValueError("Qlib config must remain inside the research strategy directory") from exc
+            if not config_path.is_file() or _sha256(config_path) != expected_config_hash:
+                raise ValueError("research strategy Qlib config has changed since it was frozen")
         record_payload = asdict(record)
         research_fingerprint = _digest_json({
             "record": record_payload,
@@ -85,7 +127,20 @@ class ResearchArtifactSnapshotter:
                         "factor_expression": formula,
                     })
             yaml_path = staged / "yaml_params.json"
-            yaml_params = dict((record.metadata or {}).get("yaml_params") or {})
+            yaml_params = dict(metadata.get("yaml_params") or {})
+            bound_values = {"market": market, "provider_uri": provider_uri}
+            for key, expected in bound_values.items():
+                supplied = yaml_params.get(key)
+                normalized = (
+                    str(Path(str(supplied)).expanduser().resolve())
+                    if key == "provider_uri" and supplied
+                    else str(supplied or "")
+                )
+                if supplied and normalized != expected:
+                    raise ValueError(
+                        f"research yaml_params.{key} does not match its immutable data binding"
+                    )
+                yaml_params[key] = expected
             yaml_path.write_text(json.dumps(yaml_params, ensure_ascii=False, indent=2), encoding="utf-8")
 
             template_destination: Path | None = None
@@ -106,11 +161,17 @@ class ResearchArtifactSnapshotter:
                     str(destination / "qlib_template") if template_destination is not None else None
                 ),
                 "qlib_template_hash": template_hash,
-                "provider_uri": str(self.config.data.qlib_data_dir),
+                "provider_uri": provider_uri,
                 "use_local": bool(self.config.backtest.use_local),
-                "market": (record.metadata or {}).get("market"),
+                "market": market,
+                "factor_data_fingerprint": factor_data_fingerprint,
+                "factor_data_freq": str(metadata.get("factor_data_freq") or "day"),
+                "factor_data_start_date": str(
+                    metadata.get("factor_data_start_date") or "2015-01-01"
+                ),
                 "universe": members,
             }
+            manifest["binding_hash"] = _digest_json(manifest)
             (staged / "manifest.json").write_text(
                 json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True),
                 encoding="utf-8",
@@ -127,7 +188,13 @@ class ResearchArtifactSnapshotter:
             shutil.rmtree(staged, ignore_errors=True)
             raise
 
-    def _resolve_universe(self, record: Any, supplied: Any) -> list[str]:
+    def _resolve_universe(
+        self,
+        record: Any,
+        supplied: Any,
+        *,
+        provider_uri: str | Path | None = None,
+    ) -> list[str]:
         if supplied:
             return sorted({canonical_instrument(item) for item in supplied})
         market = str((record.metadata or {}).get("market") or "").strip()
@@ -142,7 +209,9 @@ class ResearchArtifactSnapshotter:
                 return sorted({canonical_instrument(item) for item in symbols})
         except Exception:
             pass
-        instrument_file = Path(self.config.data.qlib_data_dir) / "instruments" / f"{market}.txt"
+        instrument_file = Path(
+            provider_uri or self.config.data.qlib_data_dir
+        ) / "instruments" / f"{market}.txt"
         if not instrument_file.is_file():
             return []
         symbols = [
@@ -158,6 +227,11 @@ def verify_artifact_binding(
     snapshot_root: str | Path | None = None,
     expected_instance_id: str | None = None,
 ) -> None:
+    binding_hash = str(binding.get("binding_hash") or "")
+    if binding_hash:
+        unsigned = {key: value for key, value in binding.items() if key != "binding_hash"}
+        if _digest_json(unsigned) != binding_hash:
+            raise ValueError("artifact binding metadata has changed")
     if binding.get("artifact_type") != "qlib_selection":
         raise ValueError("unsupported artifact binding")
     model = Path(str(binding.get("model_path") or "")).expanduser()
@@ -206,6 +280,19 @@ def verify_artifact_binding(
 
 def _digest_json(value: Any) -> str:
     payload = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _canonical_json_sha256(value: Any) -> str:
+    """Match the canonical JSON fingerprint used by saved research assets."""
+
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
 
 

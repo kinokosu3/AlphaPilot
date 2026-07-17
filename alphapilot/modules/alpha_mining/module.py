@@ -44,11 +44,14 @@ class AlphaMiningModule(BaseModule):
         scenario: str = "alpha_factor_mining",
         qlib_config_name: str | None = None,
         qlib_template_dir: str | None = None,
+        qlib_dir: str | None = None,
         market: str | None = None,
         yaml_params: str | None = None,
         save_factors_to_library: bool = False,
+        random_seed: int | None = None,
+        campaign_id: str | None = None,
         freq: str = "day",
-    ) -> None:
+    ) -> dict[str, Any]:
         """Run the autonomous factor-mining loop.
 
         ``yaml_params``: optional JSON string / file path overriding the qlib config used by the
@@ -73,16 +76,56 @@ class AlphaMiningModule(BaseModule):
         resolved_qlib_config = qlib_config_name or getattr(prop_setting, "qlib_config_name", None)
         resolved_template_dir = qlib_template_dir or getattr(prop_setting, "qlib_template_dir", None)
         parsed_yaml_params = self._parse_yaml_params(yaml_params)
+        if random_seed is not None:
+            import random
+
+            random.seed(int(random_seed))
+            try:
+                import numpy as np
+
+                np.random.seed(int(random_seed))
+            except ImportError:
+                pass
         # Intraday mining: render qrun configs at the matching freq.
         if freq != "day":
             parsed_yaml_params = {**(parsed_yaml_params or {}), "freq": freq}
         bt_cfg = self.context.config.backtest
 
+        yaml_provider = (
+            str(parsed_yaml_params.get("provider_uri"))
+            if isinstance(parsed_yaml_params, dict)
+            and parsed_yaml_params.get("provider_uri")
+            else None
+        )
+        if qlib_dir and yaml_provider:
+            explicit = str(Path(qlib_dir).expanduser().resolve())
+            rendered = str(Path(yaml_provider).expanduser().resolve())
+            if explicit != rendered:
+                raise ValueError(
+                    "qlib_dir and yaml_params.provider_uri must resolve to the same dataset"
+                )
+        yaml_market = (
+            str(parsed_yaml_params.get("market"))
+            if isinstance(parsed_yaml_params, dict) and parsed_yaml_params.get("market")
+            else None
+        )
+        if market and yaml_market and market != yaml_market:
+            raise ValueError("market and yaml_params.market must be identical")
+
         # Intraday mining reads the per-frequency qlib dir (the configured one is daily).
         if get_frequency(freq).is_intraday:
-            from alphapilot.systems.data.data_paths import baostock_qlib_dir
+            if qlib_dir or yaml_provider:
+                mining_qlib_dir = str(
+                    Path(qlib_dir or yaml_provider or "").expanduser().resolve()
+                )
+            else:
+                from alphapilot.systems.data.data_paths import baostock_qlib_dir
 
-            mining_qlib_dir = str(baostock_qlib_dir(freq))
+                mining_qlib_dir = str(baostock_qlib_dir(freq))
+        elif qlib_dir or yaml_provider:
+            mining_qlib_dir = str(
+                Path(qlib_dir or yaml_provider or "").expanduser().resolve()
+            )
         else:
             mining_qlib_dir = str(self.context.config.data.qlib_data_dir)
 
@@ -124,6 +167,8 @@ class AlphaMiningModule(BaseModule):
                     qlib_template_dir=resolved_template_dir,
                     yaml_params=parsed_yaml_params,
                     save_factors_to_library=save_factors_to_library,
+                    random_seed=random_seed,
+                    campaign_id=campaign_id,
                 )
             else:
                 loop = loop_cls.load(path, use_local=use_local)
@@ -135,8 +180,23 @@ class AlphaMiningModule(BaseModule):
                 if parsed_yaml_params is not None:
                     loop.yaml_params = parsed_yaml_params
                 loop.save_factors_to_library = save_factors_to_library
+                loop.random_seed = random_seed
+                loop.campaign_id = campaign_id
             loop.factor_data_context = factor_data_ctx
             loop.run(step_n=step_n, stop_event=stop_event)
+            return {
+                "session_path": str(logger.log_trace_path),
+                "completed_rounds": int(getattr(loop, "loop_idx", 0)),
+                "next_step_index": int(getattr(loop, "step_idx", 0)),
+                "round_persistence": list(
+                    getattr(loop, "round_persistence", []) or []
+                ),
+                "market": factor_data_ctx.spec.market,
+                "provider_uri": str(factor_data_ctx.spec.qlib_dir),
+                "factor_data_fingerprint": factor_data_ctx.fingerprint,
+                "campaign_id": campaign_id,
+                "random_seed": random_seed,
+            }
 
     def run_factor_backtest_request(self, request: "FactorBacktestRequest") -> "FactorBacktestResult":
         """Orchestrate CSV/list factor backtest (propose → calculate → qlib via backtest system)."""

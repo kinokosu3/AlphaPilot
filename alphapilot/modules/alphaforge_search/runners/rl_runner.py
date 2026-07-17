@@ -34,6 +34,8 @@ class RLRunner:
         seed: int = 0,
         steps: int = 200_000,
         pool_capacity: int = 10,
+        target_horizon: int = 20,
+        target_price: str = "vwap",
         device: str | None = None,
         qlib_dir: str | None = None,
         raw: bool = False,
@@ -45,6 +47,8 @@ class RLRunner:
         self.seed = seed
         self.steps = steps
         self.pool_capacity = pool_capacity
+        self.target_horizon = target_horizon
+        self.target_price = target_price
         self.device_pref = device
         self.qlib_dir = qlib_dir
         self.raw = raw
@@ -64,7 +68,10 @@ class RLRunner:
             freq=self.freq, device=dev, raw=self.raw, qlib_dir=self.qlib_dir,
         )
         data = splits.train
-        target = default_target()
+        target = default_target(
+            target_horizon=self.target_horizon,
+            target_price=self.target_price,
+        )
 
         pool = AlphaPool(capacity=self.pool_capacity, stock_data=data, target=target, ic_lower_bound=None)
         env = AlphaEnv(pool=pool, device=dev, print_expr=False)

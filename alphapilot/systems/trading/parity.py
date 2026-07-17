@@ -115,7 +115,11 @@ class DecisionParityService:
             return "not_comparable", "decision inputs differ", {"differences": differences}
         outputs = {
             key: {"replay": replay[key], "shadow": shadow[key]}
-            for key in ("signal_hash", "weights_hash")
+            for key in (
+                "provider_state_after_hash",
+                "signal_hash",
+                "weights_hash",
+            )
             if str(replay[key]) != str(shadow[key])
         }
         if outputs:
@@ -156,6 +160,7 @@ class DeploymentQualificationService:
         runtime = self.store.get_runtime_state(instance_id)
         paper = self.store.evaluate_stage(instance_id, "paper", minimum_sessions=20)
         shadow = self.store.evaluate_stage(instance_id, "shadow", minimum_sessions=5)
+        live = self.store.evaluate_stage(instance_id, "live", minimum_sessions=5)
         shadow_sessions = set(
             self.store.list_stage_sessions(
                 instance_id,
@@ -248,6 +253,7 @@ class DeploymentQualificationService:
             "evaluated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "paper": paper,
             "shadow": shadow,
+            "live": live,
             "parity": parity,
             "broker_uat": uat,
             "reconcile": reconcile,

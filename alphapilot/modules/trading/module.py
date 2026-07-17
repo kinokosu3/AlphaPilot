@@ -93,16 +93,42 @@ class TradingModule(BaseModule):
         strategy_name: str,
         universe: Any = None,
         portfolio_policy: Any = None,
+        risk_policy: Any = None,
     ) -> dict[str, Any]:
         return self._print(self._system().create_instance_from_research_asset({
             "instance_id": instance_id,
             "strategy_name": strategy_name,
             "universe": _symbols(universe),
             "portfolio_policy": _object(portfolio_policy),
+            "risk_policy": _object(risk_policy),
         }))
 
     def trading_instance_validate(self, instance_id: str) -> dict[str, Any]:
         return self._print(self._system().validate_instance(instance_id))
+
+    def trading_stage_start(self, instance_id: str, stage: str) -> dict[str, Any]:
+        return self._print(self._system().start_stage_run(instance_id, stage))
+
+    def trading_stage_finish(
+        self,
+        run_id: str,
+        trading_sessions: int,
+        metrics: Any = None,
+        status: str = "completed",
+    ) -> dict[str, Any]:
+        return self._print(
+            self._system().finish_stage_run(
+                run_id,
+                {
+                    "trading_sessions": int(trading_sessions),
+                    "metrics": _object(metrics),
+                    "status": status,
+                },
+            )
+        )
+
+    def trading_stage_evaluate(self, instance_id: str, stage: str) -> dict[str, Any]:
+        return self._print(self._system().evaluate_stage(instance_id, stage))
 
     def trading_preview(
         self,
@@ -346,8 +372,19 @@ class TradingModule(BaseModule):
     def trading_parity_status(self, run_id: str) -> dict[str, Any]:
         return self._print(self._system().get_parity_run(run_id))
 
-    def trading_qualification(self, instance_id: str) -> dict[str, Any]:
-        return self._print(self._system().qualification(instance_id))
+    def trading_qualification(
+        self,
+        instance_id: str,
+        account_id: str = "",
+        broker: str = "",
+    ) -> dict[str, Any]:
+        return self._print(
+            self._system().qualification(
+                instance_id,
+                account_id=account_id,
+                broker=broker,
+            )
+        )
 
     def trading_broker_uat_start(
         self,
@@ -456,6 +493,9 @@ class TradingModule(BaseModule):
             "trading_instance_create": self.trading_instance_create,
             "trading_instance_from_research": self.trading_instance_from_research,
             "trading_instance_validate": self.trading_instance_validate,
+            "trading_stage_start": self.trading_stage_start,
+            "trading_stage_finish": self.trading_stage_finish,
+            "trading_stage_evaluate": self.trading_stage_evaluate,
             "trading_preview": self.trading_preview,
             "trading_backtest": self.trading_backtest,
             "trading_backtest_status": self.trading_backtest_status,

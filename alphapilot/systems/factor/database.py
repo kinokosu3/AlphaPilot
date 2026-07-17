@@ -12,6 +12,8 @@ safe defaults on the base so the ``file`` backend stays valid.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from abc import ABC, abstractmethod
 from contextlib import closing
@@ -20,6 +22,30 @@ from typing import Any
 
 from alphapilot.log import logger
 from alphapilot.systems.factor.types import FactorValidationResult
+
+
+def _canonical_metadata(metadata: dict[str, Any] | None) -> tuple[str, str]:
+    payload = json.dumps(
+        metadata or {},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return payload, hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _decode_metadata(payload: str, expected_hash: str) -> tuple[dict[str, Any], bool]:
+    try:
+        value = json.loads(payload or "{}")
+    except json.JSONDecodeError:
+        return {}, False
+    if not isinstance(value, dict):
+        return {}, False
+    _, actual_hash = _canonical_metadata(value)
+    # Rows created before metadata checksums existed contain an empty payload and
+    # checksum. Keep those legacy rows readable; non-empty unhashed metadata fails.
+    return value, actual_hash == expected_hash or (not expected_hash and not value)
 
 
 class BaseFactorDatabase(ABC):
@@ -37,7 +63,12 @@ class BaseFactorDatabase(ABC):
         """Validate *expression* and return a structured result with rejection reason."""
 
     @abstractmethod
-    def add(self, factor_name: str, factor_expression: str) -> bool:
+    def add(
+        self,
+        factor_name: str,
+        factor_expression: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
         """Add a factor to the zoo; return True if added."""
 
     @abstractmethod
@@ -87,6 +118,16 @@ class BaseFactorDatabase(ABC):
     def factors_in_category(self, name: str) -> list[dict[str, Any]]:
         return []
 
+    def verify_asset(self, factor_name: str) -> dict[str, Any]:
+        for item in self.list_factors():
+            if item["factor_name"] == factor_name:
+                return {
+                    "factor_name": factor_name,
+                    "ok": bool(item.get("metadata_integrity", True)),
+                    "metadata_sha256": str(item.get("metadata_sha256") or ""),
+                }
+        raise KeyError(f"unknown factor {factor_name!r}")
+
     def export_category_csv(self, name: str, output_path: str | Path) -> int:
         raise NotImplementedError("Categories require the 'sqlite' factor backend.")
 
@@ -99,8 +140,19 @@ class FileFactorDatabase(BaseFactorDatabase):
     def __init__(self, zoo_dir: Path, duplication_threshold: int = 8) -> None:
         self.zoo_dir = Path(zoo_dir)
         self.zoo_path = self.zoo_dir / "factor_zoo.csv"
+        self.metadata_path = self.zoo_dir / "factor_metadata.json"
         self._regulator: Any | None = None
         self._duplication_threshold = duplication_threshold
+        self._metadata = self._load_metadata()
+
+    def _load_metadata(self) -> dict[str, dict[str, Any]]:
+        if not self.metadata_path.is_file():
+            return {}
+        try:
+            value = json.loads(self.metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return value if isinstance(value, dict) else {}
 
     @property
     def regulator(self) -> Any:
@@ -122,31 +174,74 @@ class FileFactorDatabase(BaseFactorDatabase):
     def is_acceptable(self, expression: str) -> bool:
         return self.validate(expression).acceptable
 
-    def add(self, factor_name: str, factor_expression: str) -> bool:
-        return self.regulator.add_factor(factor_name, factor_expression)
+    def add(
+        self,
+        factor_name: str,
+        factor_expression: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        added = self.regulator.add_factor(factor_name, factor_expression)
+        if added:
+            payload, digest = _canonical_metadata(metadata)
+            self._metadata[factor_name] = {
+                "metadata": json.loads(payload),
+                "metadata_sha256": digest,
+            }
+        return added
 
     def list_factors(self) -> list[dict[str, Any]]:
-        return [{**item, "categories": []} for item in self.regulator.list_factors()]
+        rows: list[dict[str, Any]] = []
+        for item in self.regulator.list_factors():
+            saved = self._metadata.get(item["factor_name"], {})
+            metadata = saved.get("metadata") if isinstance(saved, dict) else {}
+            expected = saved.get("metadata_sha256", "") if isinstance(saved, dict) else ""
+            payload, actual = _canonical_metadata(metadata if isinstance(metadata, dict) else {})
+            del payload
+            rows.append(
+                {
+                    **item,
+                    "categories": [],
+                    "metadata": metadata if isinstance(metadata, dict) else {},
+                    "metadata_sha256": expected,
+                    "metadata_integrity": bool(
+                        expected == actual or (not expected and not metadata)
+                    ),
+                }
+            )
+        return rows
 
     def delete(self, factor_name: str) -> bool:
-        return self.regulator.remove_factor(factor_name)
+        removed = self.regulator.remove_factor(factor_name)
+        if removed:
+            self._metadata.pop(factor_name, None)
+        return removed
 
     def rename(self, old_name: str, new_name: str) -> bool:
-        return self.regulator.rename_factor(old_name, new_name)
+        renamed = self.regulator.rename_factor(old_name, new_name)
+        if renamed and old_name in self._metadata:
+            self._metadata[new_name] = self._metadata.pop(old_name)
+        return renamed
 
     def reload(self) -> None:
         self._regulator = None
+        self._metadata = self._load_metadata()
 
     def save(self, output_path: str | None = None) -> None:
         self.zoo_dir.mkdir(parents=True, exist_ok=True)
         self.regulator.save_factor_zoo(output_path or str(self.zoo_path))
+        self.metadata_path.write_text(
+            json.dumps(self._metadata, ensure_ascii=False, sort_keys=True, indent=2),
+            encoding="utf-8",
+        )
 
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS factors (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT UNIQUE NOT NULL,
-    expression TEXT NOT NULL
+    expression TEXT NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    metadata_sha256 TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS categories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -192,6 +287,17 @@ class SqliteFactorDatabase(BaseFactorDatabase):
     def _ensure_schema(self) -> None:
         with closing(self._connect()) as conn, conn:
             conn.executescript(_SCHEMA_SQL)
+            columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(factors)")
+            }
+            if "metadata_json" not in columns:
+                conn.execute(
+                    "ALTER TABLE factors ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'"
+                )
+            if "metadata_sha256" not in columns:
+                conn.execute(
+                    "ALTER TABLE factors ADD COLUMN metadata_sha256 TEXT NOT NULL DEFAULT ''"
+                )
 
     # ---- validation / dedup (reuse FactorRegulator over a 2-col frame) ----
 
@@ -233,11 +339,21 @@ class SqliteFactorDatabase(BaseFactorDatabase):
                 )
             ]
 
-    def add(self, factor_name: str, factor_expression: str) -> bool:
+    def add(
+        self,
+        factor_name: str,
+        factor_expression: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        metadata_json, metadata_sha256 = _canonical_metadata(metadata)
         with closing(self._connect()) as conn, conn:
             cur = conn.execute(
-                "INSERT OR IGNORE INTO factors(name, expression) VALUES (?, ?)",
-                (factor_name, factor_expression),
+                """
+                INSERT OR IGNORE INTO factors(
+                    name, expression, metadata_json, metadata_sha256
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (factor_name, factor_expression, metadata_json, metadata_sha256),
             )
         self.reload()
         if cur.rowcount:
@@ -250,7 +366,10 @@ class SqliteFactorDatabase(BaseFactorDatabase):
     def list_factors(self) -> list[dict[str, Any]]:
         with closing(self._connect()) as conn:
             factors = conn.execute(
-                "SELECT id, name, expression FROM factors ORDER BY id"
+                """
+                SELECT id, name, expression, metadata_json, metadata_sha256
+                FROM factors ORDER BY id
+                """
             ).fetchall()
             links = conn.execute(
                 """
@@ -262,14 +381,22 @@ class SqliteFactorDatabase(BaseFactorDatabase):
         cats_by_factor: dict[int, list[str]] = {}
         for factor_id, cat_name in links:
             cats_by_factor.setdefault(factor_id, []).append(str(cat_name))
-        return [
-            {
-                "factor_name": str(name),
-                "factor_expression": str(expr),
-                "categories": cats_by_factor.get(factor_id, []),
-            }
-            for factor_id, name, expr in factors
-        ]
+        result: list[dict[str, Any]] = []
+        for factor_id, name, expr, metadata_json, metadata_sha256 in factors:
+            metadata, integrity = _decode_metadata(
+                str(metadata_json or "{}"), str(metadata_sha256 or "")
+            )
+            result.append(
+                {
+                    "factor_name": str(name),
+                    "factor_expression": str(expr),
+                    "categories": cats_by_factor.get(factor_id, []),
+                    "metadata": metadata,
+                    "metadata_sha256": str(metadata_sha256 or ""),
+                    "metadata_integrity": integrity,
+                }
+            )
+        return result
 
     def delete(self, factor_name: str) -> bool:
         with closing(self._connect()) as conn, conn:

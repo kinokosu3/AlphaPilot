@@ -141,6 +141,27 @@ def test_execution_planner_counts_working_orders_and_splits_large_orders() -> No
     assert all("decision-1" in request.reference for request in plan.requests)
 
 
+def test_execution_planner_applies_dynamic_equity_order_cap() -> None:
+    oms = _oms()
+    target = TargetPortfolio(
+        date="2026-07-12",
+        holdings={"SH600000": 5000},
+        prices={"SH600000": 10.0},
+        instance_id="canary",
+        config_hash="risk-bound",
+        decision_id="dynamic-cap",
+    )
+
+    plan = ExecutionPlanner(
+        lot_size=100,
+        max_order_value=50_000,
+        max_order_equity_pct=0.02,
+    ).plan(target, oms)
+
+    # Current equity is 1m, so the 2% dynamic cap (20k) is tighter than 50k.
+    assert [request.volume for request in plan.requests] == [2000, 2000]
+
+
 def test_runtime_store_enforces_stage_evidence_and_single_live_writer(tmp_path: Path) -> None:
     store = StrategyRuntimeStore(tmp_path / "runtime.sqlite3")
     for instance_id in ("a", "b"):

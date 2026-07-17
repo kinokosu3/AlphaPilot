@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 from pathlib import Path
 import sqlite3
 import threading
@@ -1429,6 +1430,11 @@ class StrategyRuntimeStore:
                     combined[key] = _metric_count(combined[key]) + _metric_count(value)
                 else:
                     combined[key] = value
+            if str(run["stage"]) == "live" and status == "completed":
+                # LIVE execution quality is derived exclusively from the
+                # callback-backed reconciliation journal.  Operator-supplied
+                # summary values above are deliberately overwritten.
+                combined.update(_live_execution_quality_metrics(db, run))
             recorded_sessions = int(db.execute(
                 "SELECT COUNT(*) FROM stage_run_sessions WHERE run_id=?", (run_id,)
             ).fetchone()[0])
@@ -1520,6 +1526,38 @@ class StrategyRuntimeStore:
             key: sum(_metric_count(row["metrics"].get(key)) for row in runs)
             for key in metric_names
         }
+        execution_quality: dict[str, Any] = {"required": stage == "live", "runs": []}
+        if stage == "live":
+            breaches = 0
+            for row in runs:
+                metrics = dict(row.get("metrics") or {})
+                count = int(metrics.get("execution_quality_order_count") or 0)
+                median = _optional_float(
+                    metrics.get("median_implementation_shortfall_bp")
+                )
+                p95 = _optional_float(
+                    metrics.get("p95_implementation_shortfall_bp")
+                )
+                ok = (
+                    count > 0
+                    and median is not None
+                    and p95 is not None
+                    and median <= 20.0
+                    and p95 <= 50.0
+                )
+                execution_quality["runs"].append(
+                    {
+                        "run_id": row["run_id"],
+                        "order_count": count,
+                        "median_bp": median,
+                        "p95_bp": p95,
+                        "passed": ok,
+                    }
+                )
+                if not ok:
+                    breaches += 1
+            failures["execution_quality_breaches"] = breaches
+            execution_quality["passed"] = bool(runs) and breaches == 0
         passed = sessions >= int(minimum_sessions) and not any(failures.values())
         details = {
             "config_hash": current["config_hash"],
@@ -1528,6 +1566,7 @@ class StrategyRuntimeStore:
             "trading_sessions": sessions,
             "runs": len(runs),
             "failures": failures,
+            "execution_quality": execution_quality,
         }
         # ``stage_evidence`` is a projection used while the instance is in that
         # stage. Qualification also re-evaluates historical PAPER evidence after
@@ -3481,6 +3520,67 @@ def _backtest_run_row(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _live_execution_quality_metrics(
+    db: sqlite3.Connection,
+    run: sqlite3.Row,
+) -> dict[str, Any]:
+    """Derive implementation shortfall from reconciled Broker callbacks."""
+
+    rows = db.execute(
+        "SELECT fr.fill_key, fr.reference, fr.order_id, fr.volume, fr.price, "
+        "co.payload_json FROM fill_reconciliation fr "
+        "JOIN execution_plan_state eps ON eps.plan_id=fr.plan_id "
+        "JOIN child_orders co ON co.reference=fr.reference AND co.plan_id=fr.plan_id "
+        "WHERE eps.instance_id=? AND eps.config_hash=? AND fr.created_at>=? "
+        "ORDER BY fr.fill_key",
+        (run["instance_id"], run["config_hash"], run["started_at"]),
+    ).fetchall()
+    journal: list[dict[str, Any]] = []
+    for row in rows:
+        child = json.loads(row["payload_json"] or "{}")
+        journal.append(
+            {
+                "fill_key": str(row["fill_key"]),
+                "order_reference": str(row["reference"]),
+                "order_id": str(row["order_id"]),
+                "side": str(child.get("side") or ""),
+                "arrival_price": child.get("price"),
+                "fill_price": row["price"],
+                "volume": row["volume"],
+            }
+        )
+    fingerprint = hashlib.sha256(
+        _json(journal).encode("utf-8")
+    ).hexdigest()
+    if not journal:
+        return {
+            "execution_quality_source": "broker_fill_reconciliation",
+            "execution_quality_order_count": 0,
+            "median_implementation_shortfall_bp": None,
+            "p95_implementation_shortfall_bp": None,
+            "execution_quality_passed": False,
+            "execution_quality_failures": ["missing_broker_fills"],
+            "execution_quality_fingerprint": fingerprint,
+        }
+
+    import pandas as pd
+
+    from alphapilot.systems.research.execution_quality import (
+        evaluate_implementation_shortfall,
+    )
+
+    quality = evaluate_implementation_shortfall(pd.DataFrame(journal))
+    return {
+        "execution_quality_source": "broker_fill_reconciliation",
+        "execution_quality_order_count": quality["order_count"],
+        "median_implementation_shortfall_bp": quality["median_bp"],
+        "p95_implementation_shortfall_bp": quality["p95_bp"],
+        "execution_quality_passed": quality["passed"],
+        "execution_quality_failures": quality["failures"],
+        "execution_quality_fingerprint": fingerprint,
+    }
+
+
 def _execution_state_row(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "plan_id": row["plan_id"],
@@ -3542,6 +3642,14 @@ def _metric_count(value: Any) -> int:
     if isinstance(value, (list, tuple, set, dict)):
         return len(value)
     return int(bool(value))
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
 
 
 def _execute_script(db: sqlite3.Connection, script: str) -> None:

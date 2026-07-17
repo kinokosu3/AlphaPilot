@@ -522,7 +522,11 @@ class LiveTimingRunner:
                     "duplicate_routes",
                     details={"reference": request.reference, "source": "risk_gate"},
                 )
-            if rule == "max_position_pct":
+            if rule in {
+                "max_position_pct",
+                "max_total_position_pct",
+                "max_position_count",
+            }:
                 self._record_stage_event(
                     "position_breaches",
                     details={"reference": request.reference},

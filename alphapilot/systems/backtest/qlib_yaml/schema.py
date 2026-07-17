@@ -62,6 +62,10 @@ class QlibYamlParams(BaseModel):
     valid_end: str = "2023-12-31"
     test_start: str = "2024-01-01"
     test_end: str = "2026-05-22"
+    # Final deployment refits may train on every label-ready row while retaining
+    # recent overlapping segments solely for early stopping and engineering output.
+    # Research/economic backtests must leave this disabled.
+    refit_all_labeled: bool = False
 
     loss: str = "mse"
     colsample_bytree: float = 0.8879
@@ -156,10 +160,18 @@ class QlibYamlParams(BaseModel):
 
     @model_validator(mode="after")
     def validate_segment_order(self) -> "QlibYamlParams":
-        if _parse_date(self.train_end) >= _parse_date(self.valid_start):
-            raise ValueError("train_end must be before valid_start")
-        if _parse_date(self.valid_end) >= _parse_date(self.test_start):
-            raise ValueError("valid_end must be before test_start")
+        if self.refit_all_labeled:
+            if _parse_date(self.valid_end) >= _parse_date(self.test_start):
+                raise ValueError("final refit valid_end must be before test_start")
+            if _parse_date(self.train_start) > _parse_date(self.valid_start):
+                raise ValueError("final refit training must include the validation segment")
+            if _parse_date(self.train_end) < _parse_date(self.test_end):
+                raise ValueError("final refit training must include every validation/test row")
+        else:
+            if _parse_date(self.train_end) >= _parse_date(self.valid_start):
+                raise ValueError("train_end must be before valid_start")
+            if _parse_date(self.valid_end) >= _parse_date(self.test_start):
+                raise ValueError("valid_end must be before test_start")
         if _parse_date(self.backtest_start) < _parse_date(self.test_start):
             raise ValueError("backtest_start must be within or after test_start")
         if _parse_date(self.backtest_end) > _parse_date(self.test_end):

@@ -5,6 +5,9 @@ from __future__ import annotations
 import os
 import multiprocessing as mp
 import queue
+import hashlib
+import json
+import tempfile
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -87,6 +90,12 @@ DAILY_BASIC_COLUMN_MAP: dict[str, str] = {
     "ps_ttm": "psTTM",
 }
 DAILY_BASIC_FIELDS = "ts_code,trade_date," + ",".join(DAILY_BASIC_COLUMN_MAP)
+
+STOCK_BASIC_FIELDS = (
+    "ts_code,symbol,name,area,industry,market,exchange,list_status,list_date,delist_date"
+)
+UNIVERSE_METADATA_FILE = "_universe_membership.json"
+BENCHMARK_METADATA_PREFIX = "_benchmark_"
 
 
 @dataclass
@@ -435,16 +444,204 @@ def _merge_factor_csv(factor_file: Path, new_factor_df: pd.DataFrame) -> pd.Data
     return combined_df[FACTOR_COLUMNS]
 
 
-def _get_all_tushare_stocks(client: Any) -> list[str]:
-    stock_df = client.stock_basic(
-        exchange="",
-        list_status="L",
-        fields="ts_code",
-    )
-    if stock_df is None or stock_df.empty or "ts_code" not in stock_df.columns:
+def _get_tushare_stock_basics(
+    client: Any,
+    *,
+    include_delisted: bool = False,
+) -> pd.DataFrame:
+    """Return the point-in-time universe metadata used for an all-market run."""
+
+    statuses = ("L", "D", "P") if include_delisted else ("L",)
+    frames: list[pd.DataFrame] = []
+    for status in statuses:
+        frame = client.stock_basic(
+            exchange="",
+            list_status=status,
+            fields=STOCK_BASIC_FIELDS,
+        )
+        if frame is None or frame.empty:
+            continue
+        normalized = frame.copy()
+        if "list_status" not in normalized.columns:
+            normalized["list_status"] = status
+        frames.append(normalized)
+    if not frames:
         raise ValueError("Tushare stock_basic 未返回有效 ts_code")
-    codes = [tushare_to_baostock(value) for value in stock_df["ts_code"].dropna()]
+    stock_df = pd.concat(frames, ignore_index=True)
+    if "ts_code" not in stock_df.columns:
+        raise ValueError("Tushare stock_basic 未返回有效 ts_code")
+    stock_df = stock_df.dropna(subset=["ts_code"]).drop_duplicates(
+        subset=["ts_code"], keep="first"
+    )
+    return stock_df.reset_index(drop=True)
+
+
+def _get_all_tushare_stocks(
+    client: Any,
+    *,
+    include_delisted: bool = False,
+) -> list[str]:
+    stock_df = _get_tushare_stock_basics(
+        client,
+        include_delisted=include_delisted,
+    )
+    codes = [tushare_to_baostock(value) for value in stock_df["ts_code"]]
     return list(dict.fromkeys(codes))
+
+
+def _write_universe_metadata(
+    output_path: Path,
+    stock_df: pd.DataFrame,
+    *,
+    include_delisted: bool,
+) -> Path:
+    """Persist the exact stock_basic response without placing CSVs in the dumper path."""
+
+    normalized = stock_df.copy()
+    normalized = normalized.where(pd.notna(normalized), None)
+    records = normalized.to_dict(orient="records")
+    canonical = json.dumps(
+        records,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    payload = {
+        "schema_version": 1,
+        "source": TUSHARE_SOURCE,
+        "include_delisted": bool(include_delisted),
+        "statuses": ["L", "D", "P"] if include_delisted else ["L"],
+        "record_count": len(records),
+        "records_sha256": hashlib.sha256(canonical).hexdigest(),
+        "records": records,
+    }
+    path = output_path / UNIVERSE_METADATA_FILE
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+    return path
+
+
+def ensure_tushare_benchmark_index(
+    *,
+    qlib_dir: str | Path,
+    index_code: str = "sh.000905",
+    start_date: str = "2015-01-01",
+    end_date: str | None = None,
+    token: str | None = None,
+    client: Any | None = None,
+) -> dict[str, Any]:
+    """Write a Tushare-sourced benchmark and immutable provenance metadata."""
+
+    from alphapilot.systems.data.qlib_convert import DumpDataUpdate
+
+    qlib_root = Path(qlib_dir).expanduser().resolve()
+    calendar_path = qlib_root / "calendars" / "day.txt"
+    if not calendar_path.is_file():
+        raise FileNotFoundError(
+            f"cannot write Tushare benchmark before Qlib calendar: {calendar_path}"
+        )
+    resolved_end = end_date or datetime.now().strftime("%Y-%m-%d")
+    api = client or _get_tushare_client(token)
+    ts_code = baostock_to_tushare(index_code)
+    source = api.index_daily(
+        ts_code=ts_code,
+        start_date=_to_tushare_date(start_date),
+        end_date=_to_tushare_date(resolved_end),
+    )
+    if source is None or source.empty:
+        raise ValueError(f"Tushare index_daily returned no data for {ts_code}")
+    frame = _normalize_daily_frame(source, index_code)
+    if frame.empty:
+        raise ValueError(f"Tushare benchmark {ts_code} has no valid rows")
+    frame["factor"] = 1.0
+    fields = [
+        "date",
+        "code",
+        "open",
+        "high",
+        "low",
+        "close",
+        "preclose",
+        "volume",
+        "amount",
+        "factor",
+    ]
+    frame = frame[fields].dropna(subset=["date", "close"])
+    stem = _csv_stem(index_code)
+    instrument = stem.upper()
+
+    # Force repair of a half-written benchmark exactly as the legacy helper
+    # does; a missing factor would otherwise switch Qlib into fractional-share
+    # adjusted-price behavior.
+    instruments_file = qlib_root / "instruments" / "all.txt"
+    feature_dir = qlib_root / "features" / stem
+    if instruments_file.is_file() and (
+        not (feature_dir / "close.day.bin").is_file()
+        or not (feature_dir / "factor.day.bin").is_file()
+    ):
+        lines = instruments_file.read_text(encoding="utf-8").splitlines()
+        kept = [
+            line
+            for line in lines
+            if line.split("\t", 1)[0].strip().upper() != instrument
+        ]
+        instruments_file.write_text(
+            "\n".join(kept) + ("\n" if kept else ""),
+            encoding="utf-8",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="tushare_benchmark_") as temporary:
+        frame.to_csv(
+            Path(temporary) / f"{stem}.csv",
+            index=False,
+            encoding="utf-8",
+        )
+        DumpDataUpdate(
+            data_path=temporary,
+            qlib_dir=str(qlib_root),
+            include_fields="open,high,low,close,preclose,volume,amount,factor",
+            date_field_name="date",
+            symbol_field_name="code",
+            max_workers=1,
+        ).dump()
+
+    records = frame.to_dict(orient="records")
+    data_sha256 = hashlib.sha256(
+        json.dumps(
+            records,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+    metadata: dict[str, Any] = {
+        "schema_version": 1,
+        "source": TUSHARE_SOURCE,
+        "instrument": instrument,
+        "ts_code": ts_code,
+        "start_date": str(frame["date"].min()),
+        "end_date": str(frame["date"].max()),
+        "row_count": len(frame),
+        "data_sha256": data_sha256,
+    }
+    metadata["fingerprint"] = hashlib.sha256(
+        json.dumps(
+            metadata,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    metadata_path = qlib_root / f"{BENCHMARK_METADATA_PREFIX}{instrument}.json"
+    metadata_path.write_text(
+        json.dumps(metadata, ensure_ascii=False, sort_keys=True, indent=2),
+        encoding="utf-8",
+    )
+    return {**metadata, "metadata_path": str(metadata_path)}
 
 
 def _download_tushare_factor_only(
@@ -588,6 +785,7 @@ def download_tushare_data(
     download_state_path: str | Path | None = None,
     token: str | None = None,
     include_daily_basic: bool = False,
+    include_delisted: bool = False,
     client: Any | None = None,
     parallel_price_factor: bool = False,
 ) -> list[str]:
@@ -627,16 +825,39 @@ def download_tushare_data(
         logger.warning(f"Tushare 下载默认按单线程执行以避免限流，已忽略 max_workers={max_workers}")
         max_workers = 1
 
+    if include_delisted and (symbols or stock_csv_path or not all_market):
+        raise ValueError("include_delisted requires all_market=True without symbols/stock_csv")
+
+    stock_basic_df: pd.DataFrame | None = None
     if symbols:
         all_stocks = [c for c in (normalize_to_baostock(s) for s in symbols) if c]
         if not all_stocks:
             raise ValueError(f"未从 symbols 解析到有效股票代码: {symbols}")
     elif all_market:
-        all_stocks = _get_all_tushare_stocks(pro)
+        stock_basic_df = _get_tushare_stock_basics(
+            pro,
+            include_delisted=include_delisted,
+        )
+        all_stocks = list(
+            dict.fromkeys(
+                tushare_to_baostock(value) for value in stock_basic_df["ts_code"]
+            )
+        )
     elif stock_csv_path:
         all_stocks = load_stocks_from_file(stock_csv_path, code_column=code_column)
     else:
         all_stocks = _get_all_tushare_stocks(pro)
+
+    if stock_basic_df is not None:
+        metadata_path = _write_universe_metadata(
+            output_path,
+            stock_basic_df,
+            include_delisted=include_delisted,
+        )
+        logger.info(
+            f"Tushare 股票池元数据已冻结: {metadata_path} "
+            f"(include_delisted={include_delisted}, stocks={len(all_stocks)})"
+        )
 
     stats = _TushareDownloadStats()
     download_starts: dict[str, str | None] = {}
@@ -934,6 +1155,7 @@ def download_cn_data(
     download_state_path: str | Path | None = None,
     token: str | None = None,
     include_daily_basic: bool = False,
+    include_delisted: bool = False,
     client: Any | None = None,
     parallel_price_factor: bool = False,
 ) -> list[str]:
@@ -962,6 +1184,7 @@ def download_cn_data(
         download_state_path=download_state_path,
         token=token,
         include_daily_basic=include_daily_basic,
+        include_delisted=include_delisted,
         client=client,
         parallel_price_factor=parallel_price_factor,
     )

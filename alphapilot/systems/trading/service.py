@@ -282,6 +282,7 @@ class TradingStrategySystem(BaseSystem):
             "data_policy": {
                 "feature_adjustment": str(payload.get("adjust_mode") or "backward"),
                 "data_version": str(payload.get("data_version") or binding.get("research_fingerprint") or ""),
+                "risk_policy": dict(payload.get("risk_policy") or {}),
             },
             "portfolio_policy": dict(payload.get("portfolio_policy") or {}),
             "model_hash": binding["model_hash"],
@@ -1049,8 +1050,26 @@ class TradingStrategySystem(BaseSystem):
     def get_parity_run(self, run_id: str) -> dict[str, Any]:
         return self.store.get_parity_run(run_id)
 
-    def qualification(self, instance_id: str) -> dict[str, Any]:
-        return self._qualification(instance_id)
+    def qualification(
+        self,
+        instance_id: str,
+        *,
+        account_id: str = "",
+        broker: str = "",
+    ) -> dict[str, Any]:
+        """Return mechanically derived promotion evidence.
+
+        ``account_id`` and ``broker`` are optional because a SHADOW instance is
+        deliberately not account-bound yet.  Supplying them lets the caller
+        validate the exact XTP UAT evidence before asking for LIVE approval;
+        the raw account identifier is never included in the result.
+        """
+
+        return self._qualification(
+            instance_id,
+            account_id=account_id,
+            broker=broker,
+        )
 
     def _qualification(
         self,
@@ -1236,8 +1255,8 @@ class TradingStrategySystem(BaseSystem):
         return report
 
     def start_stage_run(self, instance_id: str, stage: str) -> dict[str, Any]:
-        if stage not in {"paper", "shadow"}:
-            raise ValueError("stage run evidence is supported only for PAPER and SHADOW")
+        if stage not in {"paper", "shadow", "live"}:
+            raise ValueError("stage run evidence is supported only for PAPER, SHADOW and LIVE")
         return self.store.start_stage_run(instance_id, stage)
 
     def finish_stage_run(self, run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1249,9 +1268,9 @@ class TradingStrategySystem(BaseSystem):
         )
 
     def evaluate_stage(self, instance_id: str, stage: str) -> dict[str, Any]:
-        minimums = {"paper": 20, "shadow": 5}
+        minimums = {"paper": 20, "shadow": 5, "live": 5}
         if stage not in minimums:
-            raise ValueError("only PAPER and SHADOW have mechanical stage-run gates")
+            raise ValueError("only PAPER, SHADOW and LIVE have mechanical stage-run gates")
         return self.store.evaluate_stage(
             instance_id,
             stage,
@@ -1326,6 +1345,21 @@ class TradingStrategySystem(BaseSystem):
                 f"portfolio policy per-instrument exposure {configured_cap:.1%} exceeds "
                 f"automated max_position_pct {risk_cap:.1%}; set it to <= {risk_cap:.1%}"
             )
+        bound_risk = dict(config.data_policy.get("risk_policy") or {})
+        for key, expected in sorted(bound_risk.items()):
+            if not hasattr(risk, key):
+                errors.append(f"bound risk policy uses unsupported limit {key!r}")
+                continue
+            actual = getattr(risk, key)
+            if isinstance(expected, (int, float)) and isinstance(actual, (int, float)):
+                matches = abs(float(actual) - float(expected)) <= 1e-12
+            else:
+                matches = actual == expected
+            if not matches:
+                errors.append(
+                    f"runtime risk limit {key}={actual!r} does not match "
+                    f"immutable instance binding {expected!r}"
+                )
         return errors
 
     def _default_portfolio_policy(

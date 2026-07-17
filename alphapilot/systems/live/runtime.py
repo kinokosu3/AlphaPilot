@@ -440,6 +440,7 @@ class LiveRuntime:
             self.engine.oms,
             lot_size=self.config.risk.lot_size,
             max_order_value=self.config.risk.max_order_value,
+            max_order_equity_pct=self.config.risk.max_order_equity_pct,
         )
 
     def submit_target(
@@ -455,6 +456,7 @@ class LiveRuntime:
         plan = ExecutionPlanner(
             lot_size=self.config.risk.lot_size,
             max_order_value=self.config.risk.max_order_value,
+            max_order_equity_pct=self.config.risk.max_order_equity_pct,
         ).plan(target, self.engine.oms)
         context = route_context or RouteContext.manual()
         if context.origin == RouteOrigin.AUTOMATED and (
@@ -725,12 +727,29 @@ class LiveRuntime:
         total_weight = sum(max(float(value), 0.0) for value in target.target_weights.values())
         if total_weight > 1.0 + 1e-9:
             plan.issues.append(PlanIssue("total_weight", f"target weights sum to {total_weight:.2%} > 100%"))
+        total_position_limit = float(self.config.risk.max_total_position_pct)
+        if total_position_limit > 0 and total_weight > total_position_limit + 1e-9:
+            plan.issues.append(PlanIssue(
+                "max_total_position_pct",
+                f"target weights sum to {total_weight:.2%} > {total_position_limit:.2%}",
+            ))
+        positive_targets = {
+            str(symbol)
+            for symbol, value in target.target_weights.items()
+            if float(value) > 1e-12
+        }
+        position_count_limit = int(self.config.risk.max_position_count)
+        if position_count_limit > 0 and len(positive_targets) > position_count_limit:
+            plan.issues.append(PlanIssue(
+                "max_position_count",
+                f"target position count {len(positive_targets)} > {position_count_limit}",
+            ))
         risk_state = self.engine.risk.snapshot() if hasattr(self.engine.risk, "snapshot") else {}
         planned_turnover = sum(
             float(request.volume) * float(request.price)
             for request in plan.requests if float(request.price) > 0
         )
-        daily_limit = float(self.config.risk.max_daily_value)
+        daily_limit = self.engine.risk.effective_daily_cap(float(account.balance))
         if daily_limit > 0 and float(risk_state.get("value_today") or 0.0) + planned_turnover > daily_limit:
             plan.issues.append(PlanIssue(
                 "max_daily_value",
@@ -827,6 +846,7 @@ class LiveRuntime:
             except Exception as exc:  # noqa: BLE001 - keep state readable after uninstall
                 plugins = {"error": f"{type(exc).__name__}: {exc}"}
         return {
+            "written_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "runtime_id": self.runtime_id,
             "config": {
                 "mode": self.config.mode,

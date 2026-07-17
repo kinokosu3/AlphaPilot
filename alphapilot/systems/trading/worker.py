@@ -42,15 +42,25 @@ class IsolatedBatchStrategy:
             daemon=True,
         )
         process.start()
-        process.join(self.timeout)
+        try:
+            # Drain the queue before joining.  ``multiprocessing.Queue`` uses a
+            # feeder thread; joining first can deadlock when a DataFrame result
+            # fills the pipe while the parent is waiting for process exit.
+            ok, value = output.get(timeout=self.timeout)
+        except queue.Empty as exc:
+            if process.is_alive():
+                process.terminate()
+                process.join(2.0)
+                raise TimeoutError(
+                    f"strategy evaluation exceeded {self.timeout:.1f}s"
+                ) from exc
+            raise RuntimeError(
+                f"strategy worker exited with code {process.exitcode}"
+            ) from exc
+        process.join(2.0)
         if process.is_alive():
             process.terminate()
             process.join(2.0)
-            raise TimeoutError(f"strategy evaluation exceeded {self.timeout:.1f}s")
-        try:
-            ok, value = output.get(timeout=1.0)
-        except queue.Empty as exc:
-            raise RuntimeError(f"strategy worker exited with code {process.exitcode}") from exc
         if not ok:
             raise RuntimeError(value)
         return value
@@ -173,14 +183,7 @@ def _evaluate(
     memory_mb: int,
 ) -> None:
     try:
-        try:
-            import resource
-
-            limit = int(memory_mb) * 1024 * 1024
-            resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
-            resource.setrlimit(resource.RLIMIT_CPU, (30, 31))
-        except (ImportError, OSError, ValueError):
-            pass
+        _apply_limits(memory_mb, cpu_seconds=30)
         from alphapilot.systems.trading.registry import _load_factory
 
         factory = _load_factory(factory_path, base=Path(base) if base else None)
@@ -225,12 +228,25 @@ def _provider_loop(
         connection.close()
 
 
-def _apply_limits(memory_mb: int) -> None:
+def _apply_limits(memory_mb: int, *, cpu_seconds: int = 300) -> None:
     try:
+        import os
         import resource
 
-        limit = int(memory_mb) * 1024 * 1024
+        requested = int(memory_mb) * 1024 * 1024
+        # pandas/numpy/OpenBLAS can reserve more than 1 GiB of *virtual* address
+        # space before strategy code runs.  Setting RLIMIT_AS below the child's
+        # existing VMS makes the next harmless allocation hang/fail.  Keep the
+        # configured budget as a floor and allow 256 MiB of working headroom
+        # above the already mapped scientific runtime.
+        current_vms = 0
+        try:
+            pages = int(Path("/proc/self/statm").read_text().split()[0])
+            current_vms = pages * int(os.sysconf("SC_PAGE_SIZE"))
+        except (OSError, ValueError, IndexError):
+            pass
+        limit = max(requested, current_vms + 256 * 1024 * 1024)
         resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
-        resource.setrlimit(resource.RLIMIT_CPU, (300, 301))
+        resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds + 1))
     except (ImportError, OSError, ValueError):
         pass

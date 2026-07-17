@@ -67,3 +67,23 @@ def test_aff_length_agnostic_networks_support_small_qa_shape() -> None:
     prediction, latent = predictor(logits.softmax(dim=-1), latent=True)
     assert prediction.shape == (2, 1)
     assert latent.shape == (2, 64)
+
+
+def test_default_target_keeps_legacy_default_and_supports_five_day_close() -> None:
+    from alphapilot.modules.alphaforge.data_adapter import default_target
+
+    assert str(default_target()) == "((Ref(vwap,-21)/Ref(vwap,-1))-1)"
+    assert str(default_target(target_horizon=5, target_price="close")) == (
+        "((Ref(close,-6)/Ref(close,-1))-1)"
+    )
+
+
+def test_default_target_rejects_unsupported_horizon_or_price() -> None:
+    import pytest
+
+    from alphapilot.modules.alphaforge.data_adapter import default_target
+
+    with pytest.raises(ValueError, match="between 1 and 29"):
+        default_target(target_horizon=0)
+    with pytest.raises(ValueError, match="close, vwap"):
+        default_target(target_price="open")

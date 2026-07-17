@@ -35,9 +35,16 @@ class ExecutionPlan:
 class ExecutionPlanner:
     """Diff a complete target book against positions plus working orders."""
 
-    def __init__(self, *, lot_size: int = 100, max_order_value: float = 0.0) -> None:
+    def __init__(
+        self,
+        *,
+        lot_size: int = 100,
+        max_order_value: float = 0.0,
+        max_order_equity_pct: float = 0.0,
+    ) -> None:
         self.lot_size = max(int(lot_size), 0)
         self.max_order_value = max(float(max_order_value), 0.0)
+        self.max_order_equity_pct = max(float(max_order_equity_pct), 0.0)
 
     def plan(self, target: TargetPortfolio, oms: Any) -> ExecutionPlan:
         decision_id = target.decision_id or _stable_id(
@@ -82,7 +89,7 @@ class ExecutionPlanner:
             if volume <= 0:
                 continue
             side = "B" if delta > 0 else "S"
-            chunks = self._chunks(volume, price, lot)
+            chunks = self._chunks(volume, price, lot, snapshot.balance)
             for child_index, child_volume in enumerate(chunks):
                 reference = (
                     f"{target.instance_id or 'legacy'}:{target.config_hash or '-'}:"
@@ -94,10 +101,24 @@ class ExecutionPlanner:
         requests.sort(key=lambda req: (req.direction != Direction.SHORT, req.key, req.reference))
         return ExecutionPlan(plan_id, decision_id, target.instance_id or "legacy", requests, issues)
 
-    def _chunks(self, volume: float, price: float, lot: int) -> list[float]:
-        if self.max_order_value <= 0 or price <= 0:
+    def _chunks(
+        self,
+        volume: float,
+        price: float,
+        lot: int,
+        account_equity: float,
+    ) -> list[float]:
+        caps = [
+            value
+            for value in (
+                self.max_order_value,
+                self.max_order_equity_pct * max(float(account_equity), 0.0),
+            )
+            if value > 0
+        ]
+        if not caps or price <= 0:
             return [volume]
-        max_volume = _floor_lot(self.max_order_value / price, lot)
+        max_volume = _floor_lot(min(caps) / price, lot)
         if max_volume <= 0:
             return []
         chunks: list[float] = []

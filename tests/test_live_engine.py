@@ -284,6 +284,52 @@ def test_engine_applies_risk_gate(tmp_path: Path) -> None:
     assert "rejected" in _kinds(engine)
 
 
+def test_account_loss_halt_is_immediate_latched_and_not_auto_resumed(
+    tmp_path: Path,
+) -> None:
+    from alphapilot.systems.live.config import RiskLimits
+    from alphapilot.systems.live.risk import RiskGate
+
+    gateway = TrackingGateway("loss-gateway")
+    limits = RiskLimits(
+        max_order_value=10_000,
+        max_daily_value=0,
+        max_position_pct=0.02,
+        price_guard_pct=0.02,
+        max_orders_per_day=20,
+        lot_size=100,
+        max_daily_loss_pct=0.01,
+        max_canary_loss_pct=0.03,
+    )
+    engine = LiveEngine(
+        LiveConfig(mode=RunMode.PAPER, ledger_dir=tmp_path / "loss-ledger"),
+        gateway,
+        ledger=Ledger(tmp_path / "loss-ledger"),
+        now_fn=SimulatedClock(datetime(2026, 7, 1, 10, 0)),
+        risk=RiskGate(limits, enforce_session=False),
+    )
+    engine.connect({})
+
+    engine.on_account(
+        Account(
+            account_id="loss-gateway",
+            balance=98_900,
+            available=98_900,
+            gateway="loss-gateway",
+        )
+    )
+
+    assert engine.runmode.halted
+    assert engine.risk.snapshot()["loss_halt_rule"] == "daily_loss"
+    report = engine.reconcile_after_reconnect(auto_resume=True)
+    assert report["resumed"] is False
+    assert engine.runmode.halted
+
+    # Explicit operator recovery is required; the reconnect refreshed equity to 100k.
+    engine.resume()
+    assert engine.runmode.halted is False
+
+
 def test_t_plus_one_roll_via_broker_snapshot(tmp_path: Path) -> None:
     broker = PaperBroker(cash=100_000.0, prices={KEY: 10.0}, open_cost=0.0, min_cost=0.0)
     engine = _engine(tmp_path, broker)

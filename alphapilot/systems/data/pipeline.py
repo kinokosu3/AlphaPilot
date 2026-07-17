@@ -89,7 +89,7 @@ def dispatch_prepare_action(
         kwargs.update(options)
         if stock_csv:
             kwargs["stock_csv"] = stock_csv
-        if output_dir:
+        if output_dir and action != "validate_pit":
             kwargs["output_dir"] = output_dir
         return download_handler(**kwargs)
 
@@ -110,7 +110,7 @@ def dispatch_prepare_action(
             kwargs["data_path"] = output_dir
         return convert_handler(**kwargs)
 
-    if action in {"refresh_factors", "apply_adjust", "dump", "calendar"}:
+    if action in {"refresh_factors", "apply_adjust", "dump", "calendar", "validate_pit"}:
         from alphapilot.systems.data.prepare_data import PrepareDataCLI
 
         cli = PrepareDataCLI()
@@ -136,6 +136,13 @@ def dispatch_prepare_action(
                 kwargs["end_date"] = end_date
         elif action == "refresh_factors" and end_date:
             kwargs["end_date"] = end_date
+        elif action == "validate_pit":
+            if market:
+                kwargs["market"] = market
+            if end_date:
+                kwargs["as_of"] = end_date
+            if output_dir:
+                kwargs["raw_dir"] = output_dir
         return getattr(cli, action)(**kwargs)
 
     raise ValueError(f"Unsupported prepare_data action: {action!r}")

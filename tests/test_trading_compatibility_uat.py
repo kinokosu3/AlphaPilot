@@ -119,6 +119,7 @@ def _observation(
     session: str,
     suffix: str,
     signal_hash: str | None = None,
+    provider_state_after_hash: str | None = None,
     data_version: str = "features-v1",
 ) -> dict[str, str]:
     return {
@@ -132,7 +133,7 @@ def _observation(
         "effective_session": session,
         "history_hash": f"history-{suffix}",
         "provider_state_before_hash": f"before-{suffix}",
-        "provider_state_after_hash": f"after-{suffix}",
+        "provider_state_after_hash": provider_state_after_hash or f"after-{suffix}",
         "signal_hash": signal_hash or f"signal-{suffix}",
         "weights_hash": f"weights-{suffix}",
         "data_version": data_version,
@@ -265,6 +266,7 @@ def test_parity_and_qualification_are_derived_from_daily_observations(tmp_path: 
     ("shadow_overrides", "expected"),
     [
         ({"signal_hash": "different"}, "mismatch"),
+        ({"provider_state_after_hash": "different"}, "mismatch"),
         ({"data_version": "revised-v2"}, "not_comparable"),
     ],
 )

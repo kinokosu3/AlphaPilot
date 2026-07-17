@@ -109,6 +109,7 @@ class StrategyBacktestModule(BaseModule):
         scenario: str = "factor_backtest",
         use_local: bool | None = None,
         run_tag: str | None = None,
+        save_as: str | None = None,
         **options: Any,
     ) -> list[dict[str, Any]]:
         strategy_system = self.context.strategy()
@@ -121,6 +122,7 @@ class StrategyBacktestModule(BaseModule):
             scenario=scenario,
             use_local=use_local,
             run_tag=run_tag,
+            save_as=save_as,
             options=options,
         )
         outcomes = strategy_system.backtest_from_asset(req)
@@ -134,12 +136,16 @@ class StrategyBacktestModule(BaseModule):
                 "Rank IC": o.metrics.get("Rank IC"),
                 "Rank ICIR": o.metrics.get("Rank ICIR"),
                 "workspace_path": o.workspace_path,
+                "saved_strategy_name": o.details.get("saved_strategy_name"),
+                "model_hash": o.details.get("model_hash"),
+                "factor_data_fingerprint": o.details.get("factor_data_fingerprint"),
             }
             rows.append(row)
             print(
                 f"[strategy_backtest] name={row['strategy_name']} mode={row['mode']} "
                 f"IC={row['IC']} ICIR={row['ICIR']} "
-                f"qlib_config={qlib_config_name} qlib_data_dir={qlib_data_dir}"
+                f"qlib_config={qlib_config_name} qlib_data_dir={qlib_data_dir} "
+                f"saved_as={row['saved_strategy_name']}"
             )
         return rows
 
@@ -149,4 +155,3 @@ class StrategyBacktestModule(BaseModule):
             "strategy_backtest": self.strategy_backtest,
             "strategy_backtest_list": self.strategy_backtest_list,
         }
-

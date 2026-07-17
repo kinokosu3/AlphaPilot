@@ -12,6 +12,12 @@ lshw.txt
 /alphapilot_xtpx/
 /plugins/alphapilot_broker_emt/
 /plugins/alphapilot_broker_xtp/
+/tts_6.3.15/
+/strategies/*
+!/strategies/dual_ma_volume_confirmed/
+!/strategies/dual_ma_volume_confirmed/strategy.py
+!/strategies/dual_ma_volume_confirmed/strategy.toml
+/openctp/
 
 # Broker SDKs / upstream trading dependencies
 #

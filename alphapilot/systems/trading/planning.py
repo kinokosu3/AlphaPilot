@@ -24,9 +24,16 @@ from alphapilot.systems.trading.contracts import (
 class ExecutionPlanner:
     """Diff a complete target book against holdings and working orders."""
 
-    def __init__(self, *, lot_size: int = 100, max_order_value: float = 0.0) -> None:
+    def __init__(
+        self,
+        *,
+        lot_size: int = 100,
+        max_order_value: float = 0.0,
+        max_order_equity_pct: float = 0.0,
+    ) -> None:
         self.lot_size = max(int(lot_size), 0)
         self.max_order_value = max(float(max_order_value), 0.0)
+        self.max_order_equity_pct = max(float(max_order_equity_pct), 0.0)
 
     def plan(
         self,
@@ -95,7 +102,7 @@ class ExecutionPlanner:
             side = "buy" if delta > 0 else "sell"
             counter_key = f"{instrument}:{side}"
             index = int(counters.get(counter_key, 0))
-            chunks = self._chunks(volume, price, lot)
+            chunks = self._chunks(volume, price, lot, account.balance)
             if not chunks:
                 issues.append(
                     PlanIssue("max_order_value", "single lot exceeds max_order_value", instrument)
@@ -127,10 +134,24 @@ class ExecutionPlanner:
             issues=tuple(issues),
         )
 
-    def _chunks(self, volume: float, price: float, lot: int) -> list[float]:
-        if self.max_order_value <= 0:
+    def _chunks(
+        self,
+        volume: float,
+        price: float,
+        lot: int,
+        account_equity: float,
+    ) -> list[float]:
+        caps = [
+            value
+            for value in (
+                self.max_order_value,
+                self.max_order_equity_pct * max(float(account_equity), 0.0),
+            )
+            if value > 0
+        ]
+        if not caps:
             return [volume]
-        cap = _floor_lot(self.max_order_value / price, lot)
+        cap = _floor_lot(min(caps) / price, lot)
         if cap <= 0:
             return []
         chunks: list[float] = []

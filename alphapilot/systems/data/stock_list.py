@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -196,6 +197,7 @@ def write_qlib_instruments(
     end_date: str | None = None,
     data_dir: str | Path | None = None,
     keep_missing: bool = False,
+    membership_metadata_path: str | Path | None = None,
 ) -> Path:
     """
     Write ``instruments/{market}.txt`` for Qlib ``D.instruments(market=...)``.
@@ -214,6 +216,14 @@ def write_qlib_instruments(
     out.parent.mkdir(parents=True, exist_ok=True)
 
     data_root = Path(data_dir).expanduser() if data_dir else None
+    membership: dict[str, dict] = {}
+    if membership_metadata_path:
+        metadata_path = Path(membership_metadata_path).expanduser()
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        for row in payload.get("records", []):
+            parsed = normalize_to_baostock(str(row.get("ts_code") or ""))
+            if parsed:
+                membership[parsed] = dict(row)
     lines: list[str] = []
     skipped = 0
 
@@ -227,6 +237,26 @@ def write_qlib_instruments(
                     continue
             else:
                 inst_start, inst_end = date_range
+
+        member = membership.get(code)
+        if member:
+            list_date = pd.to_datetime(
+                member.get("list_date"), format="%Y%m%d", errors="coerce"
+            )
+            delist_date = pd.to_datetime(
+                member.get("delist_date"), format="%Y%m%d", errors="coerce"
+            )
+            requested_start = pd.Timestamp(start_date)
+            requested_end = pd.Timestamp(default_end)
+            if pd.notna(list_date):
+                requested_start = max(requested_start, list_date)
+            if pd.notna(delist_date):
+                requested_end = min(requested_end, delist_date)
+            if requested_start > requested_end:
+                skipped += 1
+                continue
+            inst_start = requested_start.strftime("%Y-%m-%d")
+            inst_end = requested_end.strftime("%Y-%m-%d")
 
         lines.append(
             f"{baostock_to_qlib_instrument(code)}\t{inst_start}\t{inst_end}\n"
@@ -243,5 +273,7 @@ def write_qlib_instruments(
     if data_root is not None:
         action = "默认日期写入无数据" if keep_missing else "跳过无数据"
         msg += f"，按 CSV 起止日期；{action} {skipped} 只"
+    if membership:
+        msg += "；成员起止按 stock_basic 上市/退市元数据"
     logger.info(msg)
     return out

@@ -62,6 +62,7 @@ class StrategyBacktestRequest:
     scenario: str = "factor_backtest"
     use_local: bool | None = None
     run_tag: str | None = None
+    save_as: str | None = None
     options: dict[str, Any] = field(default_factory=dict)
 
 
