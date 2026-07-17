@@ -12,7 +12,8 @@ from alphapilot.systems.live.brokers import registry as reg
 
 def test_installed_plugin_brokers_registered() -> None:
     names = [spec.name for spec in reg.list_brokers()]
-    assert names == ["emt", "xtp"]
+    assert names == sorted(names)
+    assert {"emt", "xtp"}.issubset(names)
     assert reg.get_broker("XTP").gateway_path == "alphapilot_broker_xtp.factory:create_gateway"
     assert reg.get_broker("xtp").distribution == "alphapilot-broker-xtp"
     assert reg.get_broker("emt").gateway_name == "EMT"

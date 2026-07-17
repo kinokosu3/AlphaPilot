@@ -23,6 +23,7 @@ class RunMode:
 
     DRY_RUN = "dry_run"   # compute + print intents, submit nothing
     PAPER = "paper"       # route to the in-process PaperBroker
+    SIMULATION = "simulation"  # route to an external stateful simulation counter
     SHADOW = "shadow"     # real account/quotes, planning only; routing is impossible
     LIVE = "live"         # route to a real broker gateway
 
@@ -30,13 +31,13 @@ class RunMode:
 def uses_real_providers(mode: str) -> bool:
     """Whether the mode connects to configured broker and quote providers."""
 
-    return mode in {RunMode.SHADOW, RunMode.LIVE}
+    return mode in {RunMode.SIMULATION, RunMode.SHADOW, RunMode.LIVE}
 
 
 def allows_order_routing(mode: str) -> bool:
     """Whether the run-mode FSM may route a new order."""
 
-    return mode in {RunMode.PAPER, RunMode.LIVE}
+    return mode in {RunMode.PAPER, RunMode.SIMULATION, RunMode.LIVE}
 
 
 def requires_live_market_safety(mode: str) -> bool:
@@ -171,7 +172,7 @@ class MarketDataConfig:
 class LiveConfig:
     """Top-level live-trading config."""
 
-    #: One of ``RunMode.{DRY_RUN,PAPER,SHADOW,LIVE}``.
+    #: One of ``RunMode.{DRY_RUN,PAPER,SIMULATION,SHADOW,LIVE}``.
     mode: str = field(default_factory=lambda: _env("ALPHAPILOT_LIVE_MODE", RunMode.DRY_RUN))
     #: Backward-compatible alias for the trade broker.
     broker: str | None = field(default_factory=lambda: _env("ALPHAPILOT_LIVE_BROKER", "paper"))
@@ -179,6 +180,12 @@ class LiveConfig:
     trade_broker: str | None = field(default_factory=lambda: os.getenv("ALPHAPILOT_LIVE_TRADE_BROKER"))
     #: Which provider to use for market data subscriptions. Defaults to trade_broker.
     quote_provider: str | None = field(default_factory=lambda: os.getenv("ALPHAPILOT_LIVE_QUOTE_PROVIDER"))
+    #: Orthogonal execution environment persisted by formal strategy bindings.
+    execution_environment: str = field(
+        default_factory=lambda: _env("ALPHAPILOT_EXECUTION_ENVIRONMENT", "")
+    )
+    #: Resolved from quote-provider metadata at runtime. Never stores credentials.
+    quote_data_kind: str = ""
     #: Append-only order/trade audit ledger location.
     ledger_dir: Path = field(
         default_factory=lambda: _env_path(
@@ -203,6 +210,14 @@ class LiveConfig:
         self.quote_provider = quote
         # Keep the public legacy field stable for old CLI/API/tests.
         self.broker = trade
+        if not self.execution_environment:
+            self.execution_environment = (
+                "broker_simulation" if self.mode == RunMode.SIMULATION else
+                "local_paper" if self.mode in {RunMode.PAPER, RunMode.DRY_RUN} else
+                "live"
+            )
+        if not self.quote_data_kind and quote == "paper":
+            self.quote_data_kind = "synthetic"
 
     @classmethod
     def load(cls) -> "LiveConfig":
@@ -213,6 +228,7 @@ class LiveConfig:
             "LiveConfig("
             f"mode={self.mode}, trade_broker={self.trade_broker}, "
             f"quote_provider={self.quote_provider}, timezone={self.timezone}, "
+            f"execution_environment={self.execution_environment}, "
             f"ledger_dir={self.ledger_dir}, "
             f"market_data_dir={self.market_data.data_dir}, "
             f"risk=[max_order_value={self.risk.max_order_value}, "

@@ -17,6 +17,8 @@ from importlib import import_module
 from typing import Any, Mapping
 
 from alphapilot.systems.live.plugin import (
+    ACCOUNT_KINDS,
+    DATA_KINDS,
     PLUGIN_API_VERSION,
     PLUGIN_ENTRY_POINT_GROUP,
     QUOTE_ROLE,
@@ -64,6 +66,8 @@ class BrokerSpec:
     plugin_id: str = "manual"
     distribution: str = ""
     version: str = ""
+    account_kind: str = "live"
+    data_kind: str = "realtime"
 
 
 _BROKERS: dict[str, BrokerSpec] = {}
@@ -87,6 +91,8 @@ def _paper_quote_spec() -> BrokerSpec:
         factory_accepts_roles=True,
         plugin_id="alphapilot-core",
         distribution="alphapilot",
+        account_kind="local",
+        data_kind="synthetic",
     )
 
 
@@ -173,6 +179,8 @@ def _channel_record(
         plugin_id=plugin.plugin_id,
         distribution=distribution,
         version=version,
+        account_kind=(channel.account_kind if role == TRADE_ROLE else "local"),
+        data_kind=(channel.data_kind if role == QUOTE_ROLE else "realtime"),
     )
 
 
@@ -214,6 +222,14 @@ def _register_plugin(plugin: LivePluginSpec, *, entry_name: str, distribution: s
             raise ValueError(f"invalid provider name {provider.name!r}")
         if not provider.roles:
             raise ValueError(f"provider {name!r} has no trade or quote role")
+        if provider.trade is not None and provider.trade.account_kind not in ACCOUNT_KINDS:
+            raise ValueError(
+                f"provider {name!r} has invalid account_kind {provider.trade.account_kind!r}"
+            )
+        if provider.quote is not None and provider.quote.data_kind not in DATA_KINDS:
+            raise ValueError(
+                f"provider {name!r} has invalid data_kind {provider.quote.data_kind!r}"
+            )
         if provider.trade is not None:
             _register_channel(
                 _channel_record(plugin, provider, role=TRADE_ROLE, distribution=distribution, version=version),
@@ -338,14 +354,36 @@ def get_quote_provider(name: str) -> BrokerSpec:
     return spec
 
 
-def list_brokers() -> list[BrokerSpec]:
+def list_brokers(*, account_kind: str | None = None) -> list[BrokerSpec]:
     discover_plugins()
-    return [_BROKERS[key] for key in sorted(_BROKERS)]
+    rows = [_BROKERS[key] for key in sorted(_BROKERS)]
+    return rows if account_kind is None else [row for row in rows if row.account_kind == account_kind]
 
 
-def list_quote_providers() -> list[BrokerSpec]:
+def list_quote_providers(*, data_kind: str | None = None) -> list[BrokerSpec]:
     discover_plugins()
-    return [_QUOTE_PROVIDERS[key] for key in sorted(_QUOTE_PROVIDERS)]
+    rows = [_QUOTE_PROVIDERS[key] for key in sorted(_QUOTE_PROVIDERS)]
+    return rows if data_kind is None else [row for row in rows if row.data_kind == data_kind]
+
+
+def validate_provider_pair(mode: str, trade_name: str, quote_name: str) -> tuple[BrokerSpec, BrokerSpec]:
+    """Validate environment/provider roles before any native SDK is imported."""
+
+    from alphapilot.systems.live.config import RunMode
+
+    trade = get_broker(trade_name)
+    quote = get_quote_provider(quote_name)
+    if mode == RunMode.SIMULATION and trade.account_kind != "simulation":
+        raise ValueError(
+            f"SIMULATION requires a simulation trade provider; {trade.name!r} is {trade.account_kind!r}"
+        )
+    if mode in {RunMode.LIVE, RunMode.SHADOW} and trade.account_kind != "live":
+        raise ValueError(
+            f"{mode.upper()} requires a live trade provider; {trade.name!r} is {trade.account_kind!r}"
+        )
+    if mode in {RunMode.LIVE, RunMode.SHADOW} and quote.data_kind != "realtime":
+        raise ValueError(f"{mode.upper()} requires realtime quotes; {quote.name!r} is {quote.data_kind!r}")
+    return trade, quote
 
 
 def resolve_gateway_class(name: str) -> Any:
@@ -473,6 +511,8 @@ def provider_pair_metadata(trade_name: str, quote_name: str) -> dict[str, Any]:
             "version": spec.version,
             "available": available,
             "availability_detail": detail,
+            "account_kind": spec.account_kind,
+            "data_kind": spec.data_kind,
         }
 
     return {"trade": row(trade, TRADE_ROLE), "quote": row(quote, QUOTE_ROLE)}

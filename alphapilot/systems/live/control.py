@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+import os
+from pathlib import Path
+import re
 import time
 from typing import Any
 
@@ -11,8 +15,14 @@ from alphapilot.systems.live.daemon import (
     load_daemon,
     send_daemon_command,
     start_daemon,
+    stop_daemon,
 )
 from alphapilot.systems.trading.ports import RuntimeCommandResult
+from alphapilot.systems.trading.account_identity import (
+    ACCOUNT_HASH_PREFIX,
+    account_identities_match,
+)
+from alphapilot.systems.live.runtime import clone_config
 
 
 class DaemonRuntimeControl:
@@ -21,7 +31,8 @@ class DaemonRuntimeControl:
         self.timeout = max(float(timeout), 0.5)
 
     def status(self, instance: dict[str, Any]) -> RuntimeCommandResult:
-        status = daemon_status(self.config)
+        config = self._config_for(instance)
+        status = daemon_status(config)
         result = self._from_status(status, status_only=True)
         binding_error = self._binding_error(result, instance)
         if result.ok and binding_error:
@@ -37,12 +48,15 @@ class DaemonRuntimeControl:
 
     def start(self, instance: dict[str, Any]) -> RuntimeCommandResult:
         level = str(instance["deployment_level"])
-        mode = _mode_for_level(level)
         runtime = instance.get("runtime") or {}
-        broker = str(runtime.get("broker") or self.config.trade_broker or self.config.broker or "paper")
+        mode = _mode_for_level(level, str(runtime.get("execution_environment") or ""))
+        config = self._config_for(instance)
+        broker = str(runtime.get("trade_provider") or runtime.get("broker") or config.trade_broker or config.broker or "paper")
+        quote_provider = str(runtime.get("quote_provider") or config.quote_provider or broker)
         if mode == RunMode.PAPER:
             broker = "paper"
-        status = load_daemon(self.config.state_dir)
+            quote_provider = "paper"
+        status = load_daemon(config.state_dir)
         if status.get("running"):
             if status.get("mode") != mode:
                 return RuntimeCommandResult(
@@ -77,7 +91,7 @@ class DaemonRuntimeControl:
                         raw=status,
                     )
                 if not runner_status.get("stopped"):
-                    observed_status = daemon_status(self.config)
+                    observed_status = daemon_status(config)
                     observed = self._from_status(observed_status, status_only=True)
                     binding_error = self._binding_error(observed, instance)
                     if binding_error:
@@ -97,6 +111,7 @@ class DaemonRuntimeControl:
                         "symbols": list((instance.get("config") or {}).get("universe") or []),
                         "confirm_live": mode == RunMode.LIVE,
                     },
+                    config=config,
                 )
                 binding_error = self._binding_error(restarted, instance)
                 if restarted.ok and binding_error:
@@ -126,27 +141,29 @@ class DaemonRuntimeControl:
                     "symbols": list((instance.get("config") or {}).get("universe") or []),
                     "confirm_live": mode == RunMode.LIVE,
                 },
+                config=config,
             )
 
         start = start_daemon(
-            self.config,
+            config,
             mode=mode,
             broker=broker,
             trade_broker=broker,
-            quote_provider=(self.config.quote_provider if mode != RunMode.PAPER else "paper"),
+            quote_provider=quote_provider,
             symbols=list((instance.get("config") or {}).get("universe") or []),
-            state_dir=self.config.state_dir,
-            ledger_dir=self.config.ledger_dir,
+            state_dir=config.state_dir,
+            ledger_dir=config.ledger_dir,
             strategy_instance_id=instance["instance_id"],
             runtime_id=str(runtime.get("runtime_id") or "") or None,
+            strategy_store_path=self._strategy_store_path(),
             timeout=self.timeout,
         )
         if not start.get("started") and not start.get("running") and not start.get("starting"):
             return RuntimeCommandResult(False, error=str(start.get("error") or "daemon did not start"), raw=start)
         deadline = time.time() + self.timeout
-        latest = daemon_status(self.config)
+        latest = daemon_status(config)
         while time.time() < deadline:
-            latest = daemon_status(self.config)
+            latest = daemon_status(config)
             if latest.get("running") and _runner_matches(
                 latest.get("runner_status") or {}, instance["instance_id"]
             ):
@@ -189,7 +206,23 @@ class DaemonRuntimeControl:
         )
 
     def stop(self, instance: dict[str, Any]) -> RuntimeCommandResult:
-        return self._owned_command(instance, "strategy_stop")
+        result = self._owned_command(instance, "strategy_stop")
+        if not result.ok:
+            return result
+        stopped = stop_daemon(
+            self._config_for(instance), timeout=min(self.timeout, 5.0),
+        )
+        if not stopped.get("stopped") or stopped.get("alive"):
+            return RuntimeCommandResult(
+                False,
+                command_id=result.command_id,
+                runtime_id=result.runtime_id,
+                heartbeat_at=result.heartbeat_at,
+                runner_status=result.runner_status,
+                error="strategy stopped but its dedicated daemon did not terminate",
+                raw=stopped,
+            )
+        return result
 
     def _owned_command(
         self,
@@ -197,7 +230,8 @@ class DaemonRuntimeControl:
         action: str,
         payload: dict[str, Any] | None = None,
     ) -> RuntimeCommandResult:
-        before_status = daemon_status(self.config)
+        config = self._config_for(instance)
+        before_status = daemon_status(config)
         before = self._from_status(before_status, status_only=True)
         error = self._binding_error(before, instance)
         if not before.ok or error:
@@ -209,7 +243,7 @@ class DaemonRuntimeControl:
                 error=error or before.error,
                 raw=before_status,
             )
-        result = self._command(action, payload)
+        result = self._command(action, payload, config=config)
         error = self._binding_error(result, instance)
         if result.ok and error:
             return RuntimeCommandResult(
@@ -239,7 +273,10 @@ class DaemonRuntimeControl:
             return "daemon runtime_id does not match the observed deployment runtime"
         raw = result.raw or {}
         try:
-            expected_mode = _mode_for_level(str(instance.get("deployment_level") or ""))
+            expected_mode = _mode_for_level(
+                str(instance.get("deployment_level") or ""),
+                str(runtime.get("execution_environment") or ""),
+            )
         except ValueError:
             return "deployment level has no controllable runtime mode"
         actual_mode = str(raw.get("mode") or "")
@@ -249,17 +286,29 @@ class DaemonRuntimeControl:
         actual_broker = str(raw.get("trade_broker") or raw.get("broker") or "")
         if expected_broker and actual_broker.lower() != expected_broker.lower():
             return "daemon broker does not match the deployment binding"
+        expected_quote = str(runtime.get("quote_provider") or "")
+        actual_quote = str(raw.get("quote_provider") or "")
+        if expected_quote and actual_quote.lower() != expected_quote.lower():
+            return "daemon quote provider does not match the deployment binding"
         expected_account = str(runtime.get("account_id") or "")
         state = raw.get("state") if isinstance(raw.get("state"), dict) else {}
         account = state.get("account") if isinstance(state.get("account"), dict) else {}
         actual_account = str(account.get("account_id") or "")
-        if expected_account and actual_account != expected_account:
+        if not actual_account and account.get("account_id_hash"):
+            actual_account = ACCOUNT_HASH_PREFIX + str(account["account_id_hash"]).lower()
+        if expected_account and not account_identities_match(expected_account, actual_account):
             return "daemon account does not match the deployment binding"
         return ""
 
-    def _command(self, action: str, payload: dict[str, Any] | None = None) -> RuntimeCommandResult:
+    def _command(
+        self,
+        action: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        config: LiveConfig | None = None,
+    ) -> RuntimeCommandResult:
         sent = send_daemon_command(
-            self.config,
+            config or self.config,
             action,
             payload=payload,
             wait=True,
@@ -277,6 +326,43 @@ class DaemonRuntimeControl:
         command = sent.get("command") if isinstance(sent.get("command"), dict) else {}
         status = sent.get("daemon") if isinstance(sent.get("daemon"), dict) else {}
         return self._from_status(status, command_id=str(command.get("id") or ""))
+
+    def _strategy_store_path(self) -> Path:
+        configured = os.getenv("ALPHAPILOT_STRATEGY_RUNTIME_STORE")
+        return (
+            Path(configured).expanduser()
+            if configured else Path(self.config.state_dir) / "strategy_runtime.sqlite3"
+        )
+
+    def _config_for(self, instance: dict[str, Any]) -> LiveConfig:
+        runtime = instance.get("runtime") or {}
+        environment = str(runtime.get("execution_environment") or "local_paper")
+        trade = str(runtime.get("trade_provider") or runtime.get("broker") or "paper")
+        quote = str(runtime.get("quote_provider") or ("paper" if trade == "paper" else trade))
+        binding_hash = str(runtime.get("binding_hash") or instance.get("config_hash") or "unbound")
+        namespace = (
+            Path("runtimes") / _slug(environment)
+            / f"{_slug(trade)}--{_slug(quote)}" / binding_hash[:16]
+        )
+        mode = _mode_for_level(str(instance.get("deployment_level") or ""), environment)
+        config = clone_config(
+            self.config,
+            mode=mode,
+            broker=trade,
+            trade_broker=trade,
+            quote_provider=quote,
+            state_dir=Path(self.config.state_dir) / namespace,
+            ledger_dir=Path(self.config.ledger_dir) / namespace,
+            execution_environment=environment,
+            quote_data_kind=str(runtime.get("quote_data_kind") or ""),
+        )
+        return replace(
+            config,
+            market_data=replace(
+                config.market_data,
+                data_dir=Path(self.config.market_data.data_dir) / namespace,
+            ),
+        )
 
     @staticmethod
     def _from_status(
@@ -313,14 +399,22 @@ class DaemonRuntimeControl:
         )
 
 
-def _mode_for_level(level: str) -> str:
+def _mode_for_level(level: str, execution_environment: str = "") -> str:
     if level == "paper":
-        return RunMode.PAPER
+        return (
+            RunMode.SIMULATION
+            if execution_environment == "broker_simulation" else RunMode.PAPER
+        )
     if level == "shadow":
         return RunMode.SHADOW
     if level == "live":
         return RunMode.LIVE
     raise ValueError(f"deployment level {level!r} has no runtime mode")
+
+
+def _slug(value: str) -> str:
+    normalized = re.sub(r"[^a-zA-Z0-9._-]+", "-", str(value).strip().lower()).strip("-.")
+    return normalized or "unknown"
 
 
 def _runner_matches(status: dict[str, Any], instance_id: str) -> bool:

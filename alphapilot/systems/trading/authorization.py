@@ -6,6 +6,7 @@ import hashlib
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from alphapilot.systems.trading.account_identity import account_identities_match
 from alphapilot.systems.trading.ports import (
     RouteAuthorization,
     RouteContext,
@@ -53,14 +54,59 @@ class AutomatedRouteAuthorizer:
             return self._deny("runtime_deployment", "runtime deployment level does not match route")
         if context.deployment_level not in {"paper", "live"}:
             return self._deny("routing_disabled", f"{context.deployment_level} cannot route orders")
-        if runtime["account_id"] != context.account_id:
+        environment = str(runtime.get("execution_environment") or "")
+        if environment == "broker_simulation":
+            binding_missing = [
+                name for name in (
+                    "execution_environment", "trade_provider", "quote_provider",
+                    "quote_data_kind", "binding_hash",
+                )
+                if not str(getattr(context, name, "")).strip()
+            ]
+            if binding_missing:
+                return self._deny(
+                    "missing_simulation_binding",
+                    "missing simulation binding: " + ", ".join(binding_missing),
+                )
+            for field in (
+                "execution_environment", "trade_provider", "quote_provider",
+                "quote_data_kind", "binding_hash",
+            ):
+                if str(runtime.get(field) or "").lower() != str(
+                    getattr(context, field, "") or ""
+                ).lower():
+                    return self._deny(
+                        f"{field}_binding", f"{field} does not match deployment authorization",
+                    )
+            if context.quote_data_kind != "realtime":
+                return self._deny(
+                    "non_realtime_quote",
+                    "simulation routing requires a realtime quote provider",
+                )
+            if not bool(runtime.get("reconciled")):
+                return self._deny(
+                    "simulation_not_reconciled",
+                    "simulation account truth has not been reconciled",
+                )
+        if not account_identities_match(runtime["account_id"], context.account_id):
             return self._deny("account_binding", "account_id does not match deployment authorization")
         if runtime["broker"].lower() != context.broker.lower():
             return self._deny("broker_binding", "broker does not match deployment authorization")
         if runtime["runtime_id"] != context.runtime_id:
             return self._deny("runtime_binding", "runtime_id does not match the observed daemon")
-        if context.deployment_level == "live" and not runtime["binding_active"]:
-            return self._deny("writer_revoked", "LIVE automated-writer binding is not active")
+        if environment in {"live", "broker_simulation"} and not runtime["binding_active"]:
+            return self._deny("writer_revoked", "external automated-writer binding is not active")
+        if environment in {"live", "broker_simulation"}:
+            writer = self.store.active_external_writer(
+                execution_environment=environment,
+                trade_provider=str(runtime.get("trade_provider") or context.broker),
+                account_id=str(runtime.get("account_id") or ""),
+                account_profile=str(runtime.get("account_profile") or ""),
+            )
+            if writer is None or writer["instance_id"] != context.instance_id:
+                return self._deny(
+                    "single_writer", "external account writer lock is missing or owned elsewhere",
+                )
         if runtime["reconcile_required"]:
             return self._deny("reconcile_required", "deployment must reconcile before routing")
         if runtime["desired_state"] != "running" or runtime["observed_state"] != "running":
@@ -73,7 +119,7 @@ class AutomatedRouteAuthorizer:
 
         blocks = self.store.active_route_blocks(
             instance_id=context.instance_id,
-            account_id=context.account_id,
+            account_id=str(runtime.get("account_id") or context.account_id),
         )
         if blocks:
             return self._deny("kill_switch", f"route blocked by {route_block_summary(blocks)}")

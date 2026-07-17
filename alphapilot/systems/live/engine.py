@@ -63,7 +63,15 @@ class LiveEngine:
         # Backward-compatible alias used by older runtime/daemon/tests.
         self.gateway = self.trade_gateway
         self.oms = OMS()
-        self.runmode = RunModeMachine(config.mode)
+        quote_kind = str(getattr(config, "quote_data_kind", "") or "realtime")
+        route_enabled = quote_kind == "realtime" or config.mode == RunMode.PAPER
+        self.runmode = RunModeMachine(
+            config.mode,
+            provider_routing_enabled=route_enabled,
+            provider_block_reason=(
+                "quote provider is not realtime" if not route_enabled else ""
+            ),
+        )
         self.connection = ConnectionMachine()
         calendar = is_trading_day_fn
         if calendar is None and requires_live_market_safety(config.mode):
@@ -235,6 +243,10 @@ class LiveEngine:
             reason = (
                 f"halted:{self.runmode.halt_reason}"
                 if self.runmode.halted
+                else f"routing_disabled_in_{self.runmode.mode}"
+                if self.runmode.mode == RunMode.SHADOW
+                else self.runmode.provider_block_reason
+                if not self.runmode.provider_routing_enabled
                 else f"routing_disabled_in_{self.runmode.mode}"
             )
             self._audit("blocked", {"origin": origin, "rule": "run_mode", "reason": reason, "req": _req(req)}, reference=req.reference)

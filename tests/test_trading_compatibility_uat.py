@@ -1160,7 +1160,7 @@ def test_broker_uat_is_disabled_without_all_three_operator_gates(
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
-        ({"broker": "paper"}, "broker must be xtp or emt"),
+        ({"broker": "paper"}, "broker must be xtp, emt or tts"),
         ({"side": "hold"}, "side must be buy or sell"),
         ({"volume": 0}, "must be positive"),
         ({"volume": 300}, "exceeds UAT cap"),
@@ -1403,7 +1403,7 @@ def test_controlled_environment_reports_are_hash_checked_and_aggregated(engine) 
 def test_compatibility_environment_report_rejects_every_incomplete_binding() -> None:
     base = {
         "schema_version": 1,
-        "runtime_schema_version": 8,
+        "runtime_schema_version": 9,
         "environment_id": "environment-a",
         "migration_cutoff": "2026-07-01T00:00:00+00:00",
         "generated_at": "2026-07-14T00:00:00+00:00",
@@ -1501,7 +1501,7 @@ def test_removal_gate_rejects_environment_report_from_another_commit(
     store.create_instance(instance)
     payload = {
         "schema_version": 1,
-        "runtime_schema_version": 8,
+        "runtime_schema_version": 9,
         "environment_id": "controlled-paper-host",
         "migration_cutoff": "2026-07-01T00:00:00+00:00",
         "generated_at": "2026-07-14T00:00:00+00:00",
@@ -1578,7 +1578,7 @@ def test_schema_v5_upgrades_through_v8_once_with_online_backup(tmp_path: Path) -
 
     store = StrategyRuntimeStore(path)
 
-    assert store.schema_version == 8
+    assert store.schema_version == 9
     assert len(list(tmp_path.glob("runtime.sqlite3.backup-v5-*"))) == 1
     with sqlite3.connect(path) as connection:
         tables = {
@@ -1649,7 +1649,7 @@ def test_schema_v6_rehash_refuses_active_runtime_and_rolls_back(tmp_path: Path) 
         connection.commit()
 
     migrated = StrategyRuntimeStore(path)
-    assert migrated.schema_version == 8
+    assert migrated.schema_version == 9
     assert migrated.get_instance(instance.instance_id)["deployment_level"] == "replay"
 
 

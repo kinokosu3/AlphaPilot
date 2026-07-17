@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 from pathlib import Path
 
 import pytest
@@ -176,6 +177,53 @@ def test_recovery_reports_unsupported_order_trade_queries(tmp_path: Path) -> Non
     assert recovery["broker_refresh_ok"] is True
     assert "orders" in recovery["broker_refresh_unsupported"]
     assert "trades" in recovery["broker_refresh_unsupported"]
+    runtime.close()
+
+
+def test_recovery_blocks_on_previous_position_snapshot_difference(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    (state_dir / "runtime_state.json").write_text(
+        json.dumps({
+            "account": {"account_id": "paper"},
+            "positions": [{
+                "code": "600000", "exchange": "SSE", "volume": 100,
+                "yd_volume": 100, "today_volume": 0,
+            }],
+        }),
+        encoding="utf-8",
+    )
+    cfg = LiveConfig(
+        mode=RunMode.PAPER,
+        broker="paper",
+        ledger_dir=tmp_path / "ledger",
+        state_dir=state_dir,
+    )
+    runtime = LiveRuntime.create(cfg, broker=PaperBroker(cash=100_000.0))
+
+    runtime.connect()
+
+    recovery = runtime.snapshot()["recovery"]
+    assert recovery["state_reconciliation"]["passed"] is False
+    assert recovery["state_reconciliation"]["position_differences"] == [{
+        "instrument": "600000.SSE",
+        "expected_volume": 100.0,
+        "observed_volume": 0.0,
+    }]
+    assert "runtime_positions_changed" in {
+        warning["kind"] for warning in recovery["warnings"]
+    }
+    # connect() has already written the new snapshot; the process-start
+    # baseline must still survive until a warning-free formal reconcile.
+    repeated = runtime.recover()
+    assert "runtime_positions_changed" in {
+        warning["kind"] for warning in repeated["warnings"]
+    }
+    runtime.accept_recovery_baseline()
+    accepted = runtime.recover()
+    assert "runtime_positions_changed" not in {
+        warning["kind"] for warning in accepted["warnings"]
+    }
     runtime.close()
 
 

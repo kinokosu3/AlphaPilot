@@ -3,16 +3,17 @@
 # AlphaPilot live-trading image: compiled broker SDK bindings, NO vn.py.
 #
 # Separate from the research image (Dockerfile): this one carries the C++
-# broker bindings (alphapilot_xtpx.api @ XTP Pro/XTPX 1.2.1, alphapilot_emt.api @ new EMT
-# SDK) compiled for linux/amd64 — the only platform both vendor SDKs support.
-# Gateway logic is installed as pip plugins (alphapilot-broker-xtp/emt); the
-# alphapilot_xtpx/alphapilot_emt ship only pybind bindings + vendor .so files.
+# broker bindings (alphapilot_tts @ TTS 6.3.15,
+# alphapilot_xtpx.api @ XTP Pro/XTPX 1.2.1, alphapilot_emt.api @ new EMT SDK)
+# compiled for linux/amd64. Gateway logic is installed as pip plugins; the SDK
+# packages ship only pybind bindings + vendor .so files.
 #
 #   docker build -f Dockerfile.live --platform linux/amd64 -t alphapilot-live .
+#   docker build ... --target live-tts     # stop after TTS bindings/plugin (debug)
 #   docker build ... --target live-xtp    # stop after the XTP bindings (debug)
 #
-# Staged so a broken EMT build never invalidates the XTP layer:
-#   live-base (toolchain)  ->  live-xtp (+alphapilot_xtpx)  ->  live (+alphapilot_emt + alphapilot)
+# Staged so one vendor build does not hide which native package failed:
+#   live-base -> live-tts -> live-xtp -> live (+EMT + AlphaPilot/plugins)
 ############################################################
 FROM python:3.11-slim-bookworm AS live-base
 
@@ -50,7 +51,7 @@ WORKDIR /app
 # alphapilot_xtpx's meson.build resolves pybind11 via `python3 -c "import pybind11"`,
 # so the packages must be importable outside pip's isolated build env
 # (we install the gateways with --no-build-isolation).
-RUN pip install meson meson-python ninja pybind11 patchelf
+RUN pip install build meson meson-python ninja pybind11 patchelf
 
 # Runtime deps of the live stack: numpy for the live subsystem, pandas for the
 # timing strategy adapter. (vn.py and its PySide6/ta-lib payload are gone —
@@ -68,7 +69,17 @@ RUN apt-get update -o Acquire::Retries=5 \
 
 
 ############################################################
-FROM live-base AS live-xtp
+FROM live-base AS live-tts
+
+# OpenCTP TTS 6.3.15 binding and hot-pluggable gateway are maintained in the
+# standalone ai-yang/alphapilot_tts repository, matching XTPX/EMT packaging.
+COPY alphapilot_tts/ ./alphapilot_tts/
+RUN pip install --no-deps --no-build-isolation ./alphapilot_tts \
+    && python -c "from alphapilot_ttsapi.api import MdApi, TdApi; assert '6.3.15' in MdApi().getApiVersion(); assert '6.3.15' in TdApi().getApiVersion(); print('alphapilot_ttsapi.api OK')"
+
+
+############################################################
+FROM live-tts AS live-xtp
 
 # XTP Pro bindings — compiles vnxtpmd/vnxtptd against the bundled XTPX 1.2.1
 # SDK (headers + linux libs vendored inside the package).
@@ -99,13 +110,13 @@ COPY plugins/ ./plugins/
 RUN pip install --no-deps ./plugins/alphapilot_broker_xcommon \
     && pip install --no-deps ./plugins/alphapilot_broker_xtp \
     && pip install --no-deps ./plugins/alphapilot_broker_emt \
-    && python -c "from alphapilot.systems.live.brokers.registry import list_brokers; assert {x.name for x in list_brokers()} == {'xtp', 'emt'}"
+    && python -c "from alphapilot.systems.live.brokers.registry import list_brokers, list_quote_providers; assert {x.name for x in list_brokers()} == {'xtp', 'emt', 'tts'}; assert 'tts_7x24' in {x.name for x in list_quote_providers()}"
 
-# Build-time smoke: both SDK bindings import, the native gateways construct
+# Build-time smoke: all SDK bindings import, the native gateways construct
 # (C++ API objects instantiate), and the strategy-runner layer loads — fail
 # the image build if any of that breaks.
 COPY scripts/live_xtp_common.py scripts/live_preflight_xtp.py scripts/live_smoke_import.py scripts/live_smoke_connect_xtp.py scripts/live_x86_check.py ./scripts/
-RUN python scripts/live_smoke_import.py
+RUN LIVE_SMOKE_REQUIRE=xtp,emt,tts python scripts/live_smoke_import.py
 
 ENTRYPOINT ["tini", "--"]
 # Default command re-runs the smoke; compose overrides with the real live process.

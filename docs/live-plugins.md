@@ -18,9 +18,21 @@ alphapilot live_quote_providers
 pip uninstall alphapilot-broker-xtp
 ```
 
+TTS 柜台仿真和 XTPX/EMT 一样维护在独立仓库中；一个 wheel 同时包含原生绑定和
+热插拔适配器：
+
+```bash
+pip install "git+https://github.com/ai-yang/alphapilot_tts.git"
+```
+
+`tts` 是 `account_kind=simulation` 的 trade-only provider；`tts_7x24` 是
+`data_kind=replay` 的 quote-only provider。完整配置和 UAT 见
+[OpenCTP TTS 柜台仿真接入](tts-simulation.md)。
+
 卸载适配插件后，即使 `alphapilot_xtpx` SDK wheel 仍留在环境中，XTP 也不会被发现。
 SDK 绑定包只提供原生模块，不注册 entry point；`alphapilot-broker-*` 才是
-AlphaPilot 可发现、可卸载的通道插件。
+AlphaPilot 可发现、可卸载的通道插件。TTS 是例外：`alphapilot-tts` 将原生模块和
+entry point 放在同一个平台 wheel 中，卸载该 wheel 会同时移除两者。
 
 从旧命名迁移时，先移除原来的绑定包，再安装 broker 插件；不要让两套 SDK
 命名空间长期并存：
@@ -36,6 +48,7 @@ pip install alphapilot-broker-xtp alphapilot-broker-emt --find-links /path/to/wh
 pip install ./alphapilot_xtpx
 pip install ./plugins/alphapilot_broker_xcommon
 pip install ./plugins/alphapilot_broker_xtp
+pip install ./alphapilot_tts
 ```
 
 ## 最小 manifest
@@ -75,6 +88,11 @@ factory 接收 `name` 和 `roles`。`roles={"trade", "quote"}` 时返回对象�
 
 连接字段由 `TradeChannelSpec`、`QuoteChannelSpec` 分别声明。核心负责从环境变量构建
 设置、报告缺失项和执行 TCP 预检，目录和 API 永远只输出变量名，不输出值。
+
+trade channel 应声明 `account_kind=live|simulation|local`，quote channel 应声明
+`data_kind=realtime|replay|synthetic`。`GatewayCapabilities` 同时区分 SDK 原生支持的
+`native_asset_classes` 与 AlphaPilot 当前允许送单的 `routable_asset_classes`，并声明
+session、position、offset 和 notional 模型。目录能力不能绕过运行环境或 RiskGate。
 
 ## 约束
 

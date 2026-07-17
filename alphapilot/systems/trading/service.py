@@ -140,7 +140,12 @@ class TradingStrategySystem(BaseSystem):
         self.historical_data = LocalHistoricalDataAdapter(context)
         self.historical_execution_data = self.historical_data
         live = context.engine.get_system("live")
-        self.store = StrategyRuntimeStore(Path(live.config.state_dir) / "strategy_runtime.sqlite3")
+        runtime_store = os.getenv("ALPHAPILOT_STRATEGY_RUNTIME_STORE")
+        self.store = StrategyRuntimeStore(
+            Path(runtime_store).expanduser()
+            if runtime_store
+            else Path(live.config.state_dir) / "strategy_runtime.sqlite3"
+        )
         configured_environment = str(os.getenv("ALPHAPILOT_ENVIRONMENT_ID") or "").strip()
         environment_material = configured_environment or (
             f"{socket.gethostname()}:{Path(live.config.state_dir).expanduser().resolve()}"
@@ -731,6 +736,18 @@ class TradingStrategySystem(BaseSystem):
     def deployment(self, instance_id: str) -> dict[str, Any]:
         return self.store.deployment(instance_id)
 
+    def execution_binding(self, instance_id: str) -> dict[str, Any]:
+        return self.store.get_execution_binding(instance_id)
+
+    def bind_execution(self, instance_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.store.set_execution_binding(
+            instance_id,
+            execution_environment=str(payload.get("execution_environment") or "local_paper"),
+            trade_provider=str(payload.get("trade_provider") or "paper"),
+            quote_provider=str(payload.get("quote_provider") or "paper"),
+            account_profile=str(payload.get("account_profile") or ""),
+        )
+
     def promote(self, instance_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         validation = self.validate_instance(instance_id)
         if not validation["ok"]:
@@ -764,11 +781,28 @@ class TradingStrategySystem(BaseSystem):
                     f"{current['deployment_level']} evidence is insufficient: "
                     f"{evidence['trading_sessions']}/{evidence['minimum_sessions']} trading sessions"
                 )
+        selected_broker = str(payload.get("broker") or "").strip().lower()
+        selected_quote = str(payload.get("quote_provider") or "").strip().lower()
+        if target_level == "shadow":
+            selected_broker = selected_broker or str(
+                live.config.trade_broker or live.config.broker or ""
+            ).strip().lower()
+            selected_quote = selected_quote or str(
+                live.config.quote_provider or selected_broker
+            ).strip().lower()
+        elif target_level == "live":
+            binding = self.store.get_execution_binding(instance_id)
+            selected_quote = selected_quote or (
+                str(binding.get("quote_provider") or "").strip().lower()
+                if str(binding.get("trade_provider") or "").strip().lower() == selected_broker
+                else selected_broker
+            )
         return self.store.promote(
             instance_id,
             target_level,
             account_id=str(payload.get("account_id") or ""),
-            broker=str(payload.get("broker") or ""),
+            broker=selected_broker,
+            quote_provider=selected_quote,
             approval=approval,
         )
 

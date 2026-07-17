@@ -159,12 +159,22 @@ class RiskGate:
             return RiskVerdict.reject("volume", "order volume must be positive")
 
         contract = oms.get_contract(req.key) if hasattr(oms, "get_contract") else None
-        live_mode = getattr(runmode, "mode", None) == RunMode.LIVE
+        selected_mode = getattr(runmode, "mode", None)
+        live_mode = selected_mode in {RunMode.LIVE, RunMode.SIMULATION}
         if (
             live_mode
             and getattr(contract, "product", None) == Product.FUTURES
         ):
-            return RiskVerdict.reject("unsupported_product", "futures live routing is not enabled")
+            return RiskVerdict.reject("unsupported_product", "futures external routing is not enabled")
+        if (
+            selected_mode == RunMode.SIMULATION
+            and contract is not None
+            and getattr(contract, "product", None) not in {Product.EQUITY, Product.FUND}
+        ):
+            return RiskVerdict.reject(
+                "unsupported_product",
+                "simulation routing currently supports A-share equities and funds only",
+            )
         if live_mode and contract is None:
             return RiskVerdict.reject("unknown_contract", f"{req.key} contract metadata is required in LIVE mode")
         if live_mode:

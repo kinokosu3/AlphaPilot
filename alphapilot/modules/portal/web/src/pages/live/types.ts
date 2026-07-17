@@ -64,6 +64,7 @@ export type LiveTrade = {
 
 export type LiveAccount = {
   account_id?: string;
+  account_id_hash?: string;
   balance: number;
   available: number;
   frozen?: number;
@@ -151,7 +152,13 @@ export type LivePreflightChannel = {
 
 export type LiveBrokerCapabilities = {
   asset_classes?: string[];
+  native_asset_classes?: string[];
+  routable_asset_classes?: string[];
   exchanges?: string[];
+  session_profile?: string;
+  position_model?: string;
+  offset_requirement?: string;
+  notional_model?: string;
   supports_tick?: boolean;
   supports_depth?: boolean;
   supports_contract_query?: boolean;
@@ -174,6 +181,8 @@ export type LiveBrokerSpec = {
   distribution?: string;
   version?: string;
   roles?: string[];
+  account_kind?: "live" | "simulation" | "local";
+  data_kind?: "realtime" | "replay" | "synthetic";
   env_fields: string[];
   missing_env: string[];
   capabilities: LiveBrokerCapabilities;

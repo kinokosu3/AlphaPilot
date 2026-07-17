@@ -11,6 +11,7 @@ import uuid
 
 from alphapilot.kernel.base import BaseModule
 from alphapilot.systems.trading.contracts import OperatorContext
+from alphapilot.systems.trading.account_identity import public_account_state
 
 if TYPE_CHECKING:
     from alphapilot.kernel.context import Context
@@ -202,6 +203,7 @@ class TradingModule(BaseModule):
         account_id: str = "",
         broker: str = "",
         approval: str = "",
+        quote_provider: str = "",
         operator_id: str = "local-cli",
         reason: str = "CLI deployment promotion",
     ) -> dict[str, Any]:
@@ -210,15 +212,35 @@ class TradingModule(BaseModule):
             "to": to,
             "account_id": account_id,
             "broker": broker,
+            "quote_provider": quote_provider,
             "approval": approval,
         })
         system.operator_auth.audit(
             self._operator(operator_id, reason),
             action="promote_deployment", result="ok",
             instance_id=instance_id, config_hash=result["config_hash"],
-            account_id=account_id, broker=broker, details={"to": to},
+            account_id=account_id, broker=broker,
+            details={"to": to, "quote_provider": quote_provider},
         )
         return self._print(result)
+
+    def trading_execution_binding(self, instance_id: str) -> dict[str, Any]:
+        return self._print(self._system().execution_binding(instance_id))
+
+    def trading_bind_execution(
+        self,
+        instance_id: str,
+        execution_environment: str = "local_paper",
+        trade_provider: str = "paper",
+        quote_provider: str = "paper",
+        account_profile: str = "",
+    ) -> dict[str, Any]:
+        return self._print(self._system().bind_execution(instance_id, {
+            "execution_environment": execution_environment,
+            "trade_provider": trade_provider,
+            "quote_provider": quote_provider,
+            "account_profile": account_profile,
+        }))
 
     def trading_operator_token(
         self,
@@ -248,14 +270,14 @@ class TradingModule(BaseModule):
             reason=reason,
             auth_source="local-cli",
         )
-        return self._print(self._system().authorize_live(instance_id, {
+        return self._print(public_account_state(self._system().authorize_live(instance_id, {
             "account_id": account_id,
             "broker": broker,
             "reason": reason,
             "ttl_seconds": ttl_seconds,
             "baseline_confirmed": True,
             "baseline_positions": _object(baseline_positions),
-        }, operator))
+        }, operator)))
 
     def _lifecycle(
         self, instance_id: str, action: str, operator_id: str, reason: str,
@@ -270,7 +292,7 @@ class TradingModule(BaseModule):
             instance_id=instance_id, config_hash=current["config_hash"],
             account_id=runtime["account_id"], broker=runtime["broker"], details=result,
         )
-        return self._print(result)
+        return self._print(public_account_state(result))
 
     def trading_start(
         self, instance_id: str, operator_id: str = "local-cli", reason: str = "CLI start",
@@ -298,7 +320,7 @@ class TradingModule(BaseModule):
         return self._lifecycle(instance_id, "stop", operator_id, reason)
 
     def trading_status(self, instance_id: str) -> dict[str, Any]:
-        return self._print(self._system().deployment(instance_id))
+        return self._print(public_account_state(self._system().deployment(instance_id)))
 
     def trading_kill_switch(
         self,
@@ -322,7 +344,7 @@ class TradingModule(BaseModule):
         return self._print(result)
 
     def trading_audit(self, limit: int = 200) -> list[dict[str, Any]]:
-        return self._print(self._system().audit_events(limit=limit))
+        return self._print(public_account_state(self._system().audit_events(limit=limit)))
 
     def trading_compatibility(
         self,

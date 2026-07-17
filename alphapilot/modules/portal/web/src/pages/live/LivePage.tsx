@@ -25,21 +25,30 @@ import type {
   LiveStatus,
 } from "./types";
 
-type Workspace = "live" | "paper";
+type Workspace = "live" | "simulation" | "paper";
 type SimulationMode = "paper" | "dry_run";
 type Ticket = "order" | "target";
 
 type DeploymentPackage = {
   instance?: { instance_id?: string; lifecycle?: string; deployment_level?: string; config_hash?: string };
   runtime?: {
-    desired_state?: string; observed_state?: string; account_id?: string; broker?: string;
-    runner_heartbeat_at?: string; reconcile_required?: boolean; last_error?: Record<string, unknown>;
+    desired_state?: string; observed_state?: string; account_id_hash?: string; broker?: string;
+    runtime_id?: string; runner_heartbeat_at?: string; reconcile_required?: boolean; last_error?: Record<string, unknown>;
+    execution_environment?: string; trade_provider?: string; quote_provider?: string;
+    quote_data_kind?: string; binding_hash?: string; reconciled?: boolean;
   };
+  execution_binding?: ExecutionBinding;
   stage_runs?: Array<{
     run_id: string; stage: string; status: string; trading_sessions: number;
     config_hash: string; metrics?: Record<string, unknown>;
   }>;
   route_blocks?: Array<{ scope_type: string; scope_id: string; active: boolean; reason?: string }>;
+};
+
+type ExecutionBinding = {
+  instance_id: string; execution_environment: "local_paper" | "broker_simulation" | "live";
+  trade_provider: string; quote_provider: string; account_profile: string;
+  quote_data_kind: "realtime" | "replay" | "synthetic"; binding_hash: string; version: number;
 };
 
 type QualificationPackage = {
@@ -62,7 +71,8 @@ const WORKSPACE_STORAGE_KEY = "portal_live_workspace";
 
 function initialWorkspace(): Workspace {
   try {
-    return window.localStorage.getItem(WORKSPACE_STORAGE_KEY) === "live" ? "live" : "paper";
+    const stored = window.localStorage.getItem(WORKSPACE_STORAGE_KEY);
+    return stored === "live" || stored === "simulation" ? stored : "paper";
   } catch {
     return "paper";
   }
@@ -102,15 +112,30 @@ export function LivePage() {
   const [preflight, setPreflight] = useState<LivePreflight | null>(null);
   const [preflightNetwork, setPreflightNetwork] = useState(false);
 
-  const runtimeMode = workspace === "live" ? "live" : simulationMode;
-  const selectedRuntimeBroker = workspace === "live" ? runtimeBroker.trim() : "paper";
-  const selectedRuntimeQuoteProvider = workspace === "live" ? (runtimeQuoteProvider.trim() || selectedRuntimeBroker) : "paper";
-  const liveBrokerOptions = useMemo(() => brokerCatalog.data || [], [brokerCatalog.data]);
-  const quoteProviderOptions = useMemo(() => quoteProviderCatalog.data || [], [quoteProviderCatalog.data]);
+  const runtimeMode = workspace === "live" ? "live" : workspace === "simulation" ? "simulation" : simulationMode;
+  const selectedRuntimeBroker = workspace === "paper" ? "paper" : runtimeBroker.trim();
+  const selectedRuntimeQuoteProvider = workspace === "paper" ? "paper" : (runtimeQuoteProvider.trim() || selectedRuntimeBroker);
+  const liveBrokerOptions = useMemo(
+    () => (brokerCatalog.data || []).filter((item) => (
+      workspace === "simulation"
+        ? item.account_kind === "simulation"
+        : (item.account_kind || "live") === "live"
+    )),
+    [brokerCatalog.data, workspace],
+  );
+  const quoteProviderOptions = useMemo(
+    () => (quoteProviderCatalog.data || []).filter((item) => (
+      workspace === "live" ? (item.data_kind || "realtime") === "realtime"
+      : workspace === "simulation" ? ["realtime", "replay"].includes(item.data_kind || "")
+      : item.name === "paper"
+    )),
+    [quoteProviderCatalog.data, workspace],
+  );
   const selectedBrokerSpec = liveBrokerOptions.find((item) => item.name === selectedRuntimeBroker);
   const selectedQuoteProviderSpec = quoteProviderOptions.find((item) => item.name === selectedRuntimeQuoteProvider);
   const catalogsResolved = !brokerCatalog.loading && !quoteProviderCatalog.loading && Boolean(brokerCatalog.data && quoteProviderCatalog.data);
   const providerReady = workspace === "paper" || (catalogsResolved && Boolean(selectedBrokerSpec && selectedQuoteProviderSpec));
+  const observeOnlyQuotes = workspace === "simulation" && selectedQuoteProviderSpec?.data_kind !== "realtime";
   const query = useMemo(() => ({
     mode: runtimeMode,
     broker: selectedRuntimeBroker,
@@ -154,6 +179,13 @@ export function LivePage() {
       : Promise.resolve({} as DeploymentPackage),
     [daemonTimingStrategy],
   );
+  const executionBinding = useAsync(
+    () => daemonTimingStrategy.trim()
+      ? api.get<ExecutionBinding>(`/api/trading/deployments/${daemonTimingStrategy.trim()}/execution-binding`)
+      : Promise.resolve(null as unknown as ExecutionBinding),
+    [daemonTimingStrategy],
+  );
+  const [accountProfile, setAccountProfile] = useState("");
   const deploymentQualification = useAsync(
     () => daemonTimingStrategy.trim()
       ? api.get<QualificationPackage>(`/api/trading/deployments/${daemonTimingStrategy.trim()}/qualification`)
@@ -187,17 +219,19 @@ export function LivePage() {
   const cfg = configStatus.data?.config;
 
   useEffect(() => {
-    if (runtimeBroker.trim() || !catalogsResolved) return;
+    if (!catalogsResolved || workspace === "paper") return;
+    if (liveBrokerOptions.some((item) => item.name === runtimeBroker.trim())) return;
     const configured = (cfg?.trade_broker || cfg?.broker || "").trim();
-    const eligibleConfigured = configured && configured !== "paper" ? liveBrokerOptions.find((item) => item.name === configured) : undefined;
+    const eligibleConfigured = workspace === "live" && configured && configured !== "paper" ? liveBrokerOptions.find((item) => item.name === configured) : undefined;
     const fallback = liveBrokerOptions.find((item) => item.gateway_importable) || liveBrokerOptions[0];
     setRuntimeBroker((eligibleConfigured || fallback)?.name || "");
-  }, [catalogsResolved, cfg?.broker, cfg?.trade_broker, liveBrokerOptions, runtimeBroker]);
+  }, [catalogsResolved, cfg?.broker, cfg?.trade_broker, liveBrokerOptions, runtimeBroker, workspace]);
 
   useEffect(() => {
-    if (workspace !== "live" || runtimeQuoteProvider.trim() || !catalogsResolved) return;
+    if (workspace === "paper" || !catalogsResolved) return;
+    if (quoteProviderOptions.some((item) => item.name === runtimeQuoteProvider.trim())) return;
     const configured = (cfg?.quote_provider || "").trim();
-    const eligibleConfigured = configured && configured !== "paper" ? quoteProviderOptions.find((item) => item.name === configured) : undefined;
+    const eligibleConfigured = workspace === "live" && configured && configured !== "paper" ? quoteProviderOptions.find((item) => item.name === configured) : undefined;
     const matching = quoteProviderOptions.find((item) => item.name === runtimeBroker);
     const fallback = quoteProviderOptions.find((item) => item.gateway_importable) || quoteProviderOptions[0];
     setRuntimeQuoteProvider((eligibleConfigured || matching || fallback)?.name || "");
@@ -208,25 +242,20 @@ export function LivePage() {
   }, [runtimeMode, selectedRuntimeBroker, selectedRuntimeQuoteProvider, preflightNetwork]);
 
   useEffect(() => {
-    if (!daemonStatus.data?.alive) return;
-    const actualMode = daemonStatus.data.mode;
-    if (actualMode === "live" && workspace !== "live") {
-      setWorkspaceState("live");
-      rememberWorkspace("live");
-      setTargetRoute(false);
-    } else if ((actualMode === "paper" || actualMode === "dry_run") && workspace !== "paper") {
-      setWorkspaceState("paper");
-      rememberWorkspace("paper");
-      setSimulationMode(actualMode);
-      setTargetRoute(false);
-    }
-  }, [daemonStatus.data?.alive, daemonStatus.data?.mode, workspace]);
+    if (executionBinding.data?.account_profile) setAccountProfile(executionBinding.data.account_profile);
+  }, [executionBinding.data?.account_profile]);
+
+  useEffect(() => {
+    if (observeOnlyQuotes) setTargetRoute(false);
+  }, [observeOnlyQuotes]);
 
   const switchWorkspace = (next: Workspace) => {
-    if (daemonStatus.data?.alive || next === workspace) return;
+    if (next === workspace) return;
     setWorkspaceState(next);
     setTargetRoute(false);
     setOrderCode("");
+    setRuntimeBroker("");
+    setRuntimeQuoteProvider("");
     targetJson.setRaw('{\n  "holdings": {},\n  "prices": {}\n}');
     rememberWorkspace(next);
   };
@@ -236,12 +265,12 @@ export function LivePage() {
   const refreshWorkspace = useCallback(async () => {
     await Promise.all([
       daemonStatus.refresh(), runtimeState.refresh(), riskStatus.refresh(), ledgerEvents.refresh(),
-      deploymentEvidence.refresh(), safetyState.refresh(),
+      deploymentEvidence.refresh(), executionBinding.refresh(), safetyState.refresh(),
       deploymentQualification.refresh(), brokerUatRuns.refresh(),
     ]);
   }, [
     daemonStatus.refresh, runtimeState.refresh, riskStatus.refresh, ledgerEvents.refresh,
-    deploymentEvidence.refresh, safetyState.refresh,
+    deploymentEvidence.refresh, executionBinding.refresh, safetyState.refresh,
     deploymentQualification.refresh, brokerUatRuns.refresh,
   ]);
 
@@ -256,8 +285,8 @@ export function LivePage() {
   }, t("livePreflightDone"));
 
   const connectRuntime = async () => {
-    if (workspace !== "live") return;
-    if (!(await confirm({ message: t("liveConnectConfirm"), danger: true }))) return;
+    if (workspace === "paper") return;
+    if (!(await confirm({ message: t("liveConnectConfirm"), danger: workspace === "live" }))) return;
     await run(async () => {
       await api.post<LiveConnectResult>("/api/live/runtime/connect", { ...query, timeout: 30 });
       await refreshWorkspace();
@@ -266,7 +295,7 @@ export function LivePage() {
 
   const startDaemon = async () => {
     if (!providerReady) return;
-    if (workspace === "live" && (!selectedBrokerSpec?.gateway_importable || !selectedQuoteProviderSpec?.gateway_importable)) return;
+    if (workspace !== "paper" && (!selectedBrokerSpec?.gateway_importable || !selectedQuoteProviderSpec?.gateway_importable)) return;
     if (workspace === "live" && !(await confirm({ message: t("liveDaemonStartConfirm"), danger: true }))) return;
     await run(async () => {
       if (workspace === "paper" && (!Number.isFinite(Number(initialCash)) || Number(initialCash) <= 0)) {
@@ -287,14 +316,14 @@ export function LivePage() {
   const stopDaemon = async () => {
     if (!(await confirm({ message: t("liveDaemonStopConfirm"), danger: true }))) return;
     await run(async () => {
-      const result = await api.post<LiveDaemonStopResult>("/api/live/daemon/stop", { timeout: 5 });
+      const result = await api.post<LiveDaemonStopResult>("/api/live/daemon/stop", { ...query, timeout: 5 });
       if (!result.stopped || result.alive || result.running) throw new Error(t("liveDaemonStopFailed"));
       await refreshWorkspace();
     }, t("liveDaemonStopped"));
   };
 
   const command = (path: string, message: string, payload: Record<string, unknown> = {}) => run(async () => {
-    await api.post<LiveDaemonCommandResult>(path, { wait: true, timeout: 5, ...payload });
+    await api.post<LiveDaemonCommandResult>(path, { ...query, wait: true, timeout: 5, ...payload });
     await refreshWorkspace();
   }, message);
 
@@ -325,8 +354,36 @@ export function LivePage() {
   };
   const strategyStart = async () => {
     if (workspace === "live" && !(await confirm({ message: t("liveStrategyStartConfirm"), danger: true }))) return;
+    if (workspace === "simulation") {
+      const binding = executionBinding.data;
+      if (
+        !binding || binding.execution_environment !== "broker_simulation"
+        || binding.trade_provider !== selectedRuntimeBroker
+        || binding.quote_provider !== selectedRuntimeQuoteProvider
+      ) {
+        await run(async () => { throw new Error(t("liveBindingRequired")); });
+        return;
+      }
+    }
+    if (workspace === "paper" && executionBinding.data?.execution_environment !== "local_paper") {
+      await run(async () => { throw new Error(t("liveBindingRequired")); });
+      return;
+    }
     await deploymentCommand("start", t("liveStrategyStarted"));
   };
+
+  const saveExecutionBinding = () => run(async () => {
+    if (!daemonTimingStrategy.trim()) throw new Error("strategy instance is required");
+    if (workspace === "simulation" && !accountProfile.trim()) throw new Error(t("liveAccountProfileRequired"));
+    await api.put(`/api/trading/deployments/${daemonTimingStrategy.trim()}/execution-binding`, {
+      execution_environment: workspace === "simulation" ? "broker_simulation" : "local_paper",
+      trade_provider: workspace === "simulation" ? selectedRuntimeBroker : "paper",
+      quote_provider: workspace === "simulation" ? selectedRuntimeQuoteProvider : "paper",
+      account_profile: workspace === "simulation" ? accountProfile.trim() : "",
+      reason: "portal execution binding change",
+    });
+    await Promise.all([executionBinding.refresh(), deploymentEvidence.refresh()]);
+  }, t("liveBindingSaved"));
 
   const changeKillSwitch = async (scopeType: string, scopeId: string, action: "engage" | "release") => {
     const reason = killReason.trim();
@@ -345,6 +402,7 @@ export function LivePage() {
   };
 
   const submitOrder = async () => {
+    if (observeOnlyQuotes) return;
     if (!orderCode.trim()) return;
     const volume = Number(orderVolume);
     const price = Number(orderPrice);
@@ -373,6 +431,7 @@ export function LivePage() {
   };
 
   const submitTarget = async () => {
+    if (targetRoute && observeOnlyQuotes) return;
     if (targetRoute && workspace === "live" && !(await confirm({ message: t("liveDaemonTargetConfirm"), danger: true }))) return;
     const parsed = targetJson.parse();
     await command("/api/live/daemon/submit-target", t("liveDaemonTargetDone"), {
@@ -393,6 +452,7 @@ export function LivePage() {
 
   const daemon = daemonStatus.data;
   const canStartDaemon = providerReady && (workspace === "paper" || Boolean(selectedBrokerSpec?.gateway_importable && selectedQuoteProviderSpec?.gateway_importable));
+  const bindingLocked = Boolean(deploymentEvidence.data?.runtime?.runtime_id);
 
   return (
     <div className="stack live-workspace-page">
@@ -406,8 +466,9 @@ export function LivePage() {
         </label>
       </section>
       <div className="live-environment-tabs" role="tablist" aria-label={t("liveEnvironment")}>
-        <button type="button" role="tab" aria-selected={workspace === "live"} className={workspace === "live" ? "active live" : ""} disabled={Boolean(daemon?.alive)} onClick={() => switchWorkspace("live")}>{t("liveEnvironmentLive")}</button>
-        <button type="button" role="tab" aria-selected={workspace === "paper"} className={workspace === "paper" ? "active" : ""} disabled={Boolean(daemon?.alive)} onClick={() => switchWorkspace("paper")}>{t("liveEnvironmentPaper")}</button>
+        <button type="button" role="tab" aria-selected={workspace === "live"} className={workspace === "live" ? "active live" : ""} onClick={() => switchWorkspace("live")}>{t("liveEnvironmentLive")}</button>
+        <button type="button" role="tab" aria-selected={workspace === "simulation"} className={workspace === "simulation" ? "active simulation" : ""} onClick={() => switchWorkspace("simulation")}>{t("liveEnvironmentSimulation")}</button>
+        <button type="button" role="tab" aria-selected={workspace === "paper"} className={workspace === "paper" ? "active" : ""} onClick={() => switchWorkspace("paper")}>{t("liveEnvironmentPaper")}</button>
       </div>
       {workspace === "paper" ? (
         <div className="live-simulation-switch" role="group" aria-label={t("liveSimulationMode")}>
@@ -416,7 +477,21 @@ export function LivePage() {
         </div>
       ) : null}
       {brokerCatalog.error || quoteProviderCatalog.error ? <Alert tone="error">{brokerCatalog.error || quoteProviderCatalog.error}</Alert> : null}
+      {observeOnlyQuotes ? <Alert tone="info">{t("liveReplayQuoteWarning")}</Alert> : null}
       <LiveStatusBar workspace={workspace} runtimeMode={runtimeMode} tradeBroker={selectedRuntimeBroker} quoteProvider={selectedRuntimeQuoteProvider} daemon={daemon} onRefresh={refreshWorkspace} onOpenDiagnostics={() => setDiagnosticsOpen(true)} onHalt={haltDaemon} onResume={resumeDaemon} />
+      {workspace !== "live" && daemonTimingStrategy.trim() ? (
+        <section className="panel inset" aria-label={t("liveExecutionBinding")}>
+          <div className="panel-head"><div><h2>{t("liveExecutionBinding")}</h2><span className="muted">{t("liveExecutionBindingHint")}</span></div></div>
+          {workspace === "simulation" ? (
+            <div className="live-form-grid">
+              <label className="field"><span>{t("liveTradeBroker")}</span><select value={runtimeBroker} onChange={(event) => setRuntimeBroker(event.target.value)} disabled={bindingLocked}>{liveBrokerOptions.map((item) => <option key={item.name} value={item.name} disabled={!item.gateway_importable}>{item.name}</option>)}</select></label>
+              <label className="field"><span>{t("liveQuoteProvider")}</span><select value={runtimeQuoteProvider} onChange={(event) => setRuntimeQuoteProvider(event.target.value)} disabled={bindingLocked}>{quoteProviderOptions.map((item) => <option key={item.name} value={item.name} disabled={!item.gateway_importable}>{item.name} ({item.data_kind})</option>)}</select></label>
+              <label className="field"><span>{t("liveAccountProfile")}</span><input value={accountProfile} onChange={(event) => setAccountProfile(event.target.value)} disabled={bindingLocked} placeholder="tts-uat" /></label>
+            </div>
+          ) : <Alert tone="info">{t("liveLocalPaperBindingHint")}</Alert>}
+          <div className="row-actions"><button type="button" className="button small" disabled={bindingLocked || executionBinding.loading || !providerReady} onClick={saveExecutionBinding}>{t("save")}</button><code>{executionBinding.data?.binding_hash?.slice(0, 12) || "—"}</code></div>
+        </section>
+      ) : null}
       <div className="live-workbench-grid">
         <LiveStrategyCard
           daemon={daemon}
@@ -465,6 +540,7 @@ export function LivePage() {
           routeTarget={targetRoute}
           setRouteTarget={setTargetRoute}
           workspace={workspace}
+          routeDisabled={observeOnlyQuotes}
           onSubmitOrder={submitOrder}
           onSubmitTarget={submitTarget}
         />
@@ -483,7 +559,7 @@ export function LivePage() {
           <>
             <div className="live-runner-summary">
               <span><small>Desired / Observed</small><strong>{deploymentEvidence.data?.runtime?.desired_state || "—"} / {deploymentEvidence.data?.runtime?.observed_state || "—"}</strong></span>
-              <span><small>账户 / Broker</small><strong>{deploymentEvidence.data?.runtime?.account_id || "—"} / {deploymentEvidence.data?.runtime?.broker || "—"}</strong></span>
+              <span><small>账户哈希 / Broker</small><strong>{deploymentEvidence.data?.runtime?.account_id_hash?.slice(0, 19) || "—"} / {deploymentEvidence.data?.runtime?.broker || "—"}</strong></span>
               <span><small>最近心跳</small><strong>{deploymentEvidence.data?.runtime?.runner_heartbeat_at || "—"}</strong></span>
               <span><small>需要对账</small><strong>{deploymentEvidence.data?.runtime?.reconcile_required ? "是" : "否"}</strong></span>
             </div>
@@ -511,8 +587,8 @@ export function LivePage() {
           {daemonTimingStrategy.trim() ? (
             <button className="button danger" onClick={() => changeKillSwitch("instance", daemonTimingStrategy.trim(), "engage")}>实例级停止新单</button>
           ) : null}
-          {deploymentEvidence.data?.runtime?.account_id ? (
-            <button className="button danger" onClick={() => changeKillSwitch("account", String(deploymentEvidence.data?.runtime?.account_id), "engage")}>账户级停止新单</button>
+          {deploymentEvidence.data?.runtime?.account_id_hash ? (
+            <button className="button danger" onClick={() => changeKillSwitch("account", String(deploymentEvidence.data?.runtime?.account_id_hash), "engage")}>账户级停止新单</button>
           ) : null}
           <button className="button danger" onClick={() => changeKillSwitch("global", "*", "engage")}>全局停止新单</button>
         </div>

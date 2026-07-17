@@ -13,10 +13,17 @@ import threading
 from typing import Any, Iterator
 import uuid
 
-from alphapilot.systems.trading.domain import DeploymentLevel, LifecycleState, StrategyInstanceConfig
+from alphapilot.systems.trading.domain import (
+    DeploymentLevel,
+    ExecutionBinding,
+    ExecutionEnvironment,
+    LifecycleState,
+    StrategyInstanceConfig,
+)
+from alphapilot.systems.trading.account_identity import account_identity_hash
 
 
-LATEST_SCHEMA_VERSION = 8
+LATEST_SCHEMA_VERSION = 9
 
 
 class StrategyRuntimeStore:
@@ -74,6 +81,9 @@ class StrategyRuntimeStore:
                 if previous < 8:
                     self._migrate_v8(db)
                     previous = 8
+                if previous < 9:
+                    self._migrate_v9(db)
+                    previous = 9
                 if previous != LATEST_SCHEMA_VERSION:
                     raise RuntimeError(
                         f"unsupported strategy runtime schema {previous}; "
@@ -783,6 +793,135 @@ class StrategyRuntimeStore:
             (_now(),),
         )
 
+    @staticmethod
+    def _migrate_v9(db: sqlite3.Connection) -> None:
+        """Add orthogonal execution bindings and external-account namespaces."""
+
+        additions = {
+            "deployment_runtime": (
+                ("execution_environment", "TEXT NOT NULL DEFAULT 'local_paper'"),
+                ("trade_provider", "TEXT NOT NULL DEFAULT 'paper'"),
+                ("quote_provider", "TEXT NOT NULL DEFAULT 'paper'"),
+                ("account_profile", "TEXT NOT NULL DEFAULT ''"),
+                ("quote_data_kind", "TEXT NOT NULL DEFAULT 'synthetic'"),
+                ("binding_hash", "TEXT NOT NULL DEFAULT ''"),
+                ("reconciled", "INTEGER NOT NULL DEFAULT 0"),
+            ),
+            "stage_evidence": (
+                ("binding_hash", "TEXT NOT NULL DEFAULT ''"),
+            ),
+            "stage_runs": (
+                ("binding_hash", "TEXT NOT NULL DEFAULT ''"),
+            ),
+        }
+        for table, columns in additions.items():
+            existing = {str(row[1]) for row in db.execute(f"PRAGMA table_info({table})")}
+            for name, ddl in columns:
+                if name not in existing:
+                    db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+        _execute_script(
+            db,
+            """
+            CREATE TABLE IF NOT EXISTS execution_bindings (
+                instance_id TEXT PRIMARY KEY,
+                execution_environment TEXT NOT NULL,
+                trade_provider TEXT NOT NULL,
+                quote_provider TEXT NOT NULL,
+                account_profile TEXT NOT NULL DEFAULT '',
+                quote_data_kind TEXT NOT NULL,
+                binding_hash TEXT NOT NULL,
+                version INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (instance_id) REFERENCES strategy_instances(instance_id)
+            );
+            """,
+        )
+        rows = db.execute(
+            "SELECT si.instance_id, si.deployment_level, dr.broker "
+            "FROM strategy_instances si JOIN deployment_runtime dr "
+            "ON dr.instance_id=si.instance_id"
+        ).fetchall()
+        for row in rows:
+            external = str(row["deployment_level"]) in {"shadow", "live"}
+            environment = "live" if external else ExecutionEnvironment.LOCAL_PAPER.value
+            trade = str(row["broker"] or "").lower() if external else "paper"
+            trade = trade or ("unknown" if external else "paper")
+            quote = trade if external else "paper"
+            data_kind = "realtime" if external else "synthetic"
+            binding_hash = _binding_hash(
+                str(row["instance_id"]), environment, trade, quote, "", data_kind,
+            )
+            db.execute(
+                "INSERT OR IGNORE INTO execution_bindings "
+                "(instance_id, execution_environment, trade_provider, quote_provider, "
+                "account_profile, quote_data_kind, binding_hash, updated_at) "
+                "VALUES (?, ?, ?, ?, '', ?, ?, ?)",
+                (
+                    row["instance_id"], environment, trade, quote, data_kind,
+                    binding_hash, _now(),
+                ),
+            )
+            db.execute(
+                "UPDATE deployment_runtime SET execution_environment=?, trade_provider=?, "
+                "quote_provider=?, account_profile='', quote_data_kind=?, binding_hash=?, reconciled=? "
+                "WHERE instance_id=?",
+                (
+                    environment, trade, quote, data_kind, binding_hash,
+                    int(not external), row["instance_id"],
+                ),
+            )
+            db.execute(
+                "UPDATE stage_evidence SET binding_hash=? "
+                "WHERE instance_id=? AND binding_hash=''",
+                (binding_hash, row["instance_id"]),
+            )
+            db.execute(
+                "UPDATE stage_runs SET binding_hash=? "
+                "WHERE instance_id=? AND binding_hash=''",
+                (binding_hash, row["instance_id"]),
+            )
+        db.execute("DROP INDEX IF EXISTS uq_live_account_writer")
+        db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_external_account_writer_v9 "
+            "ON deployment_runtime(execution_environment, trade_provider, account_id) "
+            "WHERE binding_active=1 AND account_id<>'' "
+            "AND execution_environment IN ('live', 'broker_simulation')"
+        )
+        db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_external_profile_writer_v9 "
+            "ON deployment_runtime(execution_environment, trade_provider, account_profile) "
+            "WHERE binding_active=1 AND account_profile<>'' "
+            "AND execution_environment='broker_simulation'"
+        )
+        account_blocks = db.execute(
+            "SELECT scope_id, active, reason, updated_at FROM route_blocks "
+            "WHERE scope_type='account'"
+        ).fetchall()
+        for block in account_blocks:
+            hashed = account_identity_hash(str(block["scope_id"]))
+            if hashed == str(block["scope_id"]):
+                continue
+            db.execute(
+                "INSERT INTO route_blocks(scope_type, scope_id, active, reason, updated_at) "
+                "VALUES ('account', ?, ?, ?, ?) "
+                "ON CONFLICT(scope_type, scope_id) DO UPDATE SET "
+                "active=MAX(route_blocks.active, excluded.active), "
+                "reason=CASE WHEN excluded.active=1 THEN excluded.reason ELSE route_blocks.reason END, "
+                "updated_at=MAX(route_blocks.updated_at, excluded.updated_at)",
+                (
+                    hashed, int(block["active"]), str(block["reason"]),
+                    str(block["updated_at"]),
+                ),
+            )
+            db.execute(
+                "DELETE FROM route_blocks WHERE scope_type='account' AND scope_id=?",
+                (str(block["scope_id"]),),
+            )
+        db.execute(
+            "INSERT OR REPLACE INTO schema_version VALUES (1, 9, ?)",
+            (_now(),),
+        )
+
     @property
     def schema_version(self) -> int:
         return self._detect_schema_version()
@@ -809,6 +948,29 @@ class StrategyRuntimeStore:
                     LifecycleState.CREATED.value, LifecycleState.CREATED.value, now,
                 ),
             )
+            binding = ExecutionBinding(instance_id=config.instance_id)
+            db.execute(
+                "INSERT INTO execution_bindings "
+                "(instance_id, execution_environment, trade_provider, quote_provider, "
+                "account_profile, quote_data_kind, binding_hash, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    binding.instance_id, binding.execution_environment,
+                    binding.trade_provider, binding.quote_provider,
+                    binding.account_profile, binding.quote_data_kind,
+                    binding.binding_hash, now,
+                ),
+            )
+            db.execute(
+                "UPDATE deployment_runtime SET execution_environment=?, trade_provider=?, "
+                "quote_provider=?, quote_data_kind=?, binding_hash=?, reconciled=1 "
+                "WHERE instance_id=?",
+                (
+                    binding.execution_environment, binding.trade_provider,
+                    binding.quote_provider, binding.quote_data_kind,
+                    binding.binding_hash, binding.instance_id,
+                ),
+            )
         return self.get_instance(config.instance_id)
 
     def get_instance(self, instance_id: str) -> dict[str, Any]:
@@ -824,6 +986,136 @@ class StrategyRuntimeStore:
         with self._connect() as db:
             rows = db.execute("SELECT * FROM strategy_instances ORDER BY instance_id").fetchall()
         return [_instance_row(row) for row in rows]
+
+    def get_execution_binding(self, instance_id: str) -> dict[str, Any]:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM execution_bindings WHERE instance_id=?", (instance_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"execution binding is missing for {instance_id!r}")
+        return _execution_binding_row(row)
+
+    def set_execution_binding(
+        self,
+        instance_id: str,
+        *,
+        execution_environment: str,
+        trade_provider: str,
+        quote_provider: str,
+        account_profile: str = "",
+    ) -> dict[str, Any]:
+        """Replace a stopped PAPER deployment's immutable execution binding.
+
+        A binding change intentionally invalidates PAPER qualification evidence.
+        Provider metadata is resolved before touching SQLite, so an uninstalled
+        or role-incompatible hot-plugged provider fails closed.
+        """
+
+        current = self.get_instance(instance_id)
+        if current["deployment_level"] != DeploymentLevel.PAPER.value:
+            raise ValueError("execution bindings can only be changed for PAPER deployments")
+        environment = ExecutionEnvironment(execution_environment)
+        if environment == ExecutionEnvironment.LIVE:
+            raise ValueError("LIVE bindings are controlled by the promotion approval flow")
+
+        if environment == ExecutionEnvironment.LOCAL_PAPER:
+            binding = ExecutionBinding(instance_id=instance_id)
+        else:
+            from alphapilot.systems.live.brokers.registry import validate_provider_pair
+            from alphapilot.systems.live.config import RunMode
+
+            trade, quote = validate_provider_pair(
+                RunMode.SIMULATION, trade_provider, quote_provider,
+            )
+            if not set(trade.capabilities.routable_assets).intersection({"stock", "fund"}):
+                raise ValueError(
+                    f"trade provider {trade.name!r} cannot route AlphaPilot A-share assets"
+                )
+            binding = ExecutionBinding(
+                instance_id=instance_id,
+                execution_environment=environment.value,
+                trade_provider=trade.name,
+                quote_provider=quote.name,
+                account_profile=account_profile,
+                quote_data_kind=quote.data_kind,
+            )
+
+        now = _now()
+        with self._lock, self._connect() as db:
+            instance = db.execute(
+                "SELECT deployment_level FROM strategy_instances WHERE instance_id=?",
+                (instance_id,),
+            ).fetchone()
+            runtime = db.execute(
+                "SELECT * FROM deployment_runtime WHERE instance_id=?", (instance_id,)
+            ).fetchone()
+            persisted = db.execute(
+                "SELECT * FROM execution_bindings WHERE instance_id=?", (instance_id,)
+            ).fetchone()
+            if instance is None or runtime is None or persisted is None:
+                raise KeyError(f"strategy deployment is missing for {instance_id!r}")
+            if instance["deployment_level"] != DeploymentLevel.PAPER.value:
+                raise RuntimeError("strategy was promoted while its binding was being changed")
+            if str(runtime["runtime_id"]):
+                raise ValueError("stop the strategy daemon before changing its execution binding")
+            if str(runtime["observed_state"]) in {
+                LifecycleState.RUNNING.value,
+                LifecycleState.WARMING_UP.value,
+            }:
+                raise ValueError("stop the strategy daemon before changing its execution binding")
+            if str(persisted["binding_hash"]) == binding.binding_hash:
+                return _execution_binding_row(persisted)
+
+            db.execute(
+                "UPDATE execution_bindings SET execution_environment=?, trade_provider=?, "
+                "quote_provider=?, account_profile=?, quote_data_kind=?, binding_hash=?, "
+                "version=version+1, updated_at=? WHERE instance_id=?",
+                (
+                    binding.execution_environment, binding.trade_provider,
+                    binding.quote_provider, binding.account_profile,
+                    binding.quote_data_kind, binding.binding_hash, now, instance_id,
+                ),
+            )
+            db.execute(
+                "DELETE FROM stage_evidence WHERE instance_id=? AND stage='paper'",
+                (instance_id,),
+            )
+            db.execute(
+                "UPDATE stage_runs SET status='invalidated', ended_at=CASE "
+                "WHEN ended_at='' THEN ? ELSE ended_at END, updated_at=? "
+                "WHERE instance_id=? AND stage='paper' AND binding_hash<>?",
+                (now, now, instance_id, binding.binding_hash),
+            )
+            db.execute(
+                "DELETE FROM qualification_projections WHERE instance_id=?", (instance_id,)
+            )
+            requires_reconcile = environment == ExecutionEnvironment.BROKER_SIMULATION
+            lifecycle = (
+                LifecycleState.PAUSED_PENDING_RECONCILE.value
+                if requires_reconcile else LifecycleState.READY.value
+            )
+            db.execute(
+                "UPDATE deployment_runtime SET execution_environment=?, trade_provider=?, "
+                "quote_provider=?, account_profile=?, quote_data_kind=?, binding_hash=?, "
+                "account_id='', broker=?, desired_state=?, observed_state=?, runtime_id='', "
+                "runner_heartbeat_at='', last_command_id='', last_error_json='{}', "
+                "reconcile_required=?, reconciled=?, binding_active=0, version=version+1, "
+                "updated_at=? WHERE instance_id=?",
+                (
+                    binding.execution_environment, binding.trade_provider,
+                    binding.quote_provider, binding.account_profile,
+                    binding.quote_data_kind, binding.binding_hash,
+                    "" if environment == ExecutionEnvironment.LOCAL_PAPER else binding.trade_provider,
+                    lifecycle, lifecycle, int(requires_reconcile), int(not requires_reconcile),
+                    now, instance_id,
+                ),
+            )
+            db.execute(
+                "UPDATE strategy_instances SET lifecycle=?, updated_at=? WHERE instance_id=?",
+                (lifecycle, now, instance_id),
+            )
+        return self.get_execution_binding(instance_id)
 
     def update_instance(self, instance_id: str, changes: dict[str, Any]) -> dict[str, Any]:
         current = self.get_instance(instance_id)
@@ -914,7 +1206,9 @@ class StrategyRuntimeStore:
         DeploymentLevel(stage)
         with self._lock, self._connect() as db:
             current = db.execute(
-                "SELECT config_hash, deployment_level FROM strategy_instances WHERE instance_id=?",
+                "SELECT si.config_hash, si.deployment_level, eb.binding_hash "
+                "FROM strategy_instances si JOIN execution_bindings eb "
+                "ON eb.instance_id=si.instance_id WHERE si.instance_id=?",
                 (instance_id,),
             ).fetchone()
             if current is None:
@@ -928,14 +1222,14 @@ class StrategyRuntimeStore:
                 raise RuntimeError("strategy config changed while stage evidence was being produced")
             db.execute(
                 "INSERT INTO stage_evidence "
-                "(instance_id, stage, passed, details_json, updated_at, config_hash) "
-                "VALUES (?, ?, ?, ?, ?, ?) "
+                "(instance_id, stage, passed, details_json, updated_at, config_hash, binding_hash) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(instance_id, stage) DO UPDATE SET passed=excluded.passed, "
                 "details_json=excluded.details_json, updated_at=excluded.updated_at, "
-                "config_hash=excluded.config_hash",
+                "config_hash=excluded.config_hash, binding_hash=excluded.binding_hash",
                 (
                     instance_id, stage, int(bool(passed)), _json(details or {}), _now(),
-                    str(current["config_hash"]),
+                    str(current["config_hash"]), str(current["binding_hash"]),
                 ),
             )
 
@@ -946,6 +1240,7 @@ class StrategyRuntimeStore:
         *,
         account_id: str = "",
         broker: str = "",
+        quote_provider: str = "",
         approval: str = "",
     ) -> dict[str, Any]:
         target = DeploymentLevel(to_level).value
@@ -968,9 +1263,15 @@ class StrategyRuntimeStore:
             ):
                 raise RuntimeError("strategy instance changed concurrently during promotion")
             current = persisted_current
+            binding = db.execute(
+                "SELECT * FROM execution_bindings WHERE instance_id=?", (instance_id,)
+            ).fetchone()
+            if binding is None:
+                raise RuntimeError("execution binding is missing during promotion")
             evidence = db.execute(
-                "SELECT passed FROM stage_evidence WHERE instance_id=? AND stage=? AND config_hash=?",
-                (instance_id, source, current["config_hash"]),
+                "SELECT passed FROM stage_evidence WHERE instance_id=? AND stage=? "
+                "AND config_hash=? AND binding_hash=?",
+                (instance_id, source, current["config_hash"], binding["binding_hash"]),
             ).fetchone()
             if evidence is None or not bool(evidence["passed"]):
                 raise ValueError(f"passing {source} evidence is required before promotion")
@@ -1020,20 +1321,73 @@ class StrategyRuntimeStore:
                 (instance_id, source, target, current["config_hash"], account_id, broker, approval_digest, _now()),
                 # approval is stored as a binding digest, never as the operator secret.
             )
-            try:
+            external_target = target in {
+                DeploymentLevel.SHADOW.value,
+                DeploymentLevel.LIVE.value,
+            }
+            external_binding_hash = ""
+            selected_trade_provider = str(broker).strip().lower()
+            selected_quote_provider = str(quote_provider).strip().lower()
+            if external_target:
+                selected_trade_provider = (
+                    selected_trade_provider or str(binding["trade_provider"]).strip().lower()
+                )
+                if not selected_quote_provider:
+                    if (
+                        str(binding["execution_environment"]) == ExecutionEnvironment.LIVE.value
+                        and str(binding["trade_provider"]).strip().lower()
+                        == selected_trade_provider
+                    ):
+                        selected_quote_provider = str(binding["quote_provider"]).strip().lower()
+                    else:
+                        selected_quote_provider = selected_trade_provider
+                external_binding_hash = _binding_hash(
+                    instance_id, ExecutionEnvironment.LIVE.value,
+                    selected_trade_provider, selected_quote_provider, "", "realtime",
+                )
                 db.execute(
-                    "UPDATE deployment_runtime SET config_hash=?, deployment_level=?, account_id=?, "
-                    "broker=?, desired_state=?, observed_state=?, reconcile_required=?, "
-                    "binding_active=?, version=version+1, updated_at=? WHERE instance_id=?",
+                    "UPDATE execution_bindings SET execution_environment='live', "
+                    "trade_provider=?, quote_provider=?, account_profile='', "
+                    "quote_data_kind='realtime', binding_hash=?, version=version+1, "
+                    "updated_at=? WHERE instance_id=?",
                     (
-                        current["config_hash"], target,
-                        account_id if target == DeploymentLevel.LIVE.value else "",
-                        broker if target == DeploymentLevel.LIVE.value else "",
-                        LifecycleState.READY.value, LifecycleState.READY.value,
-                        int(target == DeploymentLevel.LIVE.value),
-                        int(target == DeploymentLevel.LIVE.value), _now(), instance_id,
+                        selected_trade_provider, selected_quote_provider,
+                        external_binding_hash, _now(), instance_id,
                     ),
                 )
+            try:
+                if external_target:
+                    db.execute(
+                        "UPDATE deployment_runtime SET config_hash=?, deployment_level=?, "
+                        "account_id=?, broker=?, desired_state=?, observed_state=?, "
+                        "reconcile_required=?, reconciled=?, binding_active=?, "
+                        "execution_environment='live', trade_provider=?, quote_provider=?, "
+                        "account_profile='', quote_data_kind='realtime', binding_hash=?, "
+                        "version=version+1, updated_at=? WHERE instance_id=?",
+                        (
+                            current["config_hash"], target,
+                            account_id if target == DeploymentLevel.LIVE.value else "",
+                            selected_trade_provider,
+                            LifecycleState.READY.value, LifecycleState.READY.value,
+                            int(target == DeploymentLevel.LIVE.value),
+                            int(target != DeploymentLevel.LIVE.value),
+                            int(target == DeploymentLevel.LIVE.value),
+                            selected_trade_provider, selected_quote_provider,
+                            external_binding_hash, _now(), instance_id,
+                        ),
+                    )
+                else:
+                    db.execute(
+                        "UPDATE deployment_runtime SET config_hash=?, deployment_level=?, "
+                        "account_id='', broker='', desired_state=?, observed_state=?, "
+                        "reconcile_required=0, reconciled=1, binding_active=0, "
+                        "version=version+1, updated_at=? WHERE instance_id=?",
+                        (
+                            current["config_hash"], target,
+                            LifecycleState.READY.value, LifecycleState.READY.value,
+                            _now(), instance_id,
+                        ),
+                    )
             except sqlite3.IntegrityError as exc:
                 raise ValueError(f"live account already has an automated writer for {account_id}") from exc
             if target == DeploymentLevel.LIVE.value and approval_row is not None:
@@ -1053,7 +1407,9 @@ class StrategyRuntimeStore:
                 "SELECT * FROM deployment_events WHERE instance_id=? ORDER BY event_id", (instance_id,)
             ).fetchall()
             evidence = db.execute(
-                "SELECT * FROM stage_evidence WHERE instance_id=? ORDER BY stage", (instance_id,)
+                "SELECT se.* FROM stage_evidence se JOIN execution_bindings eb "
+                "ON eb.instance_id=se.instance_id AND eb.binding_hash=se.binding_hash "
+                "WHERE se.instance_id=? ORDER BY se.stage", (instance_id,)
             ).fetchall()
         return {
             "instance": current,
@@ -1063,6 +1419,7 @@ class StrategyRuntimeStore:
                 for row in evidence
             ],
             "runtime": self.get_runtime_state(instance_id),
+            "execution_binding": self.get_execution_binding(instance_id),
             "stage_runs": self.list_stage_runs(instance_id),
             "route_blocks": self.list_route_blocks(instance_id=instance_id),
         }
@@ -1087,6 +1444,8 @@ class StrategyRuntimeStore:
             "config_hash", "deployment_level", "account_id", "broker",
             "desired_state", "observed_state", "runtime_id", "runner_heartbeat_at",
             "last_command_id", "last_error", "reconcile_required", "binding_active",
+            "execution_environment", "trade_provider", "quote_provider",
+            "account_profile", "quote_data_kind", "binding_hash", "reconciled",
         }
         unknown = set(changes) - allowed
         if unknown:
@@ -1098,7 +1457,7 @@ class StrategyRuntimeStore:
             column = "last_error_json" if key == "last_error" else key
             if key == "last_error":
                 value = _json(value or {})
-            if key in {"reconcile_required", "binding_active"}:
+            if key in {"reconcile_required", "binding_active", "reconciled"}:
                 value = int(bool(value))
             values[column] = value
         assignments = ", ".join(f"{key}=?" for key in values)
@@ -1117,7 +1476,7 @@ class StrategyRuntimeStore:
                 if cursor.rowcount != 1:
                     raise RuntimeError("deployment runtime changed concurrently")
         except sqlite3.IntegrityError as exc:
-            raise ValueError("deployment binding conflicts with another active LIVE writer") from exc
+            raise ValueError("external account already has an active automated writer") from exc
         return self.get_runtime_state(instance_id)
 
     def transition_runtime(
@@ -1135,6 +1494,8 @@ class StrategyRuntimeStore:
             "config_hash", "deployment_level", "account_id", "broker",
             "desired_state", "observed_state", "runtime_id", "runner_heartbeat_at",
             "last_command_id", "last_error", "reconcile_required", "binding_active",
+            "execution_environment", "trade_provider", "quote_provider",
+            "account_profile", "quote_data_kind", "binding_hash", "reconciled",
         }
         unknown = set(changes) - allowed
         if unknown:
@@ -1144,7 +1505,7 @@ class StrategyRuntimeStore:
             column = "last_error_json" if key == "last_error" else key
             if key == "last_error":
                 value = _json(value or {})
-            if key in {"reconcile_required", "binding_active"}:
+            if key in {"reconcile_required", "binding_active", "reconciled"}:
                 value = int(bool(value))
             values[column] = value
         assignments = ", ".join(f"{key}=?" for key in values)
@@ -1169,7 +1530,7 @@ class StrategyRuntimeStore:
                 if cursor.rowcount != 1:
                     raise KeyError(f"unknown strategy instance {instance_id!r}")
         except sqlite3.IntegrityError as exc:
-            raise ValueError("deployment binding conflicts with another active LIVE writer") from exc
+            raise ValueError("external account already has an active automated writer") from exc
         return self.get_runtime_state(instance_id)
 
     def record_runtime_heartbeat(
@@ -1228,6 +1589,8 @@ class StrategyRuntimeStore:
             raise ValueError("scope_type must be global, account or instance")
         if scope == "global":
             identifier = "*"
+        elif scope == "account":
+            identifier = account_identity_hash(identifier)
         if not identifier:
             raise ValueError("scope_id is required")
         with self._lock, self._connect() as db:
@@ -1245,13 +1608,15 @@ class StrategyRuntimeStore:
         }
 
     def active_route_blocks(self, *, instance_id: str, account_id: str) -> list[dict[str, Any]]:
+        account_hash = account_identity_hash(account_id)
         with self._connect() as db:
             rows = db.execute(
                 "SELECT * FROM route_blocks WHERE active=1 AND "
                 "((scope_type='global' AND scope_id='*') OR "
                 "(scope_type='instance' AND scope_id=?) OR "
-                "(scope_type='account' AND scope_id=?)) ORDER BY scope_type, scope_id",
-                (instance_id, account_id),
+                "(scope_type='account' AND scope_id IN (?, ?))) "
+                "ORDER BY scope_type, scope_id",
+                (instance_id, account_id, account_hash),
             ).fetchall()
         return [_route_block_row(row) for row in rows]
 
@@ -1263,6 +1628,35 @@ class StrategyRuntimeStore:
                 "SELECT * FROM deployment_runtime WHERE account_id=? "
                 "AND deployment_level='live' AND binding_active=1 LIMIT 1",
                 (str(account_id),),
+            ).fetchone()
+        return None if row is None else _runtime_row(row)
+
+    def active_external_writer(
+        self,
+        *,
+        execution_environment: str,
+        trade_provider: str,
+        account_id: str = "",
+        account_profile: str = "",
+    ) -> dict[str, Any] | None:
+        """Return the single writer for a live/simulation account identity."""
+
+        environment = str(execution_environment).strip().lower()
+        provider = str(trade_provider).strip().lower()
+        if environment not in {
+            ExecutionEnvironment.BROKER_SIMULATION.value,
+            ExecutionEnvironment.LIVE.value,
+        }:
+            return None
+        identity_column = "account_id" if str(account_id).strip() else "account_profile"
+        identity = str(account_id or account_profile).strip()
+        if not identity:
+            return None
+        with self._connect() as db:
+            row = db.execute(
+                f"SELECT * FROM deployment_runtime WHERE execution_environment=? "
+                f"AND trade_provider=? AND {identity_column}=? AND binding_active=1 LIMIT 1",
+                (environment, provider, identity),
             ).fetchone()
         return None if row is None else _runtime_row(row)
 
@@ -1294,6 +1688,7 @@ class StrategyRuntimeStore:
                 f"cannot start {stage} run while instance is {current['deployment_level']}"
             )
         identifier = str(run_id or uuid.uuid4().hex)
+        binding_hash = self.get_execution_binding(instance_id)["binding_hash"]
         now = _now()
         with self._lock, self._connect() as db:
             persisted = db.execute(
@@ -1309,9 +1704,12 @@ class StrategyRuntimeStore:
                 raise RuntimeError("strategy instance changed concurrently before stage run start")
             db.execute(
                 "INSERT INTO stage_runs "
-                "(run_id, instance_id, stage, config_hash, status, started_at, updated_at) "
-                "VALUES (?, ?, ?, ?, 'running', ?, ?)",
-                (identifier, instance_id, stage, current["config_hash"], now, now),
+                "(run_id, instance_id, stage, config_hash, status, started_at, updated_at, binding_hash) "
+                "VALUES (?, ?, ?, ?, 'running', ?, ?, ?)",
+                (
+                    identifier, instance_id, stage, current["config_hash"], now, now,
+                    binding_hash,
+                ),
             )
         return self.get_stage_run(identifier)
 
@@ -1322,18 +1720,19 @@ class StrategyRuntimeStore:
         stage: str | None = None,
     ) -> dict[str, Any] | None:
         current = self.get_instance(instance_id)
+        binding_hash = self.get_execution_binding(instance_id)["binding_hash"]
         with self._connect() as db:
             if stage is None:
                 row = db.execute(
                     "SELECT * FROM stage_runs WHERE instance_id=? AND config_hash=? "
-                    "AND status='running' ORDER BY started_at DESC LIMIT 1",
-                    (instance_id, current["config_hash"]),
+                    "AND binding_hash=? AND status='running' ORDER BY started_at DESC LIMIT 1",
+                    (instance_id, current["config_hash"], binding_hash),
                 ).fetchone()
             else:
                 row = db.execute(
                     "SELECT * FROM stage_runs WHERE instance_id=? AND stage=? AND config_hash=? "
-                    "AND status='running' ORDER BY started_at DESC LIMIT 1",
-                    (instance_id, stage, current["config_hash"]),
+                    "AND binding_hash=? AND status='running' ORDER BY started_at DESC LIMIT 1",
+                    (instance_id, stage, current["config_hash"], binding_hash),
                 ).fetchone()
         return None if row is None else _stage_run_row(row)
 
@@ -1345,11 +1744,13 @@ class StrategyRuntimeStore:
         stage: str,
         session: str,
     ) -> bool:
+        binding_hash = self.get_execution_binding(instance_id)["binding_hash"]
         with self._lock, self._connect() as db:
             run = db.execute(
                 "SELECT run_id FROM stage_runs WHERE instance_id=? AND stage=? "
-                "AND config_hash=? AND status='running' ORDER BY started_at DESC LIMIT 1",
-                (instance_id, stage, config_hash),
+                "AND config_hash=? AND binding_hash=? AND status='running' "
+                "ORDER BY started_at DESC LIMIT 1",
+                (instance_id, stage, config_hash, binding_hash),
             ).fetchone()
             if run is None:
                 return False
@@ -1374,11 +1775,13 @@ class StrategyRuntimeStore:
         count: int = 1,
         details: Any = None,
     ) -> bool:
+        binding_hash = self.get_execution_binding(instance_id)["binding_hash"]
         with self._lock, self._connect() as db:
             run = db.execute(
                 "SELECT run_id FROM stage_runs WHERE instance_id=? AND stage=? "
-                "AND config_hash=? AND status='running' ORDER BY started_at DESC LIMIT 1",
-                (instance_id, stage, config_hash),
+                "AND config_hash=? AND binding_hash=? AND status='running' "
+                "ORDER BY started_at DESC LIMIT 1",
+                (instance_id, stage, config_hash, binding_hash),
             ).fetchone()
             if run is None:
                 return False
@@ -1476,9 +1879,13 @@ class StrategyRuntimeStore:
         config_hash: str | None = None,
         started_after: str = "",
     ) -> list[str]:
-        current_hash = config_hash or self.get_instance(instance_id)["config_hash"]
+        current = self.get_instance(instance_id)
+        current_hash = config_hash or current["config_hash"]
+        binding_hash = self._stage_evaluation_binding_hash(
+            instance_id, stage, config_hash=current_hash, current=current,
+        )
         after_clause = " AND r.started_at>=?" if started_after else ""
-        values: list[Any] = [instance_id, stage, current_hash]
+        values: list[Any] = [instance_id, stage, current_hash, binding_hash]
         if started_after:
             values.append(str(started_after))
         with self._connect() as db:
@@ -1486,10 +1893,43 @@ class StrategyRuntimeStore:
                 "SELECT DISTINCT s.session FROM stage_run_sessions s "
                 "JOIN stage_runs r ON r.run_id=s.run_id "
                 "WHERE r.instance_id=? AND r.stage=? AND r.config_hash=? "
-                "AND r.status='completed'" + after_clause + " ORDER BY s.session",
+                "AND r.binding_hash=? AND r.status='completed'" + after_clause + " ORDER BY s.session",
                 values,
             ).fetchall()
         return [str(row["session"]) for row in rows]
+
+    def _stage_evaluation_binding_hash(
+        self,
+        instance_id: str,
+        stage: str,
+        *,
+        config_hash: str,
+        current: dict[str, Any],
+    ) -> str:
+        """Resolve current-stage or promotion-consumed historical evidence.
+
+        A binding change while an instance remains in PAPER must invalidate its
+        old evidence.  Once PAPER has been promoted to SHADOW, however, that
+        transition has already atomically verified and consumed the PAPER
+        evidence before switching to the live-provider binding.  Qualification
+        can therefore continue to evaluate the recorded source-stage binding.
+        """
+
+        current_binding_hash = self.get_execution_binding(instance_id)["binding_hash"]
+        levels = [item.value for item in DeploymentLevel]
+        if levels.index(current["deployment_level"]) <= levels.index(stage):
+            return str(current_binding_hash)
+        with self._connect() as db:
+            consumed = db.execute(
+                "SELECT binding_hash FROM stage_evidence WHERE instance_id=? AND stage=? "
+                "AND config_hash=? AND passed=1",
+                (instance_id, stage, config_hash),
+            ).fetchone()
+        return (
+            str(consumed["binding_hash"])
+            if consumed is not None and str(consumed["binding_hash"])
+            else str(current_binding_hash)
+        )
 
     def evaluate_stage(
         self,
@@ -1501,10 +1941,14 @@ class StrategyRuntimeStore:
     ) -> dict[str, Any]:
         DeploymentLevel(stage)
         current = self.get_instance(instance_id)
+        binding_hash = self._stage_evaluation_binding_hash(
+            instance_id, stage, config_hash=current["config_hash"], current=current,
+        )
         runs = [
             row for row in self.list_stage_runs(instance_id)
             if row["stage"] == stage
             and row["config_hash"] == current["config_hash"]
+            and row["binding_hash"] == binding_hash
             and row["status"] == "completed"
             and (not started_after or str(row["started_at"]) >= str(started_after))
         ]
@@ -1561,6 +2005,7 @@ class StrategyRuntimeStore:
         passed = sessions >= int(minimum_sessions) and not any(failures.values())
         details = {
             "config_hash": current["config_hash"],
+            "binding_hash": binding_hash,
             "minimum_sessions": int(minimum_sessions),
             "started_after": str(started_after),
             "trading_sessions": sessions,
@@ -2838,8 +3283,8 @@ class StrategyRuntimeStore:
         sdk_hash: str = "",
         run_id: str | None = None,
     ) -> dict[str, Any]:
-        if str(broker).lower() not in {"xtp", "emt"}:
-            raise ValueError("broker UAT supports xtp or emt")
+        if str(broker).lower() not in {"xtp", "emt", "tts"}:
+            raise ValueError("broker UAT supports xtp, emt or tts")
         if float(max_notional) <= 0:
             raise ValueError("broker UAT max_notional must be positive")
         if int(scenario_version) not in {1, 2}:
@@ -3436,6 +3881,12 @@ def _runtime_row(row: sqlite3.Row) -> dict[str, Any]:
         "deployment_level": row["deployment_level"],
         "account_id": row["account_id"],
         "broker": row["broker"],
+        "execution_environment": row["execution_environment"],
+        "trade_provider": row["trade_provider"],
+        "quote_provider": row["quote_provider"],
+        "account_profile": row["account_profile"],
+        "quote_data_kind": row["quote_data_kind"],
+        "binding_hash": row["binding_hash"],
         "desired_state": row["desired_state"],
         "observed_state": row["observed_state"],
         "runtime_id": row["runtime_id"],
@@ -3443,6 +3894,7 @@ def _runtime_row(row: sqlite3.Row) -> dict[str, Any]:
         "last_command_id": row["last_command_id"],
         "last_error": json.loads(row["last_error_json"] or "{}"),
         "reconcile_required": bool(row["reconcile_required"]),
+        "reconciled": bool(row["reconciled"]),
         "binding_active": bool(row["binding_active"]),
         "version": int(row["version"]),
         "updated_at": row["updated_at"],
@@ -3465,11 +3917,26 @@ def _stage_run_row(row: sqlite3.Row) -> dict[str, Any]:
         "instance_id": row["instance_id"],
         "stage": row["stage"],
         "config_hash": row["config_hash"],
+        "binding_hash": row["binding_hash"],
         "status": row["status"],
         "started_at": row["started_at"],
         "ended_at": row["ended_at"],
         "trading_sessions": int(row["trading_sessions"]),
         "metrics": json.loads(row["metrics_json"] or "{}"),
+        "updated_at": row["updated_at"],
+    }
+
+
+def _execution_binding_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "instance_id": row["instance_id"],
+        "execution_environment": row["execution_environment"],
+        "trade_provider": row["trade_provider"],
+        "quote_provider": row["quote_provider"],
+        "account_profile": row["account_profile"],
+        "quote_data_kind": row["quote_data_kind"],
+        "binding_hash": row["binding_hash"],
+        "version": int(row["version"]),
         "updated_at": row["updated_at"],
     }
 
@@ -3670,6 +4137,25 @@ def _execute_script(db: sqlite3.Connection, script: str) -> None:
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _binding_hash(
+    instance_id: str,
+    execution_environment: str,
+    trade_provider: str,
+    quote_provider: str,
+    account_profile: str,
+    quote_data_kind: str,
+) -> str:
+    raw = _json({
+        "instance_id": str(instance_id),
+        "execution_environment": str(execution_environment).strip().lower(),
+        "trade_provider": str(trade_provider).strip().lower(),
+        "quote_provider": str(quote_provider).strip().lower(),
+        "account_profile": str(account_profile).strip(),
+        "quote_data_kind": str(quote_data_kind).strip().lower(),
+    })
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _now() -> str:

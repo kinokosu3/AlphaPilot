@@ -1,4 +1,4 @@
-"""Local-only, event-derived XTP/EMT acceptance harness.
+"""Local-only, event-derived XTP/EMT/TTS acceptance harness.
 
 The harness intentionally has no HTTP mutation surface.  It uses the same
 runtime, OMS and risk gate as normal LIVE trading, but routes through the
@@ -26,6 +26,7 @@ from typing import Any, Callable
 from alphapilot.systems.live.brokers.registry import get_broker
 from alphapilot.systems.live.types import normalize_symbol, symbol_key
 from alphapilot.systems.live.redaction import redact_secrets
+from alphapilot.systems.trading.account_identity import account_identity_hash
 from alphapilot.systems.trading.ports import RouteContext, RouteOrigin
 
 
@@ -75,8 +76,8 @@ class BrokerUATHarness:
         """Connect read-only and return redacted, executable UAT candidates."""
 
         selected = str(broker).strip().lower()
-        if selected not in {"xtp", "emt"}:
-            raise ValueError("broker must be xtp or emt")
+        if selected not in {"xtp", "emt", "tts"}:
+            raise ValueError("broker must be xtp, emt or tts")
         configured_cap = float(os.getenv("ALPHAPILOT_BROKER_UAT_MAX_NOTIONAL", "0") or 0)
         cap = min(float(max_notional), configured_cap) if configured_cap > 0 else float(max_notional)
         if cap <= 0:
@@ -237,8 +238,8 @@ class BrokerUATHarness:
                     "resume the Broker UAT from a newly started local CLI process"
                 )
         run = self.store.resume_broker_uat_run(run_id)
-        if run["broker"] not in {"xtp", "emt"}:
-            raise ValueError("only XTP and EMT UAT runs can be resumed")
+        if run["broker"] not in {"xtp", "emt", "tts"}:
+            raise ValueError("only XTP, EMT and TTS UAT runs can be resumed")
         self._record_preflight(
             run_id, request=request, metadata=metadata, timeout=timeout,
         )
@@ -813,10 +814,13 @@ class BrokerUATHarness:
         return {"checks": checks}
 
     def _route_block(self, scope: str, scope_id: str) -> dict[str, Any] | None:
+        expected_id = (
+            account_identity_hash(scope_id) if scope == "account" else scope_id
+        )
         return next(
             (
                 item for item in self.store.list_route_blocks()
-                if item["scope_type"] == scope and item["scope_id"] == scope_id
+                if item["scope_type"] == scope and item["scope_id"] == expected_id
             ),
             None,
         )
@@ -833,8 +837,8 @@ class BrokerUATHarness:
     def _preflight_request(self, **payload: Any) -> dict[str, Any]:
         self._require_enabled(str(payload.get("confirmation") or ""))
         broker = str(payload.get("broker") or "").strip().lower()
-        if broker not in {"xtp", "emt"}:
-            raise ValueError("broker must be xtp or emt")
+        if broker not in {"xtp", "emt", "tts"}:
+            raise ValueError("broker must be xtp, emt or tts")
         if not str(os.getenv("ALPHAPILOT_BROKER_UAT_ENVIRONMENT") or "").strip():
             raise ValueError("ALPHAPILOT_BROKER_UAT_ENVIRONMENT is required")
         code, exchange = normalize_symbol(str(payload.get("symbol") or ""))
@@ -907,7 +911,7 @@ def _plugin_metadata(broker: str) -> dict[str, str]:
 
 
 def _provider_preflight(broker: str, timeout: float) -> dict[str, Any]:
-    """Verify both provider channels without persisting endpoints or credentials."""
+    """Verify trade and independent quote channels without persisting secrets."""
 
     from alphapilot.systems.live.brokers.registry import (
         build_connect_setting,
@@ -919,28 +923,30 @@ def _provider_preflight(broker: str, timeout: float) -> dict[str, Any]:
         provider_availability,
     )
 
+    quote_provider = _uat_quote_provider(broker)
     checks: list[dict[str, Any]] = []
-    for role, spec, missing, build_setting in (
+    for role, provider, spec, missing, build_setting in (
         (
             "trade",
+            broker,
             get_broker(broker),
             missing_setting_fields(broker),
             build_connect_setting,
         ),
         (
             "quote",
-            get_quote_provider(broker),
-            missing_quote_setting_fields(broker),
+            quote_provider,
+            get_quote_provider(quote_provider),
+            missing_quote_setting_fields(quote_provider),
             build_quote_connect_setting,
         ),
     ):
-        available, availability_detail = provider_availability(broker, role=role)
+        available, availability_detail = provider_availability(provider, role=role)
         endpoint_checks: list[dict[str, Any]] = []
         if available and not missing:
-            setting = build_setting(broker)
+            setting = build_setting(provider)
             for endpoint in spec.endpoints:
-                host = setting.get(endpoint.host_key)
-                port = setting.get(endpoint.port_key)
+                host, port = _endpoint_host_port(setting, endpoint)
                 if not host or not port:
                     continue
                 try:
@@ -959,6 +965,7 @@ def _provider_preflight(broker: str, timeout: float) -> dict[str, Any]:
                 })
         checks.append({
             "role": role,
+            "provider": provider,
             "available": bool(available),
             "availability": redact_secrets(str(availability_detail)),
             "missing_setting_fields": sorted(str(item) for item in missing),
@@ -976,6 +983,38 @@ def _provider_preflight(broker: str, timeout: float) -> dict[str, Any]:
         },
         "channels": checks,
     }
+
+
+def _uat_quote_provider(broker: str) -> str:
+    selected = str(broker).strip().lower()
+    if selected != "tts":
+        return selected
+    quote = str(os.getenv("ALPHAPILOT_BROKER_UAT_QUOTE_PROVIDER") or "").strip().lower()
+    if not quote:
+        raise ValueError(
+            "ALPHAPILOT_BROKER_UAT_QUOTE_PROVIDER is required for TTS UAT"
+        )
+    from alphapilot.systems.live.brokers.registry import get_quote_provider
+
+    spec = get_quote_provider(quote)
+    if spec.data_kind != "realtime":
+        raise ValueError("TTS UAT requires a realtime quote provider")
+    return quote
+
+
+def _endpoint_host_port(setting: dict[str, Any], endpoint: Any) -> tuple[str, int]:
+    raw_host = str(setting.get(endpoint.host_key) or "").strip()
+    raw_port = setting.get(endpoint.port_key) if str(endpoint.port_key or "") else None
+    if raw_port not in {None, ""}:
+        return raw_host, int(raw_port)
+    address = raw_host.split("://", 1)[-1]
+    if ":" not in address:
+        return "", 0
+    host, port = address.rsplit(":", 1)
+    try:
+        return host.strip("[]"), int(port)
+    except ValueError:
+        return "", 0
 
 
 def _distribution_hash(name: str) -> str:
@@ -1006,6 +1045,7 @@ def _native_sdk_hash(broker: str) -> str:
     module_name = {
         "xtp": "alphapilot_xtpx.api",
         "emt": "alphapilot_emt.api",
+        "tts": "alphapilot_ttsapi.api",
     }.get(str(broker).lower(), "")
     if not module_name:
         raise ValueError(f"unsupported Broker SDK {broker!r}")
@@ -1013,7 +1053,12 @@ def _native_sdk_hash(broker: str) -> str:
     if module_spec is None or not module_spec.origin:
         raise ValueError(f"installed {broker} native SDK module is unavailable")
     root = Path(module_spec.origin).resolve().parent
-    artifacts = sorted(path for path in root.glob("*.so") if path.is_file())
+    artifacts = sorted({
+        path
+        for pattern in ("*.so", "*.pyd", "*.dll", "*.dylib")
+        for path in root.glob(pattern)
+        if path.is_file()
+    })
     if not artifacts:
         raise ValueError(f"installed {broker} native SDK artifacts could not be hashed")
     digest = hashlib.sha256()

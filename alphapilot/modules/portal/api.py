@@ -31,6 +31,7 @@ from alphapilot.modules.portal.settings import (
     save_portal_settings,
     settings_path,
 )
+from alphapilot.systems.trading.account_identity import public_account_state
 
 def _jsonable(value: Any) -> Any:
     if is_dataclass(value):
@@ -1263,7 +1264,51 @@ def create_app(
     @app.get("/api/trading/deployments/{instance_id}")
     def trading_deployment(instance_id: str) -> dict[str, Any]:
         try:
-            return _jsonable(_engine(app).get_system("trading").deployment(instance_id))
+            return _jsonable(public_account_state(
+                _engine(app).get_system("trading").deployment(instance_id)
+            ))
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.get("/api/trading/deployments/{instance_id}/execution-binding")
+    def trading_execution_binding(instance_id: str) -> dict[str, Any]:
+        try:
+            return _jsonable(
+                _engine(app).get_system("trading").execution_binding(instance_id)
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.put("/api/trading/deployments/{instance_id}/execution-binding")
+    def trading_execution_binding_update(
+        instance_id: str,
+        payload: dict[str, Any],
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        try:
+            reason = str(payload.get("reason") or "").strip()
+            if not reason:
+                raise ValueError("execution binding changes require an operator reason")
+            operator = _trading_operator(app, request, authorization, reason=reason)
+            trading = _engine(app).get_system("trading")
+            result = trading.bind_execution(instance_id, payload)
+            current = trading.store.get_instance(instance_id)
+            trading.operator_auth.audit(
+                operator,
+                action="bind_execution",
+                result="ok",
+                instance_id=instance_id,
+                config_hash=current["config_hash"],
+                broker=result["trade_provider"],
+                details={
+                    "execution_environment": result["execution_environment"],
+                    "trade_provider": result["trade_provider"],
+                    "quote_provider": result["quote_provider"],
+                    "binding_hash": result["binding_hash"],
+                },
+            )
+            return _jsonable(result)
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
@@ -1300,9 +1345,9 @@ def create_app(
     ) -> dict[str, Any]:
         try:
             operator = _trading_operator(app, request, authorization, reason=str(payload.get("reason") or ""))
-            return _jsonable(
+            return _jsonable(public_account_state(
                 _engine(app).get_system("trading").authorize_live(instance_id, payload, operator)
-            )
+            ))
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
@@ -1369,7 +1414,7 @@ def create_app(
             instance_id=instance_id, config_hash=current["config_hash"],
             account_id=runtime["account_id"], broker=runtime["broker"], details=result,
         )
-        return _jsonable(result)
+        return _jsonable(public_account_state(result))
 
     for _action in ("start", "pause", "reconcile", "resume", "stop"):
         def _make_action(action_name: str):
@@ -1393,7 +1438,9 @@ def create_app(
     @app.get("/api/trading/deployments/{instance_id}/status")
     def trading_deployment_status(instance_id: str) -> dict[str, Any]:
         try:
-            return _jsonable(_engine(app).get_system("trading").lifecycle_action(instance_id, "status"))
+            return _jsonable(public_account_state(
+                _engine(app).get_system("trading").lifecycle_action(instance_id, "status")
+            ))
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
@@ -1419,7 +1466,9 @@ def create_app(
     def trading_audit_events(limit: int = 200) -> dict[str, Any]:
         try:
             return _jsonable({
-                "events": _engine(app).get_system("trading").audit_events(limit=limit)
+                "events": public_account_state(
+                    _engine(app).get_system("trading").audit_events(limit=limit)
+                )
             })
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
@@ -2057,16 +2106,16 @@ def create_app(
             raise _api_error(exc) from exc
 
     @app.get("/api/live/brokers")
-    def live_brokers() -> list[dict[str, Any]]:
+    def live_brokers(account_kind: str | None = None) -> list[dict[str, Any]]:
         try:
-            return _jsonable(_live_module().live_brokers())
+            return _jsonable(_live_module().live_brokers(account_kind=account_kind))
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
     @app.get("/api/live/quote-providers")
-    def live_quote_providers() -> list[dict[str, Any]]:
+    def live_quote_providers(data_kind: str | None = None) -> list[dict[str, Any]]:
         try:
-            return _jsonable(_live_module().live_quote_providers())
+            return _jsonable(_live_module().live_quote_providers(data_kind=data_kind))
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
@@ -2289,6 +2338,10 @@ def create_app(
         try:
             return _jsonable(
                 _live_module().live_daemon_stop(
+                    mode=payload.get("mode"),
+                    broker=payload.get("broker"),
+                    trade_broker=payload.get("trade_broker"),
+                    quote_provider=payload.get("quote_provider"),
                     state_dir=payload.get("state_dir"),
                     timeout=float(payload.get("timeout") or 5.0),
                 )
@@ -2302,6 +2355,10 @@ def create_app(
             return _jsonable(
                 _live_module().live_daemon_halt(
                     reason=str(payload.get("reason") or "portal"),
+                    mode=payload.get("mode"),
+                    broker=payload.get("broker"),
+                    trade_broker=payload.get("trade_broker"),
+                    quote_provider=payload.get("quote_provider"),
                     state_dir=payload.get("state_dir"),
                     wait=bool(payload.get("wait", False)),
                     timeout=float(payload.get("timeout") or 5.0),
@@ -2315,6 +2372,10 @@ def create_app(
         try:
             return _jsonable(
                 _live_module().live_daemon_resume(
+                    mode=payload.get("mode"),
+                    broker=payload.get("broker"),
+                    trade_broker=payload.get("trade_broker"),
+                    quote_provider=payload.get("quote_provider"),
                     state_dir=payload.get("state_dir"),
                     wait=bool(payload.get("wait", False)),
                     timeout=float(payload.get("timeout") or 5.0),
@@ -2328,6 +2389,10 @@ def create_app(
         try:
             return _jsonable(
                 _live_module().live_daemon_refresh(
+                    mode=payload.get("mode"),
+                    broker=payload.get("broker"),
+                    trade_broker=payload.get("trade_broker"),
+                    quote_provider=payload.get("quote_provider"),
                     state_dir=payload.get("state_dir"),
                     wait=bool(payload.get("wait", False)),
                     timeout=float(payload.get("timeout") or 5.0),
@@ -2341,6 +2406,10 @@ def create_app(
         try:
             return _jsonable(
                 _live_module().live_daemon_reconnect(
+                    mode=payload.get("mode"),
+                    broker=payload.get("broker"),
+                    trade_broker=payload.get("trade_broker"),
+                    quote_provider=payload.get("quote_provider"),
                     state_dir=payload.get("state_dir"),
                     wait=bool(payload.get("wait", False)),
                     timeout=float(payload.get("timeout") or 20.0),
@@ -2359,6 +2428,10 @@ def create_app(
                     order_id=str(payload.get("order_id") or ""),
                     symbol=payload.get("symbol") or payload.get("code"),
                     force=bool(payload.get("force", False)),
+                    mode=payload.get("mode"),
+                    broker=payload.get("broker"),
+                    trade_broker=payload.get("trade_broker"),
+                    quote_provider=payload.get("quote_provider"),
                     state_dir=payload.get("state_dir"),
                     wait=bool(payload.get("wait", False)),
                     timeout=float(payload.get("timeout") or 5.0),
@@ -2381,6 +2454,10 @@ def create_app(
                     exchange=payload.get("exchange"),
                     offset=str(payload.get("offset") or "none"),
                     product=str(payload.get("product") or "equity"),
+                    mode=payload.get("mode"),
+                    broker=payload.get("broker"),
+                    trade_broker=payload.get("trade_broker"),
+                    quote_provider=payload.get("quote_provider"),
                     state_dir=payload.get("state_dir"),
                     wait=bool(payload.get("wait", False)),
                     timeout=float(payload.get("timeout") or 5.0),
@@ -2410,6 +2487,10 @@ def create_app(
                     yaml_params=payload.get("yaml_params"),
                     refresh_data=bool(payload.get("refresh_data", False)),
                     route=bool(payload.get("route", False)),
+                    mode=payload.get("mode"),
+                    broker=payload.get("broker"),
+                    trade_broker=payload.get("trade_broker"),
+                    quote_provider=payload.get("quote_provider"),
                     state_dir=payload.get("state_dir"),
                     wait=bool(payload.get("wait", False)),
                     timeout=float(payload.get("timeout") or 5.0),
@@ -2510,7 +2591,9 @@ def create_app(
         if assets_path.exists():
             app.mount("/assets", StaticFiles(directory=assets_path), name="assets")
 
-        @app.get("/{full_path:path}")
+        # The SPA fallback is an implementation detail, not a public API. Keep
+        # OpenAPI stable whether the optional frontend build output is present.
+        @app.get("/{full_path:path}", include_in_schema=False)
         def spa(full_path: str) -> FileResponse:  # noqa: ARG001
             index_path = static_path / "index.html"
             if not index_path.exists():

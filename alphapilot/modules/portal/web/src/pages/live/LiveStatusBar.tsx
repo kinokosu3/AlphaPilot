@@ -4,7 +4,7 @@ import type { LiveDaemonStatus } from "./types";
 import { fmtMoney } from "./utils";
 
 type Props = {
-  workspace: "live" | "paper";
+  workspace: "live" | "simulation" | "paper";
   runtimeMode: string;
   tradeBroker: string;
   quoteProvider: string;
@@ -46,9 +46,9 @@ export function LiveStatusBar({
   const halted = Boolean(engine?.halted);
 
   return (
-    <section className={`live-workspace-status ${workspace === "live" ? "is-live" : "is-paper"}`} aria-label={t("liveWorkspaceStatus")}>
+    <section className={`live-workspace-status is-${workspace}`} aria-label={t("liveWorkspaceStatus")}>
       <div className="live-status-context">
-        <span className={`live-environment-badge ${workspace}`}>{workspace === "live" ? t("liveEnvironmentLive") : t("liveEnvironmentPaper")}</span>
+        <span className={`live-environment-badge ${workspace}`}>{workspace === "live" ? t("liveEnvironmentLive") : workspace === "simulation" ? t("liveEnvironmentSimulation") : t("liveEnvironmentPaper")}</span>
         <span><small>{t("liveTradeBroker")}</small><strong>{tradeBroker || "—"}</strong></span>
         <span><small>{t("liveQuoteProvider")}</small><strong>{quoteProvider || "—"}</strong></span>
         <span><small>{t("liveConnection")}</small><StatusPill status={daemon?.running ? engine?.connection || "connected" : "disconnected"} /></span>

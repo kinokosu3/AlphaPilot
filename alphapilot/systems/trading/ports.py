@@ -37,6 +37,11 @@ class RouteContext:
     broker: str = ""
     deployment_level: str = ""
     runtime_id: str = ""
+    execution_environment: str = ""
+    trade_provider: str = ""
+    quote_provider: str = ""
+    quote_data_kind: str = ""
+    binding_hash: str = ""
     uat_run_id: str = ""
 
     @classmethod

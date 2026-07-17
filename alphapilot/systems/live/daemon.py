@@ -19,6 +19,7 @@ from alphapilot.systems.live.market_data import market_snapshot_path
 from alphapilot.systems.live.runtime import clone_config, require_live_confirmation
 from alphapilot.systems.live.state_io import atomic_write_json
 from alphapilot.systems.live.targets import TargetPortfolio, parse_target_positions
+from alphapilot.systems.trading.account_identity import account_identity_hash
 from alphapilot.systems.trading.ports import RouteContext, RouteOrigin
 
 
@@ -228,6 +229,7 @@ def start_daemon(
     bar_seconds: int = 60,
     record_market_data: bool | None = None,
     runtime_id: str | None = None,
+    strategy_store_path: str | Path | None = None,
 ) -> dict[str, Any]:
     selected_mode = mode or config.mode
     trade_override = trade_broker or broker
@@ -253,8 +255,13 @@ def start_daemon(
             missing_quote_setting_fields,
             missing_setting_fields,
             provider_pair_metadata,
+            validate_provider_pair,
         )
 
+        _, quote_spec = validate_provider_pair(
+            cfg.mode, cfg.trade_broker, cfg.quote_provider,
+        )
+        cfg.quote_data_kind = quote_spec.data_kind
         plugin_selection = provider_pair_metadata(cfg.trade_broker, cfg.quote_provider)
         unavailable = [
             row
@@ -320,12 +327,21 @@ def start_daemon(
     if strategy_instance_id:
         args.extend(["--strategy-instance-id", str(strategy_instance_id)])
         args.extend(["--bar-seconds", str(int(bar_seconds))])
+    if strategy_store_path:
+        args.extend(["--strategy-store-path", str(Path(strategy_store_path).expanduser())])
 
+    child_env = os.environ.copy()
+    child_env["ALPHAPILOT_LIVE_MARKET_DATA_DIR"] = str(cfg.market_data.data_dir)
+    child_env["ALPHAPILOT_EXECUTION_ENVIRONMENT"] = str(cfg.execution_environment)
+    if strategy_store_path:
+        child_env["ALPHAPILOT_STRATEGY_RUNTIME_STORE"] = str(
+            Path(strategy_store_path).expanduser()
+        )
     with log_path.open("ab") as log:
         proc = subprocess.Popen(  # noqa: S603 - args are constructed, not shell-expanded
             args,
             cwd=Path.cwd(),
-            env=os.environ.copy(),
+            env=child_env,
             stdout=log,
             stderr=subprocess.STDOUT,
             start_new_session=True,
@@ -586,7 +602,10 @@ def _apply_command(
                     position.key: float(position.volume)
                     for position in runtime.engine.oms.get_positions() if position.volume > 0
                 },
-                metadata={"source": "live_daemon_oms", "account_id": str(account.account_id)},
+                metadata={
+                    "source": "live_daemon_oms",
+                    "account_id_hash": account_identity_hash(str(account.account_id)),
+                },
             )
             daily = generate_daily_signal(
                 kernel_engine.context,
@@ -650,6 +669,8 @@ def _apply_command(
             runner = _require_runner(runner_holder)
             runner.pause()
             recovery = runtime.recover()
+            if not list(recovery.get("warnings") or []):
+                runtime.accept_recovery_baseline()
             result["message"] = "strategy_reconciled"
             result["recovery"] = recovery
             result["runner_status"] = runner.mark_reconciled(recovery)
@@ -842,6 +863,7 @@ def _build_strategy_instance_runner(
 
     expected_level = {
         RunMode.PAPER: "paper",
+        RunMode.SIMULATION: "paper",
         RunMode.SHADOW: "shadow",
         RunMode.LIVE: "live",
     }.get(engine.config.mode)
@@ -892,6 +914,7 @@ def run_daemon(
     bar_seconds: int = 60,
     record_market_data: bool | None = None,
     runtime_id: str | None = None,
+    strategy_store_path: str | Path | None = None,
 ) -> int:
     from alphapilot.kernel import build_engine
 
@@ -917,8 +940,15 @@ def run_daemon(
     )
     plugin_selection = None
     if uses_real_providers(cfg.mode):
-        from alphapilot.systems.live.brokers.registry import provider_pair_metadata
+        from alphapilot.systems.live.brokers.registry import (
+            provider_pair_metadata,
+            validate_provider_pair,
+        )
 
+        _, quote_spec = validate_provider_pair(
+            cfg.mode, cfg.trade_broker, cfg.quote_provider,
+        )
+        cfg.quote_data_kind = quote_spec.data_kind
         plugin_selection = provider_pair_metadata(cfg.trade_broker, cfg.quote_provider)
     stop = False
 
@@ -929,6 +959,15 @@ def run_daemon(
     signal.signal(signal.SIGTERM, _handle_stop)
     signal.signal(signal.SIGINT, _handle_stop)
 
+    # Formal deployments share one control database while every bound runtime
+    # owns isolated daemon/state/ledger/market-data files.
+    if strategy_store_path:
+        os.environ["ALPHAPILOT_STRATEGY_RUNTIME_STORE"] = str(
+            Path(strategy_store_path).expanduser()
+        )
+    os.environ["ALPHAPILOT_LIVE_STATE_DIR"] = str(cfg.state_dir)
+    os.environ["ALPHAPILOT_LIVE_LEDGER_DIR"] = str(cfg.ledger_dir)
+    os.environ["ALPHAPILOT_LIVE_MARKET_DATA_DIR"] = str(cfg.market_data.data_dir)
     engine = build_engine()
     runtime = engine.get_system("live").create_runtime(
         mode=cfg.mode,
@@ -969,6 +1008,21 @@ def run_daemon(
             runtime.enable_market_data(symbols, recording=record_market_data)
         runtime.connect(paper_cash=cash)
         ready = runtime.wait_ready(timeout=timeout)
+        if strategy_instance_id and cfg.mode == RunMode.SIMULATION and not ready:
+            snapshot = getattr(runtime.engine.trade_gateway, "reconciliation_snapshot", None)
+            detail = snapshot() if callable(snapshot) else {}
+            raise RuntimeError(
+                "simulation counter did not finish account/position/order/trade reconciliation: "
+                + json.dumps(detail, ensure_ascii=False, default=str)
+            )
+        if cfg.mode == RunMode.SIMULATION:
+            recovery = runtime.recover()
+            if recovery.get("warnings"):
+                runtime.engine.halt(
+                    "simulation startup reconciliation has unresolved warnings"
+                )
+            elif not strategy_instance_id:
+                runtime.accept_recovery_baseline()
         runner = _build_strategy_instance_runner(
             runtime.engine,
             symbols or [],
@@ -1080,6 +1134,7 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--runtime-id")
     run.add_argument("--duration", type=float)
     run.add_argument("--strategy-instance-id")
+    run.add_argument("--strategy-store-path")
     run.add_argument("--bar-seconds", type=int, default=60)
     run.add_argument("--record-market-data", action=argparse.BooleanOptionalAction, default=None)
     ns = parser.parse_args(argv)
@@ -1098,6 +1153,7 @@ def main(argv: list[str] | None = None) -> int:
             runtime_id=ns.runtime_id,
             duration=ns.duration,
             strategy_instance_id=ns.strategy_instance_id,
+            strategy_store_path=ns.strategy_store_path,
             bar_seconds=ns.bar_seconds,
             record_market_data=ns.record_market_data,
         )

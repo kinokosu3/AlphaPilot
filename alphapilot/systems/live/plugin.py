@@ -15,6 +15,8 @@ PLUGIN_API_VERSION = 1
 TRADE_ROLE = "trade"
 QUOTE_ROLE = "quote"
 GatewayRoles = FrozenSet[str]
+ACCOUNT_KINDS = frozenset({"live", "simulation", "local"})
+DATA_KINDS = frozenset({"realtime", "replay", "synthetic"})
 
 
 @dataclass(frozen=True)
@@ -48,7 +50,15 @@ class GatewayCapabilities:
     """Capability metadata consumed by the CLI, Portal and risk layer."""
 
     asset_classes: tuple[str, ...] = ("stock", "fund", "bond")
+    #: SDK-native products, including products AlphaPilot deliberately blocks.
+    native_asset_classes: tuple[str, ...] | None = None
+    #: Products the current AlphaPilot route model can actually submit.
+    routable_asset_classes: tuple[str, ...] | None = None
     exchanges: tuple[str, ...] = ()
+    session_profile: str = "ashare_cash"
+    position_model: str = "long_only_t1"
+    offset_requirement: str = "none"
+    notional_model: str = "cash"
     supports_tick: bool = True
     supports_depth: bool = False
     supports_contract_query: bool = True
@@ -60,6 +70,14 @@ class GatewayCapabilities:
     supports_margin: bool = False
     supports_history: bool = False
 
+    @property
+    def native_assets(self) -> tuple[str, ...]:
+        return self.asset_classes if self.native_asset_classes is None else self.native_asset_classes
+
+    @property
+    def routable_assets(self) -> tuple[str, ...]:
+        return self.asset_classes if self.routable_asset_classes is None else self.routable_asset_classes
+
 
 @dataclass(frozen=True)
 class TradeChannelSpec:
@@ -68,6 +86,7 @@ class TradeChannelSpec:
     setting_fields: tuple[SettingField, ...] = ()
     endpoints: tuple[EndpointSpec, ...] = ()
     capabilities: GatewayCapabilities = field(default_factory=GatewayCapabilities)
+    account_kind: str = "live"
 
 
 @dataclass(frozen=True)
@@ -77,6 +96,7 @@ class QuoteChannelSpec:
     setting_fields: tuple[SettingField, ...] = ()
     endpoints: tuple[EndpointSpec, ...] = ()
     capabilities: GatewayCapabilities = field(default_factory=GatewayCapabilities)
+    data_kind: str = "realtime"
 
 
 @dataclass(frozen=True)
@@ -126,4 +146,3 @@ class PluginLoadIssue:
     error: str
     distribution: str = ""
     version: str = ""
-

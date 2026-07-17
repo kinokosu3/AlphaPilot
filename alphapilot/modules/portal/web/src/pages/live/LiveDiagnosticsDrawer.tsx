@@ -20,7 +20,7 @@ import { fmtMoney } from "./utils";
 type Props = {
   open: boolean;
   onClose: () => void;
-  workspace: "live" | "paper";
+  workspace: "live" | "simulation" | "paper";
   runtimeBroker: string;
   setRuntimeBroker: Dispatch<SetStateAction<string>>;
   runtimeQuoteProvider: string;
@@ -77,7 +77,7 @@ export function LiveDiagnosticsDrawer(props: Props) {
         <div className="live-drawer-content">
           <section>
             <h3>{t("liveConnectionSettings")}</h3>
-            {props.workspace === "live" ? (
+            {props.workspace !== "paper" ? (
               <div className="live-form-grid">
                 <label className="field"><span>{t("liveTradeBroker")}</span><select aria-label={t("liveTradeBroker")} value={props.runtimeBroker} onChange={(event) => props.setRuntimeBroker(event.target.value)} disabled={props.providerSelectionLocked}>{props.brokers.map((item) => <option value={item.name} disabled={!item.gateway_importable} key={item.name}>{item.name} - {item.description}</option>)}</select></label>
                 <label className="field"><span>{t("liveQuoteProvider")}</span><select aria-label={t("liveQuoteProvider")} value={props.runtimeQuoteProvider} onChange={(event) => props.setRuntimeQuoteProvider(event.target.value)} disabled={props.providerSelectionLocked}>{props.quoteProviders.map((item) => <option value={item.name} disabled={!item.gateway_importable} key={item.name}>{item.name} - {item.description}</option>)}</select></label>
@@ -87,7 +87,7 @@ export function LiveDiagnosticsDrawer(props: Props) {
             <label className="inline-check compact"><input type="checkbox" checked={props.preflightNetwork} onChange={(event) => props.setPreflightNetwork(event.target.checked)} /><span>{t("liveNetworkCheck")}</span></label>
             <div className="row-actions">
               <AsyncButton className="button small" onClick={props.onPreflight} disabled={!props.providerReady}>{t("livePreflight")}</AsyncButton>
-              <AsyncButton className="button ghost small" onClick={props.onConnect} disabled={props.workspace !== "live" || !props.providerReady}>{t("liveRuntimeConnect")}</AsyncButton>
+              <AsyncButton className="button ghost small" onClick={props.onConnect} disabled={props.workspace === "paper" || !props.providerReady}>{t("liveRuntimeConnect")}</AsyncButton>
             </div>
             {selectedBroker ? <div className="live-diagnostic-summary"><span>{t("liveBrokerStatus")}</span><StatusPill status={selectedBroker.gateway_importable ? "ready" : "missing"} /><strong>{selectedBroker.distribution || selectedBroker.plugin_id || selectedBroker.gateway}</strong></div> : null}
             {selectedQuote && selectedQuote.name !== selectedBroker?.name ? <div className="live-diagnostic-summary"><span>{t("liveQuoteStatus")}</span><StatusPill status={selectedQuote.gateway_importable ? "ready" : "missing"} /><strong>{selectedQuote.distribution || selectedQuote.plugin_id || selectedQuote.gateway}</strong></div> : null}

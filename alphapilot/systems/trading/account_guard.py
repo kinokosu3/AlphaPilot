@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
+from alphapilot.systems.trading.account_identity import account_identities_match
 from alphapilot.systems.trading.contracts import AccountSnapshot, canonical_instrument
 
 
@@ -26,7 +27,9 @@ class AccountBoundaryGuard:
     ) -> AccountBoundaryResult:
         issues: list[dict[str, object]] = []
         allowed = {canonical_instrument(item) for item in universe}
-        if expected_account_id and snapshot.account_id != expected_account_id:
+        if expected_account_id and not account_identities_match(
+            expected_account_id, snapshot.account_id,
+        ):
             issues.append({
                 "rule": "account_binding",
                 "reason": "account snapshot does not match deployment binding",

@@ -8,11 +8,13 @@ Paper/dry-run is the default mode.
 from __future__ import annotations
 
 import json
+import re
 import socket
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from alphapilot.kernel.base import BaseModule
+from alphapilot.systems.trading.account_identity import account_identity_hash
 
 if TYPE_CHECKING:
     from alphapilot.kernel.context import Context
@@ -39,13 +41,68 @@ class LiveModule(BaseModule):
         ledger_dir: str | None = None,
         state_dir: str | None = None,
     ):
-        return self._system().create_runtime(
+        cfg = self._standalone_config(
             mode=mode,
             broker=broker,
             trade_broker=trade_broker,
             quote_provider=quote_provider,
             ledger_dir=ledger_dir,
             state_dir=state_dir,
+        )
+        return self._system().create_runtime(
+            mode=cfg.mode,
+            broker=cfg.trade_broker,
+            trade_broker=cfg.trade_broker,
+            quote_provider=cfg.quote_provider,
+            ledger_dir=str(cfg.ledger_dir),
+            state_dir=str(cfg.state_dir),
+            market_data_dir=str(cfg.market_data.data_dir),
+        )
+
+    def _standalone_config(
+        self,
+        *,
+        mode: str | None = None,
+        broker: str | None = None,
+        trade_broker: str | None = None,
+        quote_provider: str | None = None,
+        ledger_dir: str | None = None,
+        state_dir: str | None = None,
+    ):
+        """Resolve one manual runtime namespace without changing legacy defaults."""
+
+        from alphapilot.systems.live.runtime import clone_config
+
+        base = self._system().config
+        cfg = clone_config(
+            base,
+            mode=mode,
+            broker=broker,
+            trade_broker=trade_broker,
+            quote_provider=quote_provider,
+            ledger_dir=ledger_dir,
+            state_dir=state_dir,
+        )
+        explicitly_selected = any(
+            value is not None for value in (mode, broker, trade_broker, quote_provider)
+        )
+        if not explicitly_selected or state_dir is not None:
+            return cfg
+        namespace = (
+            Path("runtimes")
+            / _runtime_slug(cfg.execution_environment)
+            / (
+                f"{_runtime_slug(cfg.trade_broker or cfg.broker or 'paper')}--"
+                f"{_runtime_slug(cfg.quote_provider or cfg.trade_broker or 'paper')}"
+            )
+            / "standalone"
+        )
+        return clone_config(
+            cfg,
+            state_dir=Path(base.state_dir) / namespace,
+            ledger_dir=(Path(ledger_dir).expanduser() if ledger_dir else Path(base.ledger_dir) / namespace),
+            market_data_dir=Path(base.market_data.data_dir) / namespace,
+            execution_environment=cfg.execution_environment,
         )
 
     def live_status(self) -> dict[str, Any]:
@@ -56,7 +113,7 @@ class LiveModule(BaseModule):
         """List modes (SHADOW uses real data/account but cannot route)."""
         return self._system().modes()
 
-    def live_brokers(self) -> list[dict[str, Any]]:
+    def live_brokers(self, account_kind: str | None = None) -> list[dict[str, Any]]:
         """List registered brokers: gateway, env fields for credentials, availability."""
         from alphapilot.systems.live.brokers.registry import (
             ENV_PREFIX,
@@ -66,7 +123,7 @@ class LiveModule(BaseModule):
         )
 
         rows = []
-        for spec in list_brokers():
+        for spec in list_brokers(account_kind=account_kind):
             prefix = f"{ENV_PREFIX}{spec.name.upper()}_"
             available, detail = provider_availability(spec.name, role="trade")
             rows.append(
@@ -82,12 +139,14 @@ class LiveModule(BaseModule):
                     "distribution": spec.distribution,
                     "version": spec.version,
                     "roles": sorted(spec.roles),
+                    "account_kind": spec.account_kind,
+                    "data_kind": spec.data_kind,
                     "capabilities": _capabilities_dict(spec.capabilities),
                 }
             )
         return rows
 
-    def live_quote_providers(self) -> list[dict[str, Any]]:
+    def live_quote_providers(self, data_kind: str | None = None) -> list[dict[str, Any]]:
         """List registered quote providers without exposing secret values."""
         from alphapilot.systems.live.brokers.registry import (
             ENV_PREFIX,
@@ -97,7 +156,7 @@ class LiveModule(BaseModule):
         )
 
         rows = []
-        for spec in list_quote_providers():
+        for spec in list_quote_providers(data_kind=data_kind):
             prefix = f"{ENV_PREFIX}{spec.name.upper()}_"
             available, detail = provider_availability(spec.name, role="quote")
             rows.append(
@@ -113,6 +172,8 @@ class LiveModule(BaseModule):
                     "distribution": spec.distribution,
                     "version": spec.version,
                     "roles": sorted(spec.roles),
+                    "account_kind": spec.account_kind,
+                    "data_kind": spec.data_kind,
                     "capabilities": _capabilities_dict(spec.capabilities),
                 }
             )
@@ -328,17 +389,15 @@ class LiveModule(BaseModule):
     ) -> dict[str, Any]:
         """Show the long-lived live runtime daemon status and latest state."""
         from alphapilot.systems.live.daemon import daemon_status
-        from alphapilot.systems.live.runtime import clone_config
 
-        cfg = clone_config(
-            self._system().config,
+        cfg = self._standalone_config(
             mode=mode,
             broker=broker,
             trade_broker=trade_broker,
             quote_provider=quote_provider,
             state_dir=state_dir,
         )
-        return daemon_status(cfg, state_dir=state_dir)
+        return daemon_status(cfg)
 
     def live_daemon_start(
         self,
@@ -363,18 +422,26 @@ class LiveModule(BaseModule):
         """
         from alphapilot.systems.live.daemon import start_daemon
 
-        return start_daemon(
-            self._system().config,
+        cfg = self._standalone_config(
             mode=mode,
             broker=broker,
             trade_broker=trade_broker,
             quote_provider=quote_provider,
+            ledger_dir=ledger_dir,
+            state_dir=state_dir,
+        )
+        return start_daemon(
+            cfg,
+            mode=cfg.mode,
+            broker=cfg.trade_broker,
+            trade_broker=cfg.trade_broker,
+            quote_provider=cfg.quote_provider,
             symbols=_split_symbols(symbols),
             cash=cash,
             interval=interval,
             timeout=timeout,
-            ledger_dir=ledger_dir,
-            state_dir=state_dir,
+            ledger_dir=cfg.ledger_dir,
+            state_dir=cfg.state_dir,
             duration=duration,
             record_market_data=record_market_data,
         )
@@ -391,10 +458,8 @@ class LiveModule(BaseModule):
         """Read the daemon's latest quote projection without touching a gateway."""
         from alphapilot.systems.live.daemon import load_daemon
         from alphapilot.systems.live.market_data import read_market_snapshot, refresh_snapshot_ages
-        from alphapilot.systems.live.runtime import clone_config
 
-        cfg = clone_config(
-            self._system().config,
+        cfg = self._standalone_config(
             mode=mode,
             broker=broker,
             trade_broker=trade_broker,
@@ -430,11 +495,9 @@ class LiveModule(BaseModule):
     ) -> dict[str, Any]:
         """Read recent persisted and current live bars for one subscribed symbol."""
         from alphapilot.systems.live.market_data import load_market_bars, read_market_snapshot
-        from alphapilot.systems.live.runtime import clone_config
         from alphapilot.systems.live.types import normalize_symbol
 
-        cfg = clone_config(
-            self._system().config,
+        cfg = self._standalone_config(
             mode=mode,
             broker=broker,
             trade_broker=trade_broker,
@@ -463,17 +526,29 @@ class LiveModule(BaseModule):
 
     def live_daemon_stop(
         self,
+        mode: str | None = None,
+        broker: str | None = None,
+        trade_broker: str | None = None,
+        quote_provider: str | None = None,
         state_dir: str | None = None,
         timeout: float = 5.0,
     ) -> dict[str, Any]:
         """Stop the detached live runtime daemon if one is running."""
         from alphapilot.systems.live.daemon import stop_daemon
 
-        return stop_daemon(self._system().config, state_dir=state_dir, timeout=timeout)
+        cfg = self._standalone_config(
+            mode=mode, broker=broker, trade_broker=trade_broker,
+            quote_provider=quote_provider, state_dir=state_dir,
+        )
+        return stop_daemon(cfg, timeout=timeout)
 
     def live_daemon_halt(
         self,
         reason: str = "manual",
+        mode: str | None = None,
+        broker: str | None = None,
+        trade_broker: str | None = None,
+        quote_provider: str | None = None,
         state_dir: str | None = None,
         wait: bool = False,
         timeout: float = 5.0,
@@ -481,17 +556,24 @@ class LiveModule(BaseModule):
         """Ask the running daemon to engage the in-process kill-switch."""
         from alphapilot.systems.live.daemon import send_daemon_command
 
+        cfg = self._standalone_config(
+            mode=mode, broker=broker, trade_broker=trade_broker,
+            quote_provider=quote_provider, state_dir=state_dir,
+        )
         return send_daemon_command(
-            self._system().config,
+            cfg,
             "halt",
             payload={"reason": reason},
-            state_dir=state_dir,
             wait=wait,
             timeout=timeout,
         )
 
     def live_daemon_resume(
         self,
+        mode: str | None = None,
+        broker: str | None = None,
+        trade_broker: str | None = None,
+        quote_provider: str | None = None,
         state_dir: str | None = None,
         wait: bool = False,
         timeout: float = 5.0,
@@ -499,16 +581,23 @@ class LiveModule(BaseModule):
         """Ask the running daemon to resume after a kill-switch halt."""
         from alphapilot.systems.live.daemon import send_daemon_command
 
+        cfg = self._standalone_config(
+            mode=mode, broker=broker, trade_broker=trade_broker,
+            quote_provider=quote_provider, state_dir=state_dir,
+        )
         return send_daemon_command(
-            self._system().config,
+            cfg,
             "resume",
-            state_dir=state_dir,
             wait=wait,
             timeout=timeout,
         )
 
     def live_daemon_refresh(
         self,
+        mode: str | None = None,
+        broker: str | None = None,
+        trade_broker: str | None = None,
+        quote_provider: str | None = None,
         state_dir: str | None = None,
         wait: bool = False,
         timeout: float = 5.0,
@@ -516,16 +605,23 @@ class LiveModule(BaseModule):
         """Ask the running daemon to re-query broker account and positions."""
         from alphapilot.systems.live.daemon import send_daemon_command
 
+        cfg = self._standalone_config(
+            mode=mode, broker=broker, trade_broker=trade_broker,
+            quote_provider=quote_provider, state_dir=state_dir,
+        )
         return send_daemon_command(
-            self._system().config,
+            cfg,
             "refresh",
-            state_dir=state_dir,
             wait=wait,
             timeout=timeout,
         )
 
     def live_daemon_reconnect(
         self,
+        mode: str | None = None,
+        broker: str | None = None,
+        trade_broker: str | None = None,
+        quote_provider: str | None = None,
         state_dir: str | None = None,
         wait: bool = False,
         timeout: float = 20.0,
@@ -539,16 +635,22 @@ class LiveModule(BaseModule):
         """
         from alphapilot.systems.live.daemon import send_daemon_command
 
+        cfg = self._standalone_config(
+            mode=mode, broker=broker, trade_broker=trade_broker,
+            quote_provider=quote_provider, state_dir=state_dir,
+        )
         if auto_resume:
-            _require_daemon_live_confirmation(self.live_daemon_status(state_dir=state_dir), confirm_live=confirm_live)
+            _require_daemon_live_confirmation(self.live_daemon_status(
+                mode=mode, broker=broker, trade_broker=trade_broker,
+                quote_provider=quote_provider, state_dir=state_dir,
+            ), confirm_live=confirm_live)
         return send_daemon_command(
-            self._system().config,
+            cfg,
             "reconnect",
             payload={
                 "auto_resume": bool(auto_resume),
                 "confirm_live": bool(confirm_live),
             },
-            state_dir=state_dir,
             wait=wait,
             timeout=timeout,
         )
@@ -558,6 +660,10 @@ class LiveModule(BaseModule):
         order_id: str,
         symbol: str | None = None,
         force: bool = False,
+        mode: str | None = None,
+        broker: str | None = None,
+        trade_broker: str | None = None,
+        quote_provider: str | None = None,
         state_dir: str | None = None,
         wait: bool = False,
         timeout: float = 5.0,
@@ -571,8 +677,12 @@ class LiveModule(BaseModule):
         """
         from alphapilot.systems.live.daemon import send_daemon_command
 
+        cfg = self._standalone_config(
+            mode=mode, broker=broker, trade_broker=trade_broker,
+            quote_provider=quote_provider, state_dir=state_dir,
+        )
         return send_daemon_command(
-            self._system().config,
+            cfg,
             "cancel",
             payload={
                 "order_id": order_id,
@@ -580,7 +690,6 @@ class LiveModule(BaseModule):
                 "force": bool(force),
                 "event_timeout": float(event_timeout),
             },
-            state_dir=state_dir,
             wait=wait,
             timeout=timeout,
         )
@@ -595,6 +704,10 @@ class LiveModule(BaseModule):
         exchange: str | None = None,
         offset: str = "none",
         product: str = "equity",
+        mode: str | None = None,
+        broker: str | None = None,
+        trade_broker: str | None = None,
+        quote_provider: str | None = None,
         state_dir: str | None = None,
         wait: bool = False,
         timeout: float = 5.0,
@@ -605,9 +718,16 @@ class LiveModule(BaseModule):
         """Ask the running daemon to submit one manual/debug order."""
         from alphapilot.systems.live.daemon import send_daemon_command
 
-        _require_daemon_live_confirmation(self.live_daemon_status(state_dir=state_dir), confirm_live=confirm_live)
+        cfg = self._standalone_config(
+            mode=mode, broker=broker, trade_broker=trade_broker,
+            quote_provider=quote_provider, state_dir=state_dir,
+        )
+        _require_daemon_live_confirmation(self.live_daemon_status(
+            mode=mode, broker=broker, trade_broker=trade_broker,
+            quote_provider=quote_provider, state_dir=state_dir,
+        ), confirm_live=confirm_live)
         return send_daemon_command(
-            self._system().config,
+            cfg,
             "order",
             payload={
                 "symbol": symbol,
@@ -622,7 +742,6 @@ class LiveModule(BaseModule):
                 "confirm_live": confirm_live,
                 "event_timeout": float(event_timeout),
             },
-            state_dir=state_dir,
             wait=wait,
             timeout=timeout,
         )
@@ -642,6 +761,10 @@ class LiveModule(BaseModule):
         yaml_params: str | None = None,
         refresh_data: bool = False,
         route: bool = False,
+        mode: str | None = None,
+        broker: str | None = None,
+        trade_broker: str | None = None,
+        quote_provider: str | None = None,
         state_dir: str | None = None,
         wait: bool = False,
         timeout: float = 5.0,
@@ -651,8 +774,15 @@ class LiveModule(BaseModule):
         from alphapilot.systems.live.daemon import send_daemon_command
         from alphapilot.systems.live.runtime import target_to_dict
 
+        cfg = self._standalone_config(
+            mode=mode, broker=broker, trade_broker=trade_broker,
+            quote_provider=quote_provider, state_dir=state_dir,
+        )
         if route:
-            _require_daemon_live_confirmation(self.live_daemon_status(state_dir=state_dir), confirm_live=confirm_live)
+            _require_daemon_live_confirmation(self.live_daemon_status(
+                mode=mode, broker=broker, trade_broker=trade_broker,
+                quote_provider=quote_provider, state_dir=state_dir,
+            ), confirm_live=confirm_live)
         model_source = bool(session or strategy_name or factor_path or model_pickle_path)
         if model_source and target_path is None and holdings is None and positions is None:
             action = "model_target"
@@ -690,10 +820,9 @@ class LiveModule(BaseModule):
                 "confirm_live": bool(confirm_live),
             }
         return send_daemon_command(
-            self._system().config,
+            cfg,
             action,
             payload=payload,
-            state_dir=state_dir,
             wait=wait,
             timeout=timeout,
         )
@@ -1011,7 +1140,10 @@ def _portfolio_seed_from_oms(oms: Any, *, date: str | None = None):
         date=str(date or ""),
         cash=float(account.available),
         positions=positions,
-        metadata={"source": "live_oms", "account_id": str(account.account_id)},
+        metadata={
+            "source": "live_oms",
+            "account_id_hash": account_identity_hash(str(account.account_id)),
+        },
     )
 
 
@@ -1021,6 +1153,13 @@ def _split_symbols(raw: str | list[str] | None) -> list[str]:
     if isinstance(raw, list):
         return [str(item).strip() for item in raw if str(item).strip()]
     return [part.strip() for part in str(raw).split(",") if part.strip()]
+
+
+def _runtime_slug(value: str) -> str:
+    normalized = re.sub(
+        r"[^a-zA-Z0-9._-]+", "-", str(value).strip().lower()
+    ).strip("-.")
+    return normalized or "unknown"
 
 
 def _tcp_probe(host: str, port: int, timeout: float) -> tuple[bool, str]:
@@ -1034,7 +1173,13 @@ def _tcp_probe(host: str, port: int, timeout: float) -> tuple[bool, str]:
 def _capabilities_dict(capabilities: Any) -> dict[str, Any]:
     return {
         "asset_classes": list(capabilities.asset_classes),
+        "native_asset_classes": list(capabilities.native_assets),
+        "routable_asset_classes": list(capabilities.routable_assets),
         "exchanges": list(capabilities.exchanges),
+        "session_profile": capabilities.session_profile,
+        "position_model": capabilities.position_model,
+        "offset_requirement": capabilities.offset_requirement,
+        "notional_model": capabilities.notional_model,
         "supports_tick": capabilities.supports_tick,
         "supports_depth": capabilities.supports_depth,
         "supports_contract_query": capabilities.supports_contract_query,
@@ -1102,7 +1247,9 @@ def _preflight_provider(name: str, *, kind: str, network: bool, timeout: float) 
         endpoints = []
         for endpoint in spec.endpoints:
             host = setting.get(endpoint.host_key)
-            port = setting.get(endpoint.port_key)
+            port = setting.get(endpoint.port_key) if endpoint.port_key else None
+            if host and not port:
+                host, port = _endpoint_host_port(str(host))
             if host and port:
                 ok, detail = _tcp_probe(str(host), int(port), timeout)
                 endpoints.append({"name": endpoint.name, "host": host, "port": int(port), "ok": ok, "detail": detail})
@@ -1110,6 +1257,17 @@ def _preflight_provider(name: str, *, kind: str, network: bool, timeout: float) 
         result["endpoints"] = endpoints
     result["ok"] = importable and not missing and all(item.get("ok", True) for item in result["endpoints"])
     return result
+
+
+def _endpoint_host_port(address: str) -> tuple[str, int | None]:
+    from urllib.parse import urlsplit
+
+    text = str(address).strip()
+    parsed = urlsplit(text if "://" in text else "tcp://" + text)
+    try:
+        return str(parsed.hostname or ""), parsed.port
+    except ValueError:
+        return "", None
 
 
 def _require_daemon_live_confirmation(status: dict[str, Any], *, confirm_live: bool) -> None:

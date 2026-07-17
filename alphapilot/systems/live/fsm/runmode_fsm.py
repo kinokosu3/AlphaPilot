@@ -2,7 +2,7 @@
 
 Two orthogonal pieces of safety state:
 
-* **mode ladder** ``DRY_RUN <-> PAPER <-> SHADOW <-> LIVE`` — you cannot jump
+* **mode ladder** ``DRY_RUN <-> PAPER <-> SIMULATION/SHADOW <-> LIVE`` — you cannot jump
   straight from ``DRY_RUN`` to ``LIVE``; this is enforced so a
   fat-fingered mode change can't put real money at risk in one step.
 * **halted** — the kill-switch. Any component may ``halt(reason)``; while halted,
@@ -21,8 +21,11 @@ ALLOWED: dict[str, set[str]] = {
     RunMode.DRY_RUN: {RunMode.DRY_RUN, RunMode.PAPER},
     # PAPER <-> LIVE remains accepted for the legacy operational mode switch.
     # Deployment promotion is separately gated REPLAY -> PAPER -> SHADOW -> LIVE.
-    RunMode.PAPER: {RunMode.PAPER, RunMode.DRY_RUN, RunMode.SHADOW, RunMode.LIVE},
-    RunMode.SHADOW: {RunMode.SHADOW, RunMode.PAPER, RunMode.LIVE},
+    RunMode.PAPER: {
+        RunMode.PAPER, RunMode.DRY_RUN, RunMode.SIMULATION, RunMode.SHADOW, RunMode.LIVE,
+    },
+    RunMode.SIMULATION: {RunMode.SIMULATION, RunMode.PAPER, RunMode.SHADOW},
+    RunMode.SHADOW: {RunMode.SHADOW, RunMode.PAPER, RunMode.SIMULATION, RunMode.LIVE},
     RunMode.LIVE: {RunMode.LIVE, RunMode.SHADOW, RunMode.PAPER},
 }
 
@@ -30,12 +33,20 @@ ALLOWED: dict[str, set[str]] = {
 class RunModeMachine:
     """Run mode + kill-switch, guarding order submission."""
 
-    def __init__(self, mode: str = RunMode.DRY_RUN) -> None:
+    def __init__(
+        self,
+        mode: str = RunMode.DRY_RUN,
+        *,
+        provider_routing_enabled: bool = True,
+        provider_block_reason: str = "",
+    ) -> None:
         if mode not in ALLOWED:
             raise ValueError(f"unknown run mode: {mode!r}")
         self.mode = mode
         self.halted = False
         self.halt_reason = ""
+        self.provider_routing_enabled = bool(provider_routing_enabled)
+        self.provider_block_reason = str(provider_block_reason)
 
     def set_mode(self, target: str) -> str:
         if target not in ALLOWED:
@@ -55,7 +66,11 @@ class RunModeMachine:
 
     def can_submit_orders(self) -> bool:
         """Orders may be routed only when not halted and not in dry-run."""
-        return not self.halted and allows_order_routing(self.mode)
+        return (
+            not self.halted
+            and self.provider_routing_enabled
+            and allows_order_routing(self.mode)
+        )
 
     def is_dry_run(self) -> bool:
         return self.mode == RunMode.DRY_RUN

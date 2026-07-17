@@ -23,6 +23,8 @@ XTP_API_20250806_2.2.50.8/
 XTPXQuoteAPI_*/
 XTPXTraderAPI_*/
 emt_api/
+tts_6.3.15中文件夹/
+openctp本地文件夹/
 # vn.py repo extras not needed to pip-install it
 vnpy/docs/
 vnpy/examples/

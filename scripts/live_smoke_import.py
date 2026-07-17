@@ -1,12 +1,13 @@
 """Live smoke: native gateways construct + compiled SDK bindings load. No server connection.
 
 vn.py is no longer part of the live stack: XTP Pro and EMT run through
-AlphaPilot-native gateways over the compiled ``alphapilot_xtpx.api`` / ``alphapilot_emt.api``
-pybind bindings. This smoke proves, per broker: the binding imports, the
+AlphaPilot-native gateways over the compiled vendor bindings. This smoke
+proves, per broker: the binding imports, the
 AlphaPilot gateway class resolves through the registry, and constructing it
 instantiates the C++ API wrapper objects (load + link check). Exits non-zero on
 any required failure so it can gate an image build. Which brokers are required
-is controlled by LIVE_SMOKE_REQUIRE (comma list, default "xtp,emt").
+is controlled by LIVE_SMOKE_REQUIRE (comma list, default "xtp,emt"). ``tts``
+also checks the independent trade-only and replay quote-only providers.
 """
 
 from __future__ import annotations
@@ -29,12 +30,17 @@ def main() -> int:
     results: dict[str, str] = {}
     failed = False
 
-    from alphapilot.systems.live.brokers.registry import create_gateway_pair
-    from alphapilot.systems.live.gateway import BrokerGateway
+    from alphapilot.systems.live.brokers.registry import (
+        create_gateway,
+        create_gateway_pair,
+        create_quote_gateway,
+    )
+    from alphapilot.systems.live.gateway import BrokerGateway, QuoteGateway
 
     sdk_flags = {
         "xtp": "alphapilot_broker_xtp.gateway",
         "emt": "alphapilot_broker_emt.gateway",
+        "tts": "alphapilot_broker_tts.gateway",
     }
 
     for broker in sorted(require):
@@ -54,10 +60,19 @@ def main() -> int:
 
         # 2) native gateway resolves + constructs (creates the C++ API objects)?
         try:
-            gateway, quote_gateway = create_gateway_pair(broker, broker)
-            assert isinstance(gateway, BrokerGateway)
-            assert quote_gateway is gateway
-            results[f"{broker}: gateway construct ({type(gateway).__name__})"] = "OK"
+            if broker == "tts":
+                gateway = create_gateway("tts")
+                quote_gateway = create_quote_gateway("tts_7x24")
+                assert isinstance(gateway, BrokerGateway)
+                assert isinstance(quote_gateway, QuoteGateway)
+                assert gateway is not quote_gateway
+                results["tts: trade-only gateway construct (TtsTradeGateway)"] = "OK"
+                results["tts: replay quote-only gateway construct (TtsReplayQuoteGateway)"] = "OK"
+            else:
+                gateway, quote_gateway = create_gateway_pair(broker, broker)
+                assert isinstance(gateway, BrokerGateway)
+                assert quote_gateway is gateway
+                results[f"{broker}: gateway construct ({type(gateway).__name__})"] = "OK"
         except Exception:
             results[f"{broker}: gateway construct"] = "FAIL\n" + traceback.format_exc()
             failed = True

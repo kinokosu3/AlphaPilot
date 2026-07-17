@@ -38,6 +38,7 @@
 .live-environment-tabs button { min-width: 112px; padding: 9px 16px; }
 .live-environment-tabs button.active { color: var(--text); background: var(--surface); box-shadow: var(--shadow-sm); }
 .live-environment-tabs button.active.live { color: var(--danger-fg); background: var(--danger-bg); }
+.live-environment-tabs button.active.simulation { color: var(--info-fg); background: var(--info-bg); }
 .live-environment-tabs button:disabled { cursor: not-allowed; opacity: .65; }
 
 .live-simulation-switch {
@@ -67,6 +68,7 @@
   backdrop-filter: blur(12px);
 }
 .live-workspace-status.is-live { border-left-color: var(--danger-fg); }
+.live-workspace-status.is-simulation { border-left-color: var(--info-fg); }
 .live-status-context,
 .live-account-strip { display: flex; min-width: 0; align-items: center; gap: 13px; overflow-x: auto; scrollbar-width: thin; }
 .live-status-context > span,
@@ -215,7 +217,7 @@
 }
 
 @media (max-width: 640px) {
-  .live-environment-tabs { display: grid; width: 100%; grid-template-columns: 1fr 1fr; }
+  .live-environment-tabs { display: grid; width: 100%; grid-template-columns: repeat(3, 1fr); }
   .live-environment-tabs button { min-width: 0; }
   .live-workspace-status { grid-template-columns: minmax(0, 1fr) auto; top: 0; padding: 9px; }
   .live-status-context { grid-column: 1 / -1; }

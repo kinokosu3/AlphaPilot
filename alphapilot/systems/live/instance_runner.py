@@ -144,18 +144,30 @@ class StrategyInstanceRunner:
             max_order_value=self.engine.config.risk.max_order_value,
             max_order_equity_pct=self.engine.config.risk.max_order_equity_pct,
         )
+        runtime_state = self.store.get_runtime_state(instance.instance_id)
         automated_router = runtime.automated_order_router(
             instance_id=instance.instance_id,
             config_hash=instance.config_hash,
             deployment_level=instance.deployment_level,
+            execution_environment=str(runtime_state.get("execution_environment") or ""),
+            trade_provider=str(runtime_state.get("trade_provider") or ""),
+            quote_provider=str(runtime_state.get("quote_provider") or ""),
+            quote_data_kind=str(runtime_state.get("quote_data_kind") or ""),
+            binding_hash=str(runtime_state.get("binding_hash") or ""),
         )
         self.route_port = LiveExecutionRouteAdapter(runtime, automated_router)
         mode = str(getattr(self.engine.config.mode, "value", self.engine.config.mode))
         live_enabled = os.getenv("ALPHAPILOT_AUTOMATED_LIVE_ENABLED", "false").lower() in {
             "1", "true", "yes", "on",
         }
-        can_route = mode == "paper" or (mode == "live" and live_enabled)
-        runtime_state = self.store.get_runtime_state(instance.instance_id)
+        can_route = (
+            mode == "paper"
+            or (
+                mode == "simulation"
+                and runtime_state.get("quote_data_kind") == "realtime"
+            )
+            or (mode == "live" and live_enabled)
+        )
         self.execution = ExecutionCoordinator(
             store=self.store,
             account_port=self.account_port,
@@ -169,9 +181,9 @@ class StrategyInstanceRunner:
         self.history: deque[CompletedBar] = deque(maxlen=20_000)
         self._pending_session: dict[str, CompletedBar] = {}
         self._started = False
-        self._paused = mode == "live"
+        self._paused = mode in {"simulation", "live"}
         self._stopped = False
-        self._reconcile_required = mode == "live"
+        self._reconcile_required = mode in {"simulation", "live"}
         self._last_error: dict[str, Any] = {}
         self._last_decision_id = ""
         self._last_execution_plan = ""
@@ -181,8 +193,8 @@ class StrategyInstanceRunner:
     def start(self) -> None:
         if self._started and not self._stopped:
             return
-        if self.instance.frequency != "day" and self.instance.deployment_level == "live":
-            raise ValueError("minute strategy instances cannot run in LIVE")
+        if self.instance.frequency != "day" and self.mode in {"simulation", "live"}:
+            raise ValueError("minute strategy instances cannot run against external A-share accounts")
         self._load_history()
         self.bar_source.add_bar_listener(self.interval, self._on_bar)
         self.engine.subscribe_market_data(list(self.instance.universe))
@@ -580,9 +592,9 @@ class StrategyInstanceRunner:
             active_stage = (
                 self.store.get_active_stage_run(
                     self.instance.instance_id,
-                    stage=self.mode,
+                    stage="paper" if self.mode == "simulation" else self.mode,
                 )
-                if self.mode in {"paper", "shadow", "live"}
+                if self.mode in {"paper", "simulation", "shadow", "live"}
                 else None
             )
             result = self.pipeline.evaluate(
@@ -590,7 +602,11 @@ class StrategyInstanceRunner:
                 tuple(self.history),
                 account=snapshot,
                 persist=True,
-                mode="live_plan" if self.mode == "live" else self.mode,
+                mode=(
+                    "live_plan" if self.mode == "live"
+                    else "paper" if self.mode == "simulation"
+                    else self.mode
+                ),
                 run_id=(
                     str(active_stage["run_id"])
                     if active_stage is not None
@@ -598,11 +614,11 @@ class StrategyInstanceRunner:
                 ),
             )
             self._last_decision_id = result.decision.decision_id
-            if self.mode in {"paper", "shadow", "live"}:
+            if self.mode in {"paper", "simulation", "shadow", "live"}:
                 self.store.record_stage_session(
                     self.instance.instance_id,
                     config_hash=self.instance.config_hash,
-                    stage=self.mode,
+                    stage="paper" if self.mode == "simulation" else self.mode,
                     session=result.decision.as_of[:10],
                 )
         except WarmupRequired:

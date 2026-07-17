@@ -88,7 +88,7 @@ function mockLiveFetch(options: { alive?: boolean; accountMetrics?: boolean; dae
             max_orders_per_day: 1000,
           },
         },
-        modes: ["dry_run", "paper", "live"],
+        modes: ["dry_run", "paper", "simulation", "live"],
         running: false,
       });
     }
@@ -96,6 +96,7 @@ function mockLiveFetch(options: { alive?: boolean; accountMetrics?: boolean; dae
       return Response.json([
         {
           name: "emt",
+          account_kind: "live",
           description: "东方财富证券 EMT",
           gateway: "alphapilot_broker_emt.factory:create_gateway",
           gateway_importable: true,
@@ -117,6 +118,7 @@ function mockLiveFetch(options: { alive?: boolean; accountMetrics?: boolean; dae
         },
         {
           name: "xtp",
+          account_kind: "live",
           description: "中泰证券 XTP PRO",
           gateway: "alphapilot_broker_xtp.factory:create_gateway",
           gateway_importable: false,
@@ -124,12 +126,23 @@ function mockLiveFetch(options: { alive?: boolean; accountMetrics?: boolean; dae
           missing_env: ["ALPHAPILOT_LIVE_XTP_ACCOUNT"],
           capabilities: { supports_tick: true, supports_order_query: false, supports_trade_query: true, supports_cancel: true },
         },
+        {
+          name: "tts",
+          account_kind: "simulation",
+          description: "OpenCTP TTS 仿真交易柜台",
+          gateway: "alphapilot_broker_tts.factory:create_gateway",
+          gateway_importable: true,
+          env_fields: ["ALPHAPILOT_LIVE_TTS_USER_ID"],
+          missing_env: [],
+          capabilities: { asset_classes: ["stock", "fund"], supports_tick: false, supports_order_query: true, supports_trade_query: true, supports_cancel: true },
+        },
       ]);
     }
     if (path === "/api/live/quote-providers") {
       return Response.json([
         {
           name: "paper",
+          data_kind: "synthetic",
           description: "Paper quote sandbox",
           gateway: "alphapilot.systems.live.brokers.paper:PaperBroker",
           gateway_importable: true,
@@ -139,6 +152,7 @@ function mockLiveFetch(options: { alive?: boolean; accountMetrics?: boolean; dae
         },
         {
           name: "emt",
+          data_kind: "realtime",
           description: "东方财富证券 EMT",
           gateway: "alphapilot_broker_emt.factory:create_gateway",
           gateway_importable: true,
@@ -154,6 +168,16 @@ function mockLiveFetch(options: { alive?: boolean; accountMetrics?: boolean; dae
             supports_trade_query: true,
             supports_cancel: true,
           },
+        },
+        {
+          name: "tts_7x24",
+          data_kind: "replay",
+          description: "TTS 7x24 回放行情",
+          gateway: "alphapilot_broker_tts.factory:create_gateway",
+          gateway_importable: true,
+          env_fields: [],
+          missing_env: [],
+          capabilities: { asset_classes: ["stock"], supports_tick: true, supports_cancel: false },
         },
       ]);
     }
@@ -183,7 +207,7 @@ function mockLiveFetch(options: { alive?: boolean; accountMetrics?: boolean; dae
       return Response.json({
         instance: { instance_id: "live_sma", lifecycle: "running", deployment_level: "live", config_hash: "live-hash" },
         runtime: {
-          desired_state: "running", observed_state: "running", account_id: "live-account",
+          desired_state: "running", observed_state: "running", account_id_hash: "sha256:live-account-hash",
           broker: "emt", runner_heartbeat_at: "2026-07-06T10:02:03+08:00", reconcile_required: false,
         },
         stage_runs: [
@@ -192,6 +216,27 @@ function mockLiveFetch(options: { alive?: boolean; accountMetrics?: boolean; dae
         ],
         route_blocks: [],
       });
+    }
+    if (path === "/api/trading/deployments/paper_sma") {
+      return Response.json({
+        instance: { instance_id: "paper_sma", lifecycle: "ready", deployment_level: "paper", config_hash: "paper-hash" },
+        runtime: {
+          desired_state: "ready", observed_state: "ready", broker: "paper",
+          execution_environment: "local_paper", trade_provider: "paper", quote_provider: "paper",
+          quote_data_kind: "synthetic", reconcile_required: false,
+        },
+        stage_runs: [], route_blocks: [],
+      });
+    }
+    if (path === "/api/trading/deployments/paper_sma/execution-binding") {
+      return Response.json({
+        instance_id: "paper_sma", execution_environment: "local_paper",
+        trade_provider: "paper", quote_provider: "paper", account_profile: "",
+        quote_data_kind: "synthetic", binding_hash: "binding-paper", version: 1,
+      });
+    }
+    if (path === "/api/trading/deployments/paper_sma/qualification") {
+      return Response.json({ eligible_for_live_authorization: false });
     }
     if (path === "/api/trading/kill-switches") {
       return Response.json({ kill_switches: [] });
@@ -342,7 +387,7 @@ describe("LivePage", () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
     renderLivePage();
 
-    expect(await screen.findByRole("tab", { name: "模拟 PAPER" })).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByRole("tab", { name: "本地 Paper" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByText("策略运行")).toBeInTheDocument();
     expect(screen.getByText("手工交易")).toBeInTheDocument();
     expect(screen.queryByText("纸面演练")).not.toBeInTheDocument();
@@ -423,7 +468,7 @@ describe("LivePage", () => {
     await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input) === "/api/live/daemon/cancel")).toBe(true));
 
     fireEvent.click(screen.getByRole("button", { name: "停止 daemon" }));
-    await waitFor(() => expect(screen.getByRole("tab", { name: "模拟 PAPER" })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole("tab", { name: "本地 Paper" })).toBeEnabled());
     expect(fetchMock.mock.calls.some(([input]) => String(input) === "/api/live/daemon/stop")).toBe(true);
   });
 
@@ -465,6 +510,27 @@ describe("LivePage", () => {
     expect(postedJson(fetchMock, "/api/live/daemon/start")?.cash).toBeUndefined();
   });
 
+  it("offers only TTS for simulation and hard-disables routes on 7x24 replay quotes", async () => {
+    const fetchMock = mockLiveFetch({ alive: false });
+    renderLivePage();
+
+    fireEvent.click(await screen.findByRole("tab", { name: "柜台仿真" }));
+    await waitFor(() => expect(screen.getByText("tts")).toBeInTheDocument());
+    expect(postedJson(fetchMock, "/api/live/daemon/start")).toBeNull();
+
+    fireEvent.change(screen.getByLabelText("择时策略"), { target: { value: "paper_sma" } });
+    const quote = await screen.findByLabelText("行情源");
+    const broker = screen.getByLabelText("交易券商");
+    expect(broker).toHaveValue("tts");
+    expect(within(broker).getAllByRole("option").map((item) => item.textContent)).toEqual(["tts"]);
+    fireEvent.change(quote, { target: { value: "tts_7x24" } });
+
+    expect(await screen.findByText(/当前为回放行情/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "目标仓位" }));
+    expect(screen.getByLabelText("真实路由下单")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "对账并下单" })).toBeDisabled();
+  });
+
   it("persists environment changes and always resets target routing", async () => {
     mockLiveFetch({ alive: false });
     renderLivePage();
@@ -481,14 +547,17 @@ describe("LivePage", () => {
     expect(screen.getByLabelText("代码")).toHaveValue("");
   });
 
-  it("corrects the remembered workspace to the daemon's actual mode", async () => {
+  it("keeps namespaced environment tabs selectable while another daemon is running", async () => {
     window.localStorage.setItem("portal_live_workspace", "paper");
     mockLiveFetch({ daemonMode: "live" });
     renderLivePage();
-    await waitFor(() => expect(screen.getByRole("tab", { name: "实盘 LIVE" })).toHaveAttribute("aria-selected", "true"));
+
+    await waitFor(() => expect(screen.getByRole("tab", { name: "本地 Paper" })).toHaveAttribute("aria-selected", "true"));
+    const liveTab = screen.getByRole("tab", { name: "实盘 LIVE" });
+    expect(liveTab).toBeEnabled();
+    fireEvent.click(liveTab);
+    await waitFor(() => expect(liveTab).toHaveAttribute("aria-selected", "true"));
     expect(window.localStorage.getItem("portal_live_workspace")).toBe("live");
-    fireEvent.click(screen.getByRole("tab", { name: "目标仓位" }));
-    expect(screen.getByLabelText("真实路由下单")).not.toBeChecked();
   });
 
   it("stops polling the previous environment after a workspace switch", async () => {

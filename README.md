@@ -36,7 +36,7 @@ AlphaPilot 是一个面向股票的量化研究与交易平台，覆盖数据准
 | 日频信号 | `alphapilot daily_signals` | 按交易日推进持仓、生成单日调仓信号 |
 | 交易会话 | `alphapilot trade_session_create` | 将策略快照为可恢复的独立日频交易账户 |
 | 量化择时 | `alphapilot trading_instance_create` / `trading_backtest` | 通过正式策略实例完成技术指标信号预览、统一回放和受控部署；0.2.0 已移除旧 `timing_*` 入口 |
-| 模拟盘 / 实盘 | `alphapilot live_*` | `dry_run` / `paper` / `live` 运行模式、统一风控与 OMS、守护进程、恢复对账和审计账本；XTP Pro / EMT 通过可选插件接入 |
+| 模拟盘 / 实盘 | `alphapilot live_*` | `dry_run` / `paper` / `simulation` / `live` 运行模式、统一风控与 OMS、守护进程、恢复对账和审计账本；XTP Pro / EMT 实盘与 OpenCTP TTS 柜台仿真通过可选插件接入 |
 | 统一门户 | `alphapilot portal` | 数据、因子、回测、择时、任务、通知和实盘控制集中到同一界面 |
 | 数据准备 | `alphapilot prepare_data` | baostock / tushare → Qlib 数据链路 |
 | 通知与远程 | `alphapilot notify_commands` | 任务完成推送（Telegram / 飞书 / 邮件）+ 聊天命令远程发起与查询任务 |
@@ -87,13 +87,13 @@ AlphaPilot 的主线能力是自动化因子研究。你可以用自然语言启
 
 ### 模拟盘与实盘交易
 
-实盘系统把研究侧生成的目标持仓或择时信号接入统一执行链路：`LiveRuntime → LiveEngine → RiskGate → BrokerGateway`。默认模式是不会路由订单的 `dry_run`，本地演练使用 `paper`；只有显式选择 `live` 并再次确认后，命令才允许向真实券商路由。
+实盘系统把研究侧生成的目标持仓或择时信号接入统一执行链路：`LiveRuntime → LiveEngine → RiskGate → BrokerGateway`。默认模式是不会路由订单的 `dry_run`，本地演练使用 `paper`，外部柜台仿真使用 `simulation`；只有显式选择 `live` 并再次确认后，命令才允许向真实券商路由。
 
-- 支持 `dry_run`、`paper`、`live` 三级运行模式，以及前台运行和长驻 daemon
+- 支持 `dry_run`、`paper`、`simulation`、`shadow`、`live` 运行模式，以及前台运行和长驻 daemon
 - 支持人工委托、撤单和目标组合提交；自动策略只能通过持久化实例与 `trading_*` 部署控制启动
 - 所有订单统一经过交易时段、整手、价格、资金、持仓、集中度、单笔和日累计限额检查
 - 维护 OMS 状态、追加式审计账本、运行时快照和恢复对账；交易通道断线会触发 halt，恢复后仍需人工检查再继续
-- XTP Pro 和 EMT 券商 / 行情接入已从核心仓库解耦为可安装、可卸载的 pip 插件，交易通道和行情源可分别配置
+- XTP Pro、EMT 和 OpenCTP TTS 接入已从核心解耦为可安装、可卸载的 pip 插件，交易通道和行情源可分别配置
 - Portal「实盘交易」页面提供预检、连接、daemon 运维、正式策略部署、风控状态、委托与 ledger 查询
 
 最安全的体验路径是先从 paper daemon 开始：
@@ -106,7 +106,7 @@ alphapilot live_daemon_stop --mode paper
 
 > **实盘风险提示：** 该功能仍在持续开发和券商环境验证中。接入真实账户前，请先完成 paper 演练、插件与网络预检、小额柜台测试，并逐项确认风控限额和恢复结果。不要在未理解 `--confirm_live`、daemon 状态和 ledger 的情况下启用真实路由。
 
-详细安装、环境变量和验收流程见 [XTP Pro / EMT 实盘接入](docs/live-xtp.md) 与 [实盘插件开发和安装](docs/live-plugins.md)。
+详细安装、环境变量和验收流程见 [XTP Pro / EMT 实盘接入](docs/live-xtp.md)、[OpenCTP TTS 柜台仿真接入](docs/tts-simulation.md) 与 [实盘插件开发和安装](docs/live-plugins.md)。
 
 ### 统一 Web 门户
 
@@ -115,7 +115,7 @@ AlphaPilot 提供统一 Web 门户作为日常研究与运行入口，将数据�
 - 统一访问因子挖掘、回测、择时、策略库、市场数据、通知配置和实盘运行状态
 - 支持后台任务、定时任务和结果查看
 - 「回测」页内置完整可视化：累计收益 / 超额 / 账户 / 换手率图表、日期范围筛选、每日明细、因子排行榜与对比基准
-- 「实盘交易」页区分 paper / live 工作区，并提供预检、daemon、策略、风险与审计控制面
+- 「实盘交易」页区分实盘 / 柜台仿真 / 本地 Paper 工作区，并提供预检、daemon、策略、风险与审计控制面
 - 适合本地研究环境和服务器部署场景
 
 关键入口：`alphapilot portal`
@@ -301,6 +301,7 @@ alphapilot live_connect --mode live --broker xtp --timeout 30
 - [Docker 部署与服务化运行](docs/DOCKER.md)
 - [Docker 实际运行记录与排错](docs/DOCKER-RUN.md)
 - [XTP Pro / EMT 实盘接入](docs/live-xtp.md)
+- [OpenCTP TTS 柜台仿真接入](docs/tts-simulation.md)
 - [实盘券商/行情 pip 插件开发与安装](docs/live-plugins.md)
 - [important_data 目录、模板与资产说明](important_data/README.md)
 - [AlphaForge 相关说明](alphapilot/modules/alphaforge/README.md)

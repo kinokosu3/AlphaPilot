@@ -6,11 +6,114 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 
 from alphapilot.modules.portal.api import create_app
+from alphapilot.systems.live.brokers import registry as live_registry
+from alphapilot.systems.live.plugin import (
+    GatewayCapabilities,
+    LivePluginSpec,
+    ProviderSpec,
+    QuoteChannelSpec,
+    TradeChannelSpec,
+)
+from alphapilot.systems.trading.account_identity import account_identity_hash
+
+
+def _tts_contract_spec() -> LivePluginSpec:
+    """Portal contract fixture for the separately installed TTS plugin."""
+
+    return LivePluginSpec(
+        plugin_id="tts-contract-fixture",
+        providers=(
+            ProviderSpec(
+                name="tts",
+                factory_path="external_tts_plugin:create_gateway",
+                gateway_name="TTS",
+                trade=TradeChannelSpec(
+                    account_kind="simulation",
+                    capabilities=GatewayCapabilities(
+                        routable_asset_classes=("stock", "fund"),
+                    ),
+                ),
+            ),
+            ProviderSpec(
+                name="tts_7x24",
+                factory_path="external_tts_plugin:create_gateway",
+                gateway_name="TTS_7X24",
+                quote=QuoteChannelSpec(
+                    data_kind="replay",
+                    capabilities=GatewayCapabilities(
+                        routable_asset_classes=(),
+                        supports_cancel=False,
+                    ),
+                ),
+            ),
+        ),
+    )
 
 
 def _operator_headers(engine) -> dict[str, str]:  # noqa: ANN001
     token = engine.get_system("trading").create_operator_token("portal-test")["token"]
     return {"Authorization": f"Bearer {token}", "X-Request-ID": uuid4().hex}
+
+
+def test_tts_execution_binding_api_is_authenticated_and_provider_filtered(engine) -> None:
+    trading = engine.get_system("trading")
+    client = TestClient(create_app(engine=engine))
+    headers = _operator_headers(engine)
+    instance_id = f"tts-binding-{uuid4().hex}"
+    trading.create_instance({
+        "instance_id": instance_id,
+        "strategy_id": "dual_ma",
+        "params": {"short_window": 5, "long_window": 20},
+        "universe": ["SH600000"],
+        "frequency": "day",
+    })
+    trading.store.record_stage(instance_id, "replay", passed=True)
+    trading.store.promote(instance_id, "paper")
+    try:
+        live_registry.get_broker("tts")
+    except ValueError:
+        live_registry.register_plugin_spec(
+            _tts_contract_spec(), distribution="external-alphapilot-tts", version="test",
+        )
+
+    initial = client.get(
+        f"/api/trading/deployments/{instance_id}/execution-binding"
+    )
+    assert initial.status_code == 200
+    assert initial.json()["execution_environment"] == "local_paper"
+
+    payload = {
+        "execution_environment": "broker_simulation",
+        "trade_provider": "tts",
+        "quote_provider": "emt",
+        "account_profile": "tts-uat-main",
+        "reason": "bind protected TTS simulation account",
+    }
+    assert client.put(
+        f"/api/trading/deployments/{instance_id}/execution-binding", json=payload,
+    ).status_code == 401
+    assert client.put(
+        f"/api/trading/deployments/{instance_id}/execution-binding",
+        json={**payload, "reason": ""}, headers=headers,
+    ).status_code == 400
+    updated = client.put(
+        f"/api/trading/deployments/{instance_id}/execution-binding",
+        json=payload,
+        headers=headers,
+    )
+    assert updated.status_code == 200
+    assert updated.json()["trade_provider"] == "tts"
+    assert updated.json()["quote_provider"] == "emt"
+    assert updated.json()["quote_data_kind"] == "realtime"
+
+    simulation_brokers = client.get(
+        "/api/live/brokers?account_kind=simulation"
+    ).json()
+    assert [row["name"] for row in simulation_brokers] == ["tts"]
+    replay_quotes = client.get(
+        "/api/live/quote-providers?data_kind=replay"
+    ).json()
+    assert [row["name"] for row in replay_quotes] == ["tts_7x24"]
 
 
 def test_trading_definition_and_instance_api(engine) -> None:
@@ -60,7 +163,7 @@ def test_removed_timing_routes_are_absent_but_catalog_remains_auditable(engine) 
     assert client.post("/api/timing/backtest", json={}).status_code == 404
     assert client.get("/api/timing/jobs/missing/detail").status_code == 404
     compatibility = client.get("/api/trading/compatibility").json()
-    assert compatibility["schema_version"] == 8
+    assert compatibility["schema_version"] == 9
     assert compatibility["environment_id"]
     catalog = {
         row["entrypoint"]: row for row in compatibility["entrypoints"]
@@ -310,7 +413,7 @@ def test_formal_deployment_and_operator_routes_cover_success_and_validation(
         json={"account_id": "sim", "broker": "xtp", "reason": "operator approval"},
         headers=headers,
     )
-    assert authorized.json()["account_id"] == "sim"
+    assert authorized.json()["account_id_hash"] == account_identity_hash("sim")
     monkeypatch.setattr(
         trading,
         "authorize_live",

@@ -56,3 +56,12 @@ def test_docker_context_excludes_secrets_state_and_local_build_outputs() -> None
     }
     assert required <= set(ignored)
     assert "!.env.docker.example" in ignored
+
+
+def test_live_image_installs_standalone_tts_binding_and_plugin() -> None:
+    dockerfile = (ROOT / "Dockerfile.live").read_text(encoding="utf-8")
+    assert "FROM live-base AS live-tts" in dockerfile
+    assert "COPY alphapilot_tts/ ./alphapilot_tts/" in dockerfile
+    assert "pip install --no-deps --no-build-isolation ./alphapilot_tts" in dockerfile
+    assert "plugins/alphapilot_broker_tts" not in dockerfile
+    assert "LIVE_SMOKE_REQUIRE=xtp,emt,tts" in dockerfile

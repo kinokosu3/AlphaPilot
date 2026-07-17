@@ -11,6 +11,7 @@ load only inside a concrete gateway when ``mode == LIVE``.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -101,6 +102,7 @@ class LiveSystem(BaseSystem):
         quote_provider: str | None = None,
         ledger_dir: str | None = None,
         state_dir: str | None = None,
+        market_data_dir: str | None = None,
         runtime_id: str | None = None,
         now_fn=None,
         is_trading_day_fn=None,
@@ -122,6 +124,7 @@ class LiveSystem(BaseSystem):
             quote_provider=quote_provider,
             ledger_dir=ledger_dir,
             state_dir=state_dir,
+            market_data_dir=market_data_dir,
         )
         execution_journal = None
         route_authorizer = None
@@ -173,20 +176,26 @@ class LiveSystem(BaseSystem):
         return DaemonRuntimeControl(self.config)
 
     def broker_uat_harness(self, store):  # noqa: ANN001
-        """Build the local-only XTP/EMT UAT harness around the real runtime."""
+        """Build the local-only XTP/EMT/TTS UAT harness around the real runtime."""
 
         from alphapilot.systems.live.broker_uat import BrokerUATHarness
 
         def runtime_factory(broker: str):
+            selected = str(broker).lower()
+            simulation = selected == "tts"
+            quote_provider = (
+                str(os.getenv("ALPHAPILOT_BROKER_UAT_QUOTE_PROVIDER") or "").lower()
+                if simulation else selected
+            )
             return self.create_runtime(
-                mode=RunMode.LIVE,
-                broker=broker,
-                trade_broker=broker,
-                quote_provider=broker,
+                mode=RunMode.SIMULATION if simulation else RunMode.LIVE,
+                broker=selected,
+                trade_broker=selected,
+                quote_provider=quote_provider,
                 ledger_dir=str(
                     Path(self.config.ledger_dir).expanduser()
                     / "broker_uat"
-                    / str(broker).lower()
+                    / selected
                 ),
                 require_exchange_calendar=True,
             )
@@ -236,7 +245,13 @@ class LiveSystem(BaseSystem):
 
     # ---- introspection (used by CLI / portal) ---------------------------- #
     def modes(self) -> list[str]:
-        return [RunMode.DRY_RUN, RunMode.PAPER, RunMode.SHADOW, RunMode.LIVE]
+        return [
+            RunMode.DRY_RUN,
+            RunMode.PAPER,
+            RunMode.SIMULATION,
+            RunMode.SHADOW,
+            RunMode.LIVE,
+        ]
 
     def snapshot(self) -> dict[str, Any]:
         """Non-secret view of the resolved live configuration."""

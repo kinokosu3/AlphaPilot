@@ -60,19 +60,34 @@ def clone_config(
     quote_provider: str | None = None,
     ledger_dir: str | Path | None = None,
     state_dir: str | Path | None = None,
+    market_data_dir: str | Path | None = None,
+    execution_environment: str | None = None,
+    quote_data_kind: str | None = None,
 ) -> LiveConfig:
     """Return a config copy with optional runtime overrides."""
     trade_override = trade_broker or broker
     selected_trade = trade_override or config.trade_broker or config.broker
     selected_quote = quote_provider or (selected_trade if trade_override else config.quote_provider or selected_trade)
+    selected_mode = mode or config.mode
+    selected_environment = execution_environment or (
+        "broker_simulation" if selected_mode == RunMode.SIMULATION else
+        "local_paper" if selected_mode in {RunMode.PAPER, RunMode.DRY_RUN} else
+        "live"
+    )
     return replace(
         config,
-        mode=mode or config.mode,
+        mode=selected_mode,
         broker=selected_trade,
         trade_broker=selected_trade,
         quote_provider=selected_quote,
         ledger_dir=Path(ledger_dir).expanduser() if ledger_dir else config.ledger_dir,
         state_dir=Path(state_dir).expanduser() if state_dir else config.state_dir,
+        market_data=(
+            replace(config.market_data, data_dir=Path(market_data_dir).expanduser())
+            if market_data_dir else config.market_data
+        ),
+        execution_environment=selected_environment,
+        quote_data_kind=(config.quote_data_kind if quote_data_kind is None else quote_data_kind),
     )
 
 
@@ -127,8 +142,17 @@ class LiveRuntime:
             gateway = _make_trade_gateway(config)
             quote_gateway = quote_provider
         elif uses_real_providers(config.mode):
-            from alphapilot.systems.live.brokers.registry import create_gateway_pair
+            from alphapilot.systems.live.brokers.registry import (
+                create_gateway_pair,
+                validate_provider_pair,
+            )
 
+            _, quote_spec = validate_provider_pair(
+                config.mode,
+                config.trade_broker or config.broker,
+                config.quote_provider or config.trade_broker or config.broker,
+            )
+            config.quote_data_kind = quote_spec.data_kind
             gateway, quote_gateway = create_gateway_pair(
                 config.trade_broker or config.broker,
                 config.quote_provider or config.trade_broker or config.broker,
@@ -296,6 +320,11 @@ class LiveRuntime:
         self.recovery = RecoveryService(self).run()
         return self.recovery
 
+    def accept_recovery_baseline(self) -> None:
+        """Release the process-start baseline after a warning-free reconcile."""
+
+        self._recovery_state_baseline = (False, None, "")
+
     def reconnect(
         self,
         *,
@@ -310,9 +339,25 @@ class LiveRuntime:
         if setting is None:
             setting = build_runtime_setting(self.config)
         reconnect = self.engine.reconcile_after_reconnect(setting=setting, auto_resume=auto_resume)
+        counter_ready = True
+        if self.config.mode == RunMode.SIMULATION:
+            counter_ready = self.wait_ready(timeout=20.0)
         recovery = self.recover()
+        if self.config.mode == RunMode.SIMULATION:
+            if not counter_ready:
+                recovery.setdefault("warnings", []).append({
+                    "kind": "counter_reconciliation_incomplete",
+                })
+            if recovery.get("warnings"):
+                self.engine.halt("simulation reconnect reconciliation has unresolved warnings")
+            elif auto_resume:
+                self.accept_recovery_baseline()
         state = self.write_state()
-        return {"reconnect": reconnect, "recovery": recovery, "state": state}
+        return {
+            "reconnect": {**reconnect, "counter_ready": counter_ready},
+            "recovery": recovery,
+            "state": state,
+        }
 
     def wait_ready(
         self,
@@ -332,7 +377,16 @@ class LiveRuntime:
             oms = self.engine.oms
             account_ok = (not require_account) or oms.account is not None
             contracts_ok = (not require_contracts) or bool(oms.contracts)
-            if account_ok and contracts_ok:
+            reconciliation_ready = getattr(
+                self.engine.trade_gateway, "reconciliation_ready", True,
+            )
+            if callable(reconciliation_ready):
+                reconciliation_ready = reconciliation_ready()
+            gateway_ok = (
+                bool(reconciliation_ready)
+                if self.config.mode == RunMode.SIMULATION else True
+            )
+            if account_ok and contracts_ok and gateway_ok:
                 if settle_seconds > 0:
                     time.sleep(float(settle_seconds))
                 self.write_state()
@@ -357,8 +411,11 @@ class LiveRuntime:
         route_context: RouteContext | None = None,
     ) -> dict[str, Any]:
         """Submit one normalized order through the guarded engine path."""
-        if product.lower() in {"future", "futures"} and self.config.mode == RunMode.LIVE:
-            raise ValueError("futures live routing is not enabled")
+        if (
+            product.lower() in {"future", "futures"}
+            and self.config.mode in {RunMode.LIVE, RunMode.SIMULATION}
+        ):
+            raise ValueError("futures external routing is not enabled")
         code, parsed_exchange = normalize_symbol(symbol)
         resolved_exchange = _parse_exchange(exchange) if exchange else parsed_exchange
         side_l = side.lower()
@@ -531,6 +588,11 @@ class LiveRuntime:
         instance_id: str,
         config_hash: str,
         deployment_level: str,
+        execution_environment: str = "",
+        trade_provider: str = "",
+        quote_provider: str = "",
+        quote_data_kind: str = "",
+        binding_hash: str = "",
     ) -> AutomatedOrderRouter:
         """Return the only route port supplied to an automated strategy runner."""
 
@@ -544,6 +606,11 @@ class LiveRuntime:
                 broker=str(self.config.trade_broker or self.config.broker or ""),
                 deployment_level=str(deployment_level),
                 runtime_id=self.runtime_id,
+                execution_environment=str(execution_environment),
+                trade_provider=str(trade_provider),
+                quote_provider=str(quote_provider),
+                quote_data_kind=str(quote_data_kind),
+                binding_hash=str(binding_hash),
             )
 
         return AutomatedOrderRouter(self.engine, self.route_authorizer, context)
@@ -580,10 +647,8 @@ class LiveRuntime:
             )
             return None
         account = self.engine.oms.account
-        writer_lookup = getattr(self.execution_journal, "active_live_writer", None)
-        writer = (
-            writer_lookup(str(account.account_id))
-            if callable(writer_lookup) and account is not None else None
+        writer = self._active_automated_writer(
+            "" if account is None else str(account.account_id)
         )
         if writer is not None and request.is_buy:
             self.engine.ledger.record_event(
@@ -592,7 +657,7 @@ class LiveRuntime:
                     "origin": "manual",
                     "rule": "automated_writer_lock",
                     "reason": (
-                        "ordinary manual buys are disabled while LIVE writer "
+                        "ordinary manual buys are disabled while automated writer "
                         f"{writer['instance_id']} owns this account"
                     ),
                 },
@@ -654,11 +719,10 @@ class LiveRuntime:
         ))
         if blocks:
             return "kill_switch", f"route blocked by {route_block_summary(blocks)}"
-        writer_lookup = getattr(self.execution_journal, "active_live_writer", None)
-        writer = writer_lookup(account_id) if callable(writer_lookup) and account_id else None
+        writer = self._active_automated_writer(account_id)
         if writer is not None:
             return "automated_writer_lock", (
-                f"LIVE writer {writer['instance_id']} owns this account"
+                f"automated writer {writer['instance_id']} owns this account"
             )
         scenario_version = int(run.get("scenario_version") or 1)
         allowed_references = (
@@ -675,6 +739,28 @@ class LiveRuntime:
         if not bool(claim(run_id, expected_reference, notional)):
             return "duplicate", "the UAT route was already claimed or exhausted its cap"
         return None
+
+    def _active_automated_writer(self, account_id: str) -> dict[str, Any] | None:
+        """Find a live or simulation writer without weakening legacy journals."""
+
+        identity = str(account_id).strip()
+        if not identity:
+            return None
+        external_lookup = getattr(self.execution_journal, "active_external_writer", None)
+        if callable(external_lookup) and self.config.execution_environment in {
+            "live", "broker_simulation",
+        }:
+            writer = external_lookup(
+                execution_environment=self.config.execution_environment,
+                trade_provider=str(self.config.trade_broker or self.config.broker or "").lower(),
+                account_id=identity,
+            )
+            if writer is not None:
+                return writer
+        # Compatibility for journals predating execution-environment bindings,
+        # and for PAPER-hosted Broker UAT probing a real account.
+        live_lookup = getattr(self.execution_journal, "active_live_writer", None)
+        return live_lookup(identity) if callable(live_lookup) else None
 
     def _manual_route_blocks(self, context: RouteContext) -> list[dict[str, Any]]:
         lookup = getattr(self.execution_journal, "active_route_blocks", None)

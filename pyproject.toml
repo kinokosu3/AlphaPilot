@@ -119,4 +119,5 @@ markers = [
   "slow: heavy local computation (factor mining gp/aff/rl, qlib backtest)",
   "real_llm: needs OPENAI_API_KEY and consumes LLM API quota",
   "real_notify: sends real messages to external channels (telegram/feishu/email)",
+  "real_tts: requires TTS credentials and may submit orders to the simulation counter",
 ]

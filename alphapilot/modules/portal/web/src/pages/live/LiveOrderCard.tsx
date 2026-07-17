@@ -28,14 +28,15 @@ type Props = {
   target: JsonInputState;
   routeTarget: boolean;
   setRouteTarget: Dispatch<SetStateAction<boolean>>;
-  workspace: "live" | "paper";
+  workspace: "live" | "simulation" | "paper";
+  routeDisabled?: boolean;
   onSubmitOrder: () => void | Promise<unknown>;
   onSubmitTarget: () => void | Promise<unknown>;
 };
 
 export function LiveOrderCard(props: Props) {
   const { t } = useI18n();
-  const disabled = !props.daemon?.running;
+  const disabled = !props.daemon?.running || Boolean(props.routeDisabled);
 
   return (
     <section className="panel live-work-card" aria-labelledby="live-order-title">
@@ -45,6 +46,7 @@ export function LiveOrderCard(props: Props) {
           <span className="muted">{t("liveManualWorkspaceHint")}</span>
         </div>
         {props.workspace === "live" ? <span className="live-environment-badge live">{t("liveEnvironmentLive")}</span> : null}
+        {props.workspace === "simulation" ? <span className="live-environment-badge simulation">{t("liveEnvironmentSimulation")}</span> : null}
       </div>
       <div className="live-subtabs" role="tablist" aria-label={t("liveManualWorkspace")}>
         <button type="button" role="tab" aria-selected={props.ticket === "order"} className={props.ticket === "order" ? "active" : ""} onClick={() => props.setTicket("order")}>{t("liveNormalOrder")}</button>
@@ -73,7 +75,7 @@ export function LiveOrderCard(props: Props) {
         <div role="tabpanel" className="stack compact">
           <label className="field"><span>{t("liveTargetPosition")}</span><textarea rows={8} value={props.target.raw} onChange={(event) => props.target.setRaw(event.target.value)} spellCheck={false} /></label>
           <label className="inline-check compact">
-            <input aria-label={t("liveRouteTarget")} type="checkbox" checked={props.routeTarget} onChange={(event) => props.setRouteTarget(event.target.checked)} />
+            <input aria-label={t("liveRouteTarget")} type="checkbox" checked={props.routeTarget} disabled={props.routeDisabled} onChange={(event) => props.setRouteTarget(event.target.checked)} />
             <span>{props.routeTarget ? t("liveRouteTarget") : t("livePlanTarget")}</span>
           </label>
           <p className="muted compact">{t("liveDaemonTargetHint")}</p>
