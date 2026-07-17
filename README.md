@@ -35,7 +35,7 @@ AlphaPilot 是一个面向股票的量化研究与交易平台，覆盖数据准
 | 策略复测 | `alphapilot strategy_backtest` | 复用已沉淀的策略资产与模型继续验证 |
 | 日频信号 | `alphapilot daily_signals` | 按交易日推进持仓、生成单日调仓信号 |
 | 交易会话 | `alphapilot trade_session_create` | 将策略快照为可恢复的独立日频交易账户 |
-| 量化择时 | `alphapilot trading_instance_create` / `trading_backtest` | 通过正式策略实例完成技术指标信号预览、统一回放和受控部署；`timing_*` 仅为 0.1.x 兼容入口 |
+| 量化择时 | `alphapilot trading_instance_create` / `trading_backtest` | 通过正式策略实例完成技术指标信号预览、统一回放和受控部署；0.2.0 已移除旧 `timing_*` 入口 |
 | 模拟盘 / 实盘 | `alphapilot live_*` | `dry_run` / `paper` / `live` 运行模式、统一风控与 OMS、守护进程、恢复对账和审计账本；XTP Pro / EMT 通过可选插件接入 |
 | 统一门户 | `alphapilot portal` | 数据、因子、回测、择时、任务、通知和实盘控制集中到同一界面 |
 | 数据准备 | `alphapilot prepare_data` | baostock / tushare → Qlib 数据链路 |
@@ -90,11 +90,11 @@ AlphaPilot 的主线能力是自动化因子研究。你可以用自然语言启
 实盘系统把研究侧生成的目标持仓或择时信号接入统一执行链路：`LiveRuntime → LiveEngine → RiskGate → BrokerGateway`。默认模式是不会路由订单的 `dry_run`，本地演练使用 `paper`；只有显式选择 `live` 并再次确认后，命令才允许向真实券商路由。
 
 - 支持 `dry_run`、`paper`、`live` 三级运行模式，以及前台运行和长驻 daemon
-- 支持人工委托、撤单、目标组合提交，并可挂载内置择时策略 runner
+- 支持人工委托、撤单和目标组合提交；自动策略只能通过持久化实例与 `trading_*` 部署控制启动
 - 所有订单统一经过交易时段、整手、价格、资金、持仓、集中度、单笔和日累计限额检查
 - 维护 OMS 状态、追加式审计账本、运行时快照和恢复对账；交易通道断线会触发 halt，恢复后仍需人工检查再继续
 - XTP Pro 和 EMT 券商 / 行情接入已从核心仓库解耦为可安装、可卸载的 pip 插件，交易通道和行情源可分别配置
-- Portal「实盘交易」页面提供预检、连接、daemon 控制、策略控制、风控状态、委托与 ledger 查询
+- Portal「实盘交易」页面提供预检、连接、daemon 运维、正式策略部署、风控状态、委托与 ledger 查询
 
 最安全的体验路径是先从 paper daemon 开始：
 

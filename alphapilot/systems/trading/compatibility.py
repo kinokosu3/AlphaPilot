@@ -86,7 +86,7 @@ class CompatibilityEntrypoint:
     side_effects: tuple[str, ...] = ()
     auth: str = "same_as_replacement"
     test_id: str = ""
-    disposition: str = "remove_in_0.2.0"
+    disposition: str = "removed_in_0.2.0"
 
     def matrix_row(self) -> dict[str, Any]:
         return {
@@ -275,6 +275,7 @@ def register_manifest(store: Any) -> None:
             deprecated_since=DEPRECATED_SINCE,
             sunset_at=SUNSET_AT,
             removal_release=REMOVAL_RELEASE,
+            status="removed",
         )
 
 

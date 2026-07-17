@@ -1,9 +1,9 @@
 # 0.2.0 策略链路迁移、券商 UAT 与旧入口删除手册
 
 本文是 AlphaPilot 从 0.1.x 兼容入口迁移到正式 `/api/trading`、`trading_*` 链路的操作手册。
-代码具备这些能力不等于删除门禁已经通过。旧入口删除使用一次性完整等价验收、正式入口零调用
-证明和真实 XTP/EMT UAT v2；自动策略晋升 LIVE 仍独立要求 20 个 PAPER 交易日、5 个 SHADOW
-交易日和逐日 parity。两类证据都不能由单元测试或人工填写代替。
+0.2.0 已依据一次性完整等价验收、正式入口零调用证明和真实 XTP/EMT UAT v2 移除公共旧入口。
+自动策略晋升 LIVE 仍独立要求 20 个 PAPER 交易日、5 个 SHADOW 交易日和逐日 parity；接口删除
+不会绕过这项运行安全门禁。
 
 ## 已实现的链路
 
@@ -20,10 +20,9 @@ provider -> SignalEnvelope -> PortfolioPolicy -> PortfolioDecision
 和数据版本哈希。日线 Bar 统一按交易日期标识，避免历史回放的 `00:00` 和实盘收盘时间造成
 伪差异。
 
-旧 timing signal/backtest 目前由 `LegacyTimingCompatibilityAdapter` 转成仅允许 REPLAY 的临时
-实例，再调用正式 registry、decision pipeline、policy、ReplayRuntime 和执行状态机。临时实例
-不能晋升，也不能形成 PAPER、SHADOW 或自动路由证据。已完成的旧 Portal timing job 会幂等导入
-`backtest_runs`，并从正式 detail API 只读访问原 CSV 产物。
+兼容版本曾将旧 timing signal/backtest 转成仅允许 REPLAY 的临时实例，以完成等价验证和历史
+Portal job 导入。0.2.0 不再创建临时实例或接受旧 job kind；已导入的 `legacy_import`
+`backtest_runs`、兼容调用审计和 UAT 证据继续保留并可只读查询。
 
 ## 正式替代入口
 
@@ -42,12 +41,9 @@ provider -> SignalEnvelope -> PortfolioPolicy -> PortfolioDecision
 | 泛化 deployment action | 五个显式生命周期路由 |
 | 手工 stage start/finish/evaluate | runtime 自动 stage run + 只读 qualification |
 
-兼容 HTTP 响应固定返回 `Deprecation: true`、发布清单中的 `Sunset` 和 successor `Link`；14 个
-旧 HTTP 操作也在 OpenAPI 中标记 `deprecated: true`。8 个旧 CLI 的 help 和执行输出均显示 successor。
-`/api/trading/compatibility` 暴露 23 个兼容面的机器可读等价矩阵，包含输入/输出语义、状态副作用、
-权限边界、测试 ID 和最终处置。调用事件记录真实入口、环境、客户端类型/版本、来源和请求 ID 哈希；
-通用 job、module dispatcher 与 CLI 分开计数，避免一次请求污染多个零调用指标。Sunset 不能通过环境
-变量修改。
+0.2.0 中上述 HTTP 路径返回 404/405，旧 CLI 不再出现在 registry/help，旧 job kind 和 module
+dispatcher 调用会被拒绝。`/api/trading/compatibility` 继续以 `removed_in=0.2.0` 展示 23 个历史
+兼容面的机器可读等价矩阵；调用审计、环境报告和删除资格证据不随入口删除而丢失。
 
 ## REPLAY 与 SHADOW 一致性
 

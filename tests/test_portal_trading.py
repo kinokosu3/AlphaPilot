@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
-from alphapilot.modules.portal import jobs
-from alphapilot.modules.portal.api import create_app, _import_completed_timing_jobs
+from alphapilot.modules.portal.api import create_app
 
 
 def _operator_headers(engine) -> dict[str, str]:  # noqa: ANN001
@@ -55,82 +53,48 @@ def test_trading_definition_and_instance_api(engine) -> None:
     assert updated.json()["deployment_level"] == "replay"
 
 
-def test_legacy_timing_catalog_declares_compatibility_route(engine) -> None:
+def test_removed_timing_routes_are_absent_but_catalog_remains_auditable(engine) -> None:
     client = TestClient(create_app(engine=engine))
-    response = client.get("/api/timing/strategies", headers={"X-Request-ID": "legacy-call"})
-    body = response.json()
-    assert body["deprecated"] is True
-    assert body["replacement"] == "/api/trading/strategy-definitions"
-    assert response.headers["Deprecation"] == "true"
-    assert response.headers["Sunset"] == "Thu, 31 Dec 2026 00:00:00 GMT"
-    assert 'rel="successor-version"' in response.headers["Link"]
+    assert client.get("/api/timing/strategies").status_code == 404
+    assert client.post("/api/timing/signal", json={}).status_code == 404
+    assert client.post("/api/timing/backtest", json={}).status_code == 404
+    assert client.get("/api/timing/jobs/missing/detail").status_code == 404
     compatibility = client.get("/api/trading/compatibility").json()
     assert compatibility["schema_version"] == 8
     assert compatibility["environment_id"]
     catalog = {
         row["entrypoint"]: row for row in compatibility["entrypoints"]
     }
-    assert catalog["GET /api/timing/strategies"]["call_count"] >= 1
+    assert catalog["GET /api/timing/strategies"]["status"] == "removed"
+    assert catalog["GET /api/timing/strategies"]["removal_release"] == "0.2.0"
 
 
-def test_indirect_legacy_dispatches_warn_and_use_distinct_counters(
-    engine,
-    monkeypatch,
-) -> None:  # noqa: ANN001
+def test_indirect_timing_job_and_module_dispatch_are_removed(engine) -> None:  # noqa: ANN001
     trading = engine.get_system("trading")
     client = TestClient(create_app(engine=engine))
     before = {
         row["entrypoint"]: row["call_count"]
         for row in trading.compatibility_status()["entrypoints"]
     }
-    monkeypatch.setattr(
-        jobs,
-        "start_job",
-        lambda kind, kwargs: {
-            "job_id": "legacy-indirect",
-            "kind": kind,
-            "params": kwargs,
-            "status": "running",
-        },
-    )
-
     job = client.post(
         "/api/jobs",
         json={"kind": "timing_backtest", "kwargs": {"strategy_name": "sma_filter"}},
-        headers={"X-Request-ID": "legacy-job-kind"},
     )
-    assert job.status_code == 200
-    assert job.headers["Deprecation"] == "true"
-    assert "/api/trading/strategy-instances/" in job.headers["Link"]
+    assert job.status_code == 400
 
     modules = client.get("/api/modules")
-    timing_commands = {
-        item["name"]: item
-        for item in modules.json()["timing"]["commands"]
-    }
-    assert timing_commands["timing_strategies"]["deprecated"] is True
-    assert timing_commands["timing_strategies"]["replacement"] == "trading_definitions"
+    assert "timing" not in modules.json()
     dispatched = client.post(
         "/api/modules/run",
         json={"module": "timing", "command": "timing_strategies", "kwargs": {}},
-        headers={"X-Request-ID": "legacy-module-run"},
     )
-    assert dispatched.status_code == 200
-    assert dispatched.headers["Deprecation"] == "true"
+    assert dispatched.status_code == 404
 
     after = {
         row["entrypoint"]: row["call_count"]
         for row in trading.compatibility_status()["entrypoints"]
     }
-    assert (
-        after["POST /api/jobs kind=timing_backtest"]
-        == before["POST /api/jobs kind=timing_backtest"] + 1
-    )
-    assert (
-        after["POST /api/modules/run timing.timing_strategies"]
-        == before["POST /api/modules/run timing.timing_strategies"] + 1
-    )
-    assert after["CLI timing_strategies"] == before["CLI timing_strategies"]
+    assert after == before
 
 
 def test_broker_uat_http_surface_is_strictly_read_only(engine) -> None:
@@ -183,7 +147,7 @@ def test_parity_write_is_authenticated_and_qualification_is_runtime_derived(engi
     assert "required" in invalid.json()["detail"]
 
 
-def test_completed_legacy_timing_job_is_imported_into_formal_read_only_detail(
+def test_preimported_legacy_timing_job_remains_available_through_formal_detail(
     engine,
     isolated_env,
 ) -> None:
@@ -218,19 +182,38 @@ def test_completed_legacy_timing_job_is_imported_into_formal_read_only_detail(
         "result": {"artifact_dir": str(artifact), "total_return": 0.12},
     }), encoding="utf-8")
 
-    client = TestClient(create_app(engine=engine))
-    import_report = _import_completed_timing_jobs(engine)
-    imports = engine.get_system("trading").store.list_legacy_job_imports()
+    trading = engine.get_system("trading")
+    instance_id = f"legacy-import-{uuid4().hex}"
+    trading.create_instance({
+        "instance_id": instance_id,
+        "strategy_id": "sma_filter",
+        "params": {"window": 5},
+        "universe": ["600000.SSE"],
+    })
+    imported = trading.store.import_legacy_backtest_job(
+        job_id,
+        instance_id=instance_id,
+        request=params,
+        result={"artifact_dir": str(artifact), "total_return": 0.12},
+        artifact_dir=str(artifact),
+    )
+    imports = trading.store.list_legacy_job_imports()
 
-    assert import_report["skipped"] == []
     assert len(imports) == 1
-    run_id = imports[0]["run_id"]
+    run_id = imported["run_id"]
+    client = TestClient(create_app(engine=engine))
     detail = client.get(f"/api/trading/backtest-runs/{run_id}/detail")
     assert detail.status_code == 200
     assert detail.json()["origin"] == "legacy_import"
     assert detail.json()["detail"]["signals"][0]["instrument"] == "600000.SSE"
-    # Startup import is idempotent and cannot overwrite the original result.
-    TestClient(create_app(engine=engine))
+    # Re-registering the historical mapping is idempotent.
+    trading.store.import_legacy_backtest_job(
+        job_id,
+        instance_id=instance_id,
+        request=params,
+        result={"changed": True},
+        artifact_dir=str(artifact),
+    )
     assert len(engine.get_system("trading").store.list_legacy_job_imports()) == 1
 
 
@@ -265,6 +248,93 @@ def test_trading_kill_switch_api_engages_lists_and_releases(engine) -> None:
     assert released.json()["active"] is False
 
 
+def test_formal_deployment_and_operator_routes_cover_success_and_validation(
+    engine,
+    monkeypatch,
+) -> None:  # noqa: ANN001
+    trading = engine.get_system("trading")
+    client = TestClient(create_app(engine=engine))
+    headers = _operator_headers(engine)
+    instance_id = f"deployment-routes-{uuid4().hex}"
+    created = trading.create_instance({
+        "instance_id": instance_id,
+        "strategy_id": "sma_filter",
+        "params": {"window": 5},
+        "universe": ["600000.SSE"],
+    })
+
+    monkeypatch.setattr(
+        trading,
+        "deployment",
+        lambda requested: {"instance_id": requested, "lifecycle": "validated"},
+    )
+    monkeypatch.setattr(
+        trading,
+        "promote",
+        lambda requested, payload: {
+            "instance_id": requested,
+            "config_hash": created["config_hash"],
+            "deployment_level": payload["to"],
+        },
+    )
+    monkeypatch.setattr(
+        trading,
+        "authorize_live",
+        lambda requested, payload, operator: {
+            "instance_id": requested,
+            "account_id": payload["account_id"],
+            "operator_id": operator.operator_id,
+        },
+    )
+    monkeypatch.setattr(
+        trading,
+        "audit_events",
+        lambda limit=200: [{"action": "test", "limit": limit}],
+    )
+
+    deployment = client.get(f"/api/trading/deployments/{instance_id}")
+    assert deployment.json()["lifecycle"] == "validated"
+    assert client.post(
+        f"/api/trading/deployments/{instance_id}/promote",
+        json={"to": "paper"},
+        headers=headers,
+    ).status_code == 400
+    promoted = client.post(
+        f"/api/trading/deployments/{instance_id}/promote",
+        json={"to": "paper", "reason": "validated replay"},
+        headers=headers,
+    )
+    assert promoted.json()["deployment_level"] == "paper"
+    authorized = client.post(
+        f"/api/trading/deployments/{instance_id}/authorize-live",
+        json={"account_id": "sim", "broker": "xtp", "reason": "operator approval"},
+        headers=headers,
+    )
+    assert authorized.json()["account_id"] == "sim"
+    monkeypatch.setattr(
+        trading,
+        "authorize_live",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("approval rejected")),
+    )
+    rejected = client.post(
+        f"/api/trading/deployments/{instance_id}/authorize-live",
+        json={"account_id": "sim", "broker": "xtp", "reason": "bad approval"},
+        headers=headers,
+    )
+    assert rejected.status_code == 400
+    assert client.get("/api/trading/audit-events?limit=7").json()["events"][0]["limit"] == 7
+    assert client.post(
+        "/api/trading/kill-switches/global/all/invalid",
+        json={"reason": "invalid action"},
+        headers=headers,
+    ).status_code == 400
+    assert client.post(
+        "/api/trading/kill-switches/global/all/engage",
+        json={},
+        headers=headers,
+    ).status_code == 400
+
+
 def test_trading_write_api_requires_operator_token(engine) -> None:
     client = TestClient(create_app(engine=engine))
     response = client.post(
@@ -274,10 +344,7 @@ def test_trading_write_api_requires_operator_token(engine) -> None:
     assert response.status_code == 401
 
 
-def test_trading_migration_endpoints_are_audited_and_legacy_stage_counts_are_not_forgeable(
-    engine,
-    monkeypatch,
-) -> None:  # noqa: ANN001
+def test_removed_migration_write_endpoints_are_not_dispatchable(engine) -> None:
     trading = engine.get_system("trading")
     client = TestClient(create_app(engine=engine))
     headers = _operator_headers(engine)
@@ -293,52 +360,37 @@ def test_trading_migration_endpoints_are_audited_and_legacy_stage_counts_are_not
         headers=headers,
     ).status_code == 200
 
-    monkeypatch.setattr(
-        trading,
-        "backtest_instance",
-        lambda _instance_id, _payload: SimpleNamespace(
-            summary={"total_return": 0.1}, artifact_dir="/tmp/formal-replay",
-        ),
+    before = {
+        row["entrypoint"]: row["call_count"]
+        for row in trading.compatibility_status()["entrypoints"]
+    }
+    probes = (
+        ("POST", f"/api/trading/strategy-instances/{instance_id}/backtest"),
+        ("POST", f"/api/trading/stage-runs/{instance_id}/paper/start"),
+        ("POST", "/api/trading/stage-runs/missing/finish"),
+        ("POST", f"/api/trading/stage-runs/{instance_id}/paper/evaluate"),
+        ("POST", f"/api/trading/deployments/{instance_id}/unknown-action"),
     )
-    sync = client.post(
-        f"/api/trading/strategy-instances/{instance_id}/backtest",
-        json={"reason": "compatibility verification"},
-        headers=headers,
-    )
-    assert sync.status_code == 200
-    assert sync.headers["Deprecation"] == "true"
-    trading.store.record_stage(instance_id, "replay", passed=True)
-    trading.store.promote(instance_id, "paper")
+    for method, path in probes:
+        response = client.request(method, path, json={}, headers=headers)
+        assert response.status_code in {404, 405}, (path, response.text)
 
-    started = client.post(
-        f"/api/trading/stage-runs/{instance_id}/paper/start", headers=headers,
-    )
-    assert started.status_code == 200, started.text
-    run_id = started.json()["run_id"]
-    finished = client.post(
-        f"/api/trading/stage-runs/{run_id}/finish",
-        json={"trading_sessions": 999, "status": "completed"},
-        headers=headers,
-    )
-    assert finished.status_code == 200
-    assert finished.json()["trading_sessions"] == 0
-    evaluated = client.post(
-        f"/api/trading/stage-runs/{instance_id}/paper/evaluate", headers=headers,
-    )
-    assert evaluated.status_code == 200
-    assert evaluated.json()["passed"] is False
+    stage_runs = client.get(f"/api/trading/deployments/{instance_id}/stage-runs")
+    assert stage_runs.status_code == 200
+    assert stage_runs.json()["stage_runs"] == []
 
-    fallback = client.post(
-        f"/api/trading/deployments/{instance_id}/unknown-action",
-        json={},
-        headers=headers,
-    )
-    assert fallback.status_code == 400
-    compatibility = client.get("/api/trading/compatibility").json()
-    counts = {row["entrypoint"]: row["call_count"] for row in compatibility["entrypoints"]}
-    assert counts["POST /api/trading/strategy-instances/{id}/backtest"] >= 1
-    assert counts["POST /api/trading/stage-runs/*"] >= 3
-    assert counts["POST /api/trading/deployments/{id}/{action}"] >= 1
+    after = {
+        row["entrypoint"]: row["call_count"]
+        for row in trading.compatibility_status()["entrypoints"]
+    }
+    assert after == before
+    removed = {
+        row["entrypoint"]: row["status"]
+        for row in trading.compatibility_status()["entrypoints"]
+    }
+    assert removed["POST /api/trading/strategy-instances/{id}/backtest"] == "removed"
+    assert removed["POST /api/trading/stage-runs/*"] == "removed"
+    assert removed["POST /api/trading/deployments/{id}/{action}"] == "removed"
 
 
 def test_trading_parity_and_read_only_uat_detail_routes(engine, monkeypatch) -> None:  # noqa: ANN001
@@ -393,7 +445,7 @@ def test_new_read_only_trading_routes_convert_internal_failures_to_http_errors(
         monkeypatch.setattr(trading, method, original)
 
 
-def test_completed_timing_job_import_skips_unrelated_and_corrupt_jobs(
+def test_portal_startup_does_not_execute_removed_timing_job_importer(
     engine,
     isolated_env,
 ) -> None:  # noqa: ANN001
@@ -408,7 +460,7 @@ def test_completed_timing_job_import_skips_unrelated_and_corrupt_jobs(
         "job_id": "corrupt-timing", "kind": "timing_backtest", "status": "succeeded",
     }), encoding="utf-8")
 
-    report = _import_completed_timing_jobs(engine)
+    TestClient(create_app(engine=engine))
 
-    assert report["imported"] == 0
-    assert report["skipped"][0]["job_id"] == "corrupt-timing"
+    assert engine.get_system("trading").store.list_legacy_job_imports() == []
+    assert (corrupt / "job.json").is_file()

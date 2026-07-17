@@ -171,31 +171,6 @@ class FakeBacktestSystem:
         return workspace_id == "run1"
 
 
-class FakeTimingSystem:
-    def list_strategies(self) -> list[dict[str, Any]]:
-        return [
-            {
-                "name": "sma_filter",
-                "description": "Long when close is above MA.",
-                "defaults": {"window": 20, "target_percent": 1.0},
-            }
-        ]
-
-    def generate_signals(self, request: Any) -> pd.DataFrame:
-        return pd.DataFrame(
-            [
-                {
-                    "datetime": "2026-01-01",
-                    "instrument": "SZ000001",
-                    "signal": 1,
-                    "target_percent": request.target_percent,
-                    "score": 0.1,
-                    "reason": request.strategy_name,
-                }
-            ]
-        )
-
-
 class FakeConfig:
     class data:
         qlib_data_dir = "qlib"
@@ -222,7 +197,6 @@ class FakeEngine:
             "factor": FakeFactorSystem(),
             "strategy": FakeStrategySystem(),
             "backtest": FakeBacktestSystem(),
-            "timing": FakeTimingSystem(),
         }
         self.modules = {}
 
@@ -557,6 +531,146 @@ def test_factor_category_and_backtest_routes(tmp_path, monkeypatch) -> None:  # 
     assert started.json()["job_id"] == "bt1"
 
 
+def test_portal_settings_and_extended_factor_strategy_routes(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    from alphapilot.modules.portal.api import _count_unique_symbols
+
+    c = client(tmp_path, monkeypatch)
+    assert _count_unique_symbols(["600000", "600000", " "]) == 1
+
+    settings = c.patch(
+        "/api/portal/settings",
+        json={"host": "127.0.0.1", "port": 19902, "timezone": "Asia/Shanghai"},
+    )
+    assert settings.status_code == 200
+    assert settings.json()["settings"]["port"] == 19902
+    monkeypatch.setattr(
+        "alphapilot.modules.portal.api.schedule_current_process_restart",
+        lambda: {"pid": 42, "scheduled": True},
+    )
+    restarted = c.post("/api/portal/restart")
+    assert restarted.json()["restart"]["scheduled"] is True
+    assert c.get("/api/portal/env").status_code == 200
+
+    c.post(
+        "/api/factors",
+        json={"factor_name": "mom", "factor_expression": "$close", "categories": ["momentum"]},
+    )
+    removed = c.post(
+        "/api/factors/categories/bulk?op=remove",
+        json={"factor_names": ["mom"], "category": "momentum"},
+    )
+    assert removed.json()["changed"] == ["mom"]
+    updated = c.post(
+        "/api/factors/categories/bulk?op=set",
+        json={"name": "mom", "categories": ["quality"]},
+    )
+    assert updated.json()["updated"] is True
+    exported = c.post(
+        "/api/factors/categories/bulk?op=export",
+        json={
+            "category": "quality",
+            "output_path": str(tmp_path / "important_data" / "factor_zoo" / "quality.csv"),
+        },
+    )
+    assert exported.json()["count"] == 1
+    invalid = c.post("/api/factors/categories/bulk?op=invalid", json={})
+    assert invalid.status_code == 400
+
+    def fake_start(kind: str, kwargs: dict[str, Any], **_opts: Any) -> dict[str, Any]:
+        return {"job_id": "category-bt", "kind": kind, "params": kwargs}
+
+    monkeypatch.setattr(jobs, "start_job", fake_start)
+    category_run = c.post(
+        "/api/factors/backtest",
+        json={"category": "quality", "options": {"mode": "single_ic"}},
+    )
+    assert category_run.json()["job_id"] == "category-bt"
+    assert c.post("/api/factors/backtest", json={"factor_names": ["missing"]}).status_code == 400
+
+    strategy_system = c.app.state.engine.get_system("strategy")
+    monkeypatch.setattr(
+        strategy_system,
+        "create_strategy_from_factors",
+        lambda **payload: {"strategy_name": payload["strategy_name"], "saved": True},
+        raising=False,
+    )
+    created = c.post(
+        "/api/strategies/from-factors",
+        json={"strategy_name": "factor-strategy", "factor_names": ["mom"]},
+    )
+    assert created.json()["saved"] is True
+
+    def fail_strategy(**_payload):  # noqa: ANN003, ANN202
+        raise ValueError("bad strategy")
+
+    monkeypatch.setattr(
+        strategy_system, "create_strategy_from_factors", fail_strategy,
+    )
+    assert c.post(
+        "/api/strategies/from-factors",
+        json={"strategy_name": "broken", "factor_names": ["mom"]},
+    ).status_code == 400
+    missing_source = tmp_path / "important_data" / "imports" / "missing.pdf"
+    assert c.post(
+        "/api/strategies/import",
+        json={"kind": "pdf", "source": str(missing_source)},
+    ).status_code == 404
+    assert c.get("/api/strategies").status_code == 200
+    missing_export = c.post(
+        "/api/strategies/export",
+        json={
+            "strategy_name": "missing",
+            "output_path": str(tmp_path / "important_data" / "strategy_zoo" / "missing.json"),
+        },
+    )
+    assert missing_export.status_code == 404
+    assert c.get("/api/strategies/missing/export").status_code == 404
+    assert c.delete("/api/strategies/missing").json()["deleted"] is False
+
+    leaderboard_root = tmp_path / "workspaces"
+    leaderboard = leaderboard_root / "batch" / "factor_leaderboard.csv"
+    leaderboard.parent.mkdir(parents=True)
+    pd.DataFrame({"factor_name": ["mom"], "ic": [0.12]}).to_csv(
+        leaderboard, index=False,
+    )
+    c.app.state.engine.config.backtest.workspace_root = str(leaderboard_root)
+    listed = c.get(
+        "/api/backtests/leaderboards", params={"workspace_root": str(leaderboard_root)},
+    )
+    assert listed.json()[0]["file"] == "batch/factor_leaderboard.csv"
+    detail = c.get(
+        "/api/backtests/leaderboard",
+        params={
+            "file": "batch/factor_leaderboard.csv",
+            "workspace_root": str(leaderboard_root),
+        },
+    )
+    assert detail.json()["numeric_columns"] == ["ic"]
+    assert c.get(
+        "/api/backtests/leaderboard",
+        params={"file": "../outside.csv", "workspace_root": str(leaderboard_root)},
+    ).status_code == 400
+
+    def fail(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise ValueError("injected portal failure")
+
+    monkeypatch.setattr("alphapilot.modules.portal.api.save_portal_settings", fail)
+    assert c.patch(
+        "/api/portal/settings",
+        json={"host": "127.0.0.1", "port": 19903},
+    ).status_code == 400
+    monkeypatch.setattr(
+        "alphapilot.modules.portal.api.schedule_current_process_restart", fail,
+    )
+    assert c.post("/api/portal/restart").status_code == 400
+    monkeypatch.setattr(strategy_system.param_database, "save", fail)
+    assert c.post(
+        "/api/strategies", json={"strategy_name": "broken", "params": {}},
+    ).status_code == 400
+    monkeypatch.setattr(jobs, "start_job", fail)
+    assert c.post("/api/daily-trade", json={"strategy_name": "broken"}).status_code == 400
+
+
 def test_strategy_import_export_routes(tmp_path, monkeypatch) -> None:  # noqa: ANN001
     c = client(tmp_path, monkeypatch)
     c.post("/api/strategies", json={"strategy_name": "s1", "params": {"a": 1}})
@@ -807,71 +921,20 @@ def test_generic_module_run_cannot_bypass_live_or_destructive_api_guards(tmp_pat
     assert calls == []
 
 
-def test_timing_routes_start_jobs_and_preview_artifacts(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+def test_removed_timing_routes_and_job_kind_are_rejected(tmp_path, monkeypatch) -> None:  # noqa: ANN001
     c = client(tmp_path, monkeypatch)
 
-    strategies = c.get("/api/timing/strategies")
-    assert strategies.status_code == 200
-    assert strategies.json()["names"] == ["sma_filter"]
+    assert c.get("/api/timing/strategies").status_code == 404
+    assert c.post("/api/timing/signal", json={}).status_code == 404
+    assert c.post("/api/timing/backtest", json={}).status_code == 404
+    assert c.get("/api/timing/jobs/timing1/detail").status_code == 404
 
-    signal = c.post(
-        "/api/timing/signal",
-        json={
-            "strategy_name": "sma_filter",
-            "symbols": "000001 sz600000",
-            "target_percent": 0.5,
-            "strategy_params": {"window": 3},
-        },
+    removed_job = c.post(
+        "/api/jobs",
+        json={"kind": "timing_backtest", "kwargs": {"strategy_name": "dual_ma"}},
     )
-    assert signal.status_code == 200
-    body = signal.json()
-    assert body["strategy_name"] == "sma_filter"
-    assert body["signals"]["row_count"] == 1
-    assert body["signals"]["rows"][0]["target_percent"] == 0.5
-
-    started: list[tuple[str, dict[str, Any]]] = []
-
-    def fake_start(kind: str, kwargs: dict[str, Any], **_opts: Any) -> dict[str, Any]:
-        started.append((kind, kwargs))
-        return {"job_id": "timing1", "kind": kind, "status": "running", "params": kwargs}
-
-    monkeypatch.setattr(jobs, "start_job", fake_start)
-    backtest = c.post("/api/timing/backtest", json={"strategy_name": "dual_ma", "symbols": ["000001"]})
-    assert backtest.json()["job_id"] == "timing1"
-    assert started == [("timing_backtest", {"strategy_name": "dual_ma", "symbols": ["000001"]})]
-
-    artifact = tmp_path / "timing_artifact"
-    artifact.mkdir()
-    (artifact / "summary.json").write_text(
-        '{"strategy":"dual_ma","final_equity":101000,"total_return":0.01,"artifact_dir":"' + str(artifact) + '"}',
-        encoding="utf-8",
-    )
-    pd.DataFrame([{"datetime": "2026-01-01", "equity": 100000}]).to_csv(artifact / "equity_curve.csv", index=False)
-    pd.DataFrame([{"datetime": "2026-01-02", "instrument": "SZ000001", "side": "buy"}]).to_csv(
-        artifact / "trades.csv",
-        index=False,
-    )
-    pd.DataFrame([{"datetime": "2026-01-01", "instrument": "SZ000001", "amount": 100}]).to_csv(
-        artifact / "positions.csv",
-        index=False,
-    )
-    pd.DataFrame([{"datetime": "2026-01-01", "instrument": "SZ000001", "signal": 1}]).to_csv(
-        artifact / "signals.csv",
-        index=False,
-    )
-    monkeypatch.setattr(
-        jobs,
-        "get_job",
-        lambda job_id, **_opts: {"job_id": job_id, "kind": "timing_backtest", "params": {}, "status": "succeeded"},
-    )
-    monkeypatch.setattr(jobs, "read_result", lambda job_id, **_opts: {"result": {"artifact_dir": str(artifact)}})
-
-    detail = c.get("/api/timing/jobs/timing1/detail")
-    assert detail.status_code == 200
-    data = detail.json()
-    assert data["summary"]["strategy"] == "dual_ma"
-    assert data["equity_curve"]["row_count"] == 1
-    assert data["trades"]["rows"][0]["side"] == "buy"
+    assert removed_job.status_code == 400
+    assert "Unsupported portal job kind" in removed_job.json()["detail"]
 
 
 def test_mining_session_routes_reject_percent_encoded_parent_escape(tmp_path, monkeypatch) -> None:  # noqa: ANN001

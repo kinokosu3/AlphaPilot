@@ -201,18 +201,11 @@ def test_model_artifact_requires_explicit_trusted_root(tmp_path: Path, monkeypat
     assert len(verify_trusted_model(model)) == 64
 
 
-def test_live_runner_accepts_only_promoted_instance(engine, tmp_path: Path) -> None:
-    from datetime import datetime
-
-    from alphapilot.systems.live.brokers.paper import PaperBroker
-    from alphapilot.systems.live.clock import SimulatedClock
-    from alphapilot.systems.live.config import LiveConfig, RunMode
-    from alphapilot.systems.live.daemon import _build_timing_runner
-    from alphapilot.systems.live.engine import LiveEngine
-    from alphapilot.systems.live.ledger import Ledger
+def test_daemon_runner_accepts_only_promoted_persistent_instance(engine) -> None:
+    from alphapilot.systems.live.daemon import _build_strategy_instance_runner
 
     trading = engine.get_system("trading")
-    instance_id = f"live-{tmp_path.name}"
+    instance_id = "live-promoted-instance"
     trading.create_instance({
         "instance_id": instance_id,
         "strategy_id": "dual_ma",
@@ -220,37 +213,57 @@ def test_live_runner_accepts_only_promoted_instance(engine, tmp_path: Path) -> N
         "universe": ["SH600000"],
         "frequency": "day",
     })
-    trading.validate_instance(instance_id)
-    for stage, target in (("replay", "paper"), ("paper", "shadow")):
-        trading.store.record_stage(instance_id, stage, passed=True)
-        trading.store.promote(instance_id, target)
-    trading.store.record_stage(instance_id, "shadow", passed=True)
-    trading.store.promote(
-        instance_id, "live", account_id="acc", broker="paper", approval="test-approval"
+    runtime = engine.get_system("live").create_runtime(
+        mode="paper",
+        broker="paper",
+        trade_broker="paper",
     )
-
-    clock = SimulatedClock(datetime(2026, 7, 6, 9, 10))
-    cfg = LiveConfig(mode=RunMode.LIVE, state_dir=tmp_path / "state", ledger_dir=tmp_path / "ledger")
-    broker = PaperBroker(cash=100_000, prices={"600000.SSE": 10.0})
-    live_engine = LiveEngine(
-        cfg, broker, ledger=Ledger(cfg.ledger_dir), now_fn=clock, is_trading_day_fn=lambda _dt: True,
-    )
-    live_engine.connect({})
-
-    with pytest.raises(ValueError, match="legacy"):
-        _build_timing_runner(
-            live_engine, ["600000"], timing_strategy="dual_ma",
-            timing_params={"target_percent": 0.2}, timing_freq="day",
-            bar_seconds=60, min_bars=30, window=250,
-            kernel_engine=engine, state_dir=cfg.state_dir,
+    runtime.enable_market_data(["600000"])
+    runtime.connect(paper_cash=100_000)
+    try:
+        assert _build_strategy_instance_runner(
+            runtime.engine,
+            ["600000"],
+            bar_seconds=60,
+            kernel_engine=engine,
+            runtime=runtime,
+            bar_source=runtime.market_data,
+        ) is None
+        with pytest.raises(KeyError, match="unknown strategy instance"):
+            _build_strategy_instance_runner(
+                runtime.engine,
+                ["600000"],
+                bar_seconds=60,
+                kernel_engine=engine,
+                strategy_instance_id="missing",
+                runtime=runtime,
+                bar_source=runtime.market_data,
+            )
+        with pytest.raises(ValueError, match="promoted to PAPER"):
+            _build_strategy_instance_runner(
+                runtime.engine,
+                ["600000"],
+                bar_seconds=60,
+                kernel_engine=engine,
+                strategy_instance_id=instance_id,
+                runtime=runtime,
+                bar_source=runtime.market_data,
+            )
+        trading.store.record_stage(instance_id, "replay", passed=True)
+        trading.store.promote(instance_id, "paper")
+        runner = _build_strategy_instance_runner(
+            runtime.engine,
+            ["600000"],
+            bar_seconds=60,
+            kernel_engine=engine,
+            strategy_instance_id=instance_id,
+            runtime=runtime,
+            bar_source=runtime.market_data,
         )
-    runner = _build_timing_runner(
-        live_engine, ["600000"], timing_strategy=None, timing_params=None,
-        timing_freq="day", bar_seconds=60, min_bars=30, window=250,
-        kernel_engine=engine, state_dir=cfg.state_dir, strategy_instance_id=instance_id,
-    )
-    assert runner.status()["instance_id"] == instance_id
-    assert runner.step()["instance_id"] == instance_id
+        assert runner.status()["instance_id"] == instance_id
+        runner.stop()
+    finally:
+        runtime.close()
 
 
 def test_qlib_model_scores_share_the_signal_record_contract() -> None:
@@ -266,69 +279,34 @@ def test_qlib_model_scores_share_the_signal_record_contract() -> None:
     ]
 
 
-def test_legacy_paper_daemon_strategy_is_adapted_to_authorized_temporary_instance(
-    engine,
-) -> None:
-    from datetime import datetime, timezone
+def test_daemon_runner_has_no_anonymous_strategy_construction_path() -> None:
+    import inspect
 
-    from alphapilot.systems.live.daemon import _build_timing_runner
-    from alphapilot.systems.live.types import Exchange, OrderRequest
+    from alphapilot.systems.live.daemon import _build_strategy_instance_runner
 
-    live = engine.get_system("live")
-    runtime = live.create_runtime(mode="paper", broker="paper", trade_broker="paper")
-    runtime.connect(paper_cash=100_000)
-    runner = _build_timing_runner(
-        runtime.engine,
+    parameters = inspect.signature(_build_strategy_instance_runner).parameters
+    assert "strategy_instance_id" in parameters
+    assert {
+        "timing_strategy",
+        "timing_params",
+        "timing_freq",
+        "min_bars",
+        "window",
+    }.isdisjoint(parameters)
+    assert _build_strategy_instance_runner(
+        object(),
         ["600000"],
-        timing_strategy="dual_ma",
-        timing_params={"short_window": 5, "long_window": 20, "target_percent": 0.2},
-        timing_freq="day",
         bar_seconds=60,
-        min_bars=30,
-        window=250,
-        kernel_engine=engine,
-        state_dir=runtime.config.state_dir,
-        runtime=runtime,
-    )
-    trading = engine.get_system("trading")
-    temporary_id = runner.status()["instance_id"]
-    assert temporary_id.startswith("legacy-paper-dual_ma-")
-    temporary = trading.store.get_instance(temporary_id)
-    assert temporary["deployment_level"] == "paper"
-    assert trading.store.get_active_stage_run(temporary_id, stage="paper") is not None
-
-    trading.store.transition_runtime(
-        temporary_id,
-        lifecycle="running",
-        desired_state="running",
-        observed_state="running",
-        runner_heartbeat_at=datetime.now(timezone.utc).isoformat(),
-    )
-    request = OrderRequest.buy(
-        "600000",
-        Exchange.SSE,
-        100,
-        10.0,
-        reference=(
-            f"{temporary_id}:{temporary['config_hash']}:"
-            "decision:600000.SSE:B:0"
-        ),
-    )
-    runner.route_port.submit(request)
-
-    assert runner.route_port.last_authorization is not None
-    assert runner.route_port.last_authorization.allowed is True
-    runner.stop()
-    runtime.close()
+    ) is None
 
 
-def test_real_daemon_legacy_paper_name_uses_formal_instance_runner(
+def test_real_daemon_persistent_paper_instance_uses_formal_instance_runner(
     engine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from datetime import datetime, timedelta
 
-    from alphapilot.systems.live.daemon import _build_timing_runner
+    from alphapilot.systems.live.daemon import _build_strategy_instance_runner
     from alphapilot.systems.live.instance_runner import StrategyInstanceRunner
     from alphapilot.systems.trading.contracts import CompletedBar, PriceAdjustment
 
@@ -369,20 +347,25 @@ def test_real_daemon_legacy_paper_name_uses_formal_instance_runner(
     runtime = live.create_runtime(mode="paper", broker="paper", trade_broker="paper")
     runtime.connect(paper_cash=100_000)
     trading = engine.get_system("trading")
+    instance_id = "formal-paper-dual-ma"
+    trading.create_instance({
+        "instance_id": instance_id,
+        "strategy_id": "dual_ma",
+        "params": {"short_window": 5, "long_window": 20, "target_percent": 0.2},
+        "universe": ["SH600000"],
+        "frequency": "day",
+    })
+    trading.store.record_stage(instance_id, "replay", passed=True)
+    trading.store.promote(instance_id, "paper")
     monkeypatch.setattr(trading, "historical_data", History())
     bar_source = BarSource()
 
-    runner = _build_timing_runner(
+    runner = _build_strategy_instance_runner(
         runtime.engine,
         ["600000"],
-        timing_strategy="dual_ma",
-        timing_params={"short_window": 5, "long_window": 20, "target_percent": 0.2},
-        timing_freq="day",
         bar_seconds=60,
-        min_bars=30,
-        window=250,
         kernel_engine=engine,
-        state_dir=runtime.config.state_dir,
+        strategy_instance_id=instance_id,
         runtime=runtime,
         bar_source=bar_source,
     )
@@ -393,3 +376,123 @@ def test_real_daemon_legacy_paper_name_uses_formal_instance_runner(
     assert bar_source.listeners
     runner.stop()
     runtime.close()
+
+
+def test_timing_policy_rejects_unsafe_exposure_configurations() -> None:
+    from alphapilot.systems.trading.contracts import (
+        AccountSnapshot,
+        PortfolioContext,
+        PortfolioInputs,
+        SignalEnvelope,
+        SignalKind,
+        TimingSignal,
+    )
+    from alphapilot.systems.trading.portfolio import TimingFixedExposurePolicy
+
+    envelope = SignalEnvelope(
+        kind=SignalKind.INSTRUMENT_TIMING,
+        source_instance_id="timing-policy",
+        as_of="2026-07-17",
+        payload=TimingSignal(
+            scores={"600000.SSE": 1.0, "000001.SZ": 0.5},
+            states={"600000.SSE": "long", "000001.SZ": "long"},
+        ),
+    )
+    inputs = PortfolioInputs(instrument_timing=(envelope,))
+    context = PortfolioContext(
+        as_of=envelope.as_of,
+        account=AccountSnapshot("paper", envelope.as_of, 100_000, 100_000),
+    )
+
+    with pytest.raises(ValueError, match="above investable"):
+        TimingFixedExposurePolicy(
+            target_percent=0.3, max_position_weight=0.3, cash_buffer=0.5,
+        ).build(inputs, context)
+    with pytest.raises(ValueError, match="exposure budget"):
+        TimingFixedExposurePolicy(
+            target_percent=0.3,
+            max_position_weight=0.3,
+            cash_buffer=0.8,
+            exposure_mode="equal_active_budget",
+        ).build(inputs, context)
+    with pytest.raises(ValueError, match="exposure_mode"):
+        TimingFixedExposurePolicy(exposure_mode="unsupported").build(inputs, context)
+
+
+def test_contract_redaction_release_and_parity_validation_branches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from alphapilot.systems.live.redaction import redact_secrets
+    from alphapilot.systems.trading.contracts import CompletedBar
+    from alphapilot.systems.trading.parity import DecisionParityService
+    from alphapilot.systems.trading.release_verification import (
+        report_path_for,
+        required_checks_for,
+    )
+
+    with pytest.raises(ValueError, match="ISO date"):
+        CompletedBar(
+            datetime="not-a-date",
+            instrument="600000.SSE",
+            open=10,
+            high=11,
+            low=9,
+            close=10,
+        )
+    monkeypatch.setenv("TEST_API_TOKEN", "private-token")
+    assert redact_secrets({
+        "password": "plain",
+        "nested": ["private-token", {"safe": "token=inline"}],
+    }) == {
+        "password": "********",
+        "nested": ["********", {"safe": "token=********"}],
+    }
+    with pytest.raises(ValueError, match="build_kind"):
+        report_path_for("unknown")
+    with pytest.raises(ValueError, match="build_kind"):
+        required_checks_for("unknown")
+
+    template = {
+        "config_hash": "current",
+        "as_of": "2026-07-17T15:00:00+08:00",
+        "observation_id": "observation",
+    }
+
+    class Store:
+        def __init__(self) -> None:
+            self.results = []
+
+        def create_parity_run(self, *_args, **_kwargs):  # noqa: ANN002, ANN003, ANN201
+            return {"parity_run_id": "parity", "config_hash": "current"}
+
+        def get_instance(self, _instance_id):  # noqa: ANN001, ANN201
+            return {"config": {"frequency": "day"}}
+
+        def list_decision_observations(self, _instance_id, *, mode, run_id):  # noqa: ANN001, ANN201
+            del run_id
+            if mode == "replay":
+                return [
+                    {**template, "observation_id": "replay-1"},
+                    {**template, "observation_id": "replay-2"},
+                    {**template, "config_hash": "stale", "observation_id": "stale"},
+                ]
+            return [{**template, "observation_id": "shadow"}]
+
+        def record_parity_result(self, *_args, **kwargs):  # noqa: ANN002, ANN003, ANN201
+            self.results.append(kwargs)
+
+        def finish_parity_run(self, run_id, *, details):  # noqa: ANN001, ANN201
+            return {"parity_run_id": run_id, "details": details, "results": self.results}
+
+    store = Store()
+    result = DecisionParityService(store).compare(
+        "instance", replay_run_id="replay", shadow_stage_run_id="shadow",
+    )
+    assert result["results"][0]["status"] == "not_comparable"
+    assert result["results"][0]["details"] == {
+        "replay_count": 2, "shadow_count": 1,
+    }
+    missing = DecisionParityService._compare_observations(None, template)
+    assert missing[2] == {"missing": "replay"}
+    missing = DecisionParityService._compare_observations(template, None)
+    assert missing[2] == {"missing": "shadow"}

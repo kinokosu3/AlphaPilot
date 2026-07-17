@@ -68,12 +68,9 @@ EXPECTED_COMMANDS = {
     "live_daemon_resume",
     "live_daemon_refresh",
     "live_daemon_reconnect",
-    "live_daemon_strategy_pause",
-    "live_daemon_strategy_resume",
-    "live_daemon_strategy_start",
-    "live_daemon_strategy_status",
-    "live_daemon_strategy_stop",
     "live_daemon_submit_target",
+    "live_market_bars",
+    "live_market_snapshot",
     "live_modes",
     "live_ledger_events",
     "live_cancel",
@@ -107,9 +104,37 @@ EXPECTED_COMMANDS = {
     "strategy_backtest_list",
     "strategy_create",
     "timezone",
-    "timing_backtest",
-    "timing_signal",
-    "timing_strategies",
+    "trading_audit",
+    "trading_authorize_live",
+    "trading_backtest",
+    "trading_backtest_cancel",
+    "trading_backtest_status",
+    "trading_broker_uat_abort",
+    "trading_broker_uat_preflight",
+    "trading_broker_uat_resume",
+    "trading_broker_uat_start",
+    "trading_broker_uat_status",
+    "trading_compatibility",
+    "trading_definitions",
+    "trading_instance_create",
+    "trading_instance_from_research",
+    "trading_instance_validate",
+    "trading_instances",
+    "trading_kill_switch",
+    "trading_operator_token",
+    "trading_parity_start",
+    "trading_parity_status",
+    "trading_pause",
+    "trading_policies",
+    "trading_preview",
+    "trading_promote",
+    "trading_qualification",
+    "trading_reconcile",
+    "trading_removal_check",
+    "trading_resume",
+    "trading_start",
+    "trading_status",
+    "trading_stop",
     "trade_session_cash",
     "trade_session_create",
     "trade_session_delete",
@@ -190,6 +215,11 @@ def cli_ctx(tmp_path: Path) -> CliContext:
             "ALPHAPILOT_PORTAL_SETTINGS_PATH": str(tmp_path / "portal_settings.json"),
             "ALPHAPILOT_NOTIFY_CREDENTIALS_PATH": str(tmp_path / "notify.json"),
             "ALPHAPILOT_NOTIFY_COMMAND_ROOT": str(tmp_path / "notify_commands"),
+            "ALPHAPILOT_LIVE_STATE_DIR": str(tmp_path / "live_state"),
+            "ALPHAPILOT_LIVE_LEDGER_DIR": str(tmp_path / "live_ledger"),
+            "ALPHAPILOT_LIVE_MARKET_DATA_DIR": str(tmp_path / "live_market"),
+            "ALPHAPILOT_OPERATOR_AUTH_REQUIRED": "false",
+            "ALPHAPILOT_AUTOMATED_LIVE_ENABLED": "false",
             "ALPHAPILOT_TIMEZONE": "Asia/Shanghai",
             "MPLCONFIGDIR": str(tmp_path / "mplconfig"),
             "STREAMLIT_BROWSER_GATHER_USAGE_STATS": "false",
@@ -412,6 +442,11 @@ def test_real_cli_command_smoke(cli_ctx: CliContext) -> None:
     discovered = _run_ok(ctx, "modules")
     for command in EXPECTED_COMMANDS:
         assert command in _combined(discovered), f"{command} missing from alphapilot modules"
+    formal_help_commands = {
+        name for name in EXPECTED_COMMANDS if name.startswith("trading_")
+    } | {"live_market_bars", "live_market_snapshot"}
+    for command in sorted(formal_help_commands):
+        _run_ok(ctx, command, "--", "--help")
 
     _write_fake_run(ctx, "smoke-run")
     (ctx.log_dir / "smoke-session").mkdir(parents=True)
@@ -510,22 +545,6 @@ def test_real_cli_command_smoke(cli_ctx: CliContext) -> None:
         )
         started_daemon = True
         time.sleep(1)
-        _run_ok(ctx, "live_daemon_strategy_status", "--wait=True", "--timeout=5", f"--state_dir={daemon_state}")
-        _run_ok(
-            ctx,
-            "live_daemon_strategy_start",
-            "--timing_strategy=sma_filter",
-            "--symbols=600000",
-            "--timing_params={\"window\":2,\"target_percent\":0.2}",
-            "--timing_freq=min",
-            "--min_bars=2",
-            "--wait=True",
-            "--timeout=5",
-            f"--state_dir={daemon_state}",
-        )
-        _run_ok(ctx, "live_daemon_strategy_pause", "--wait=True", "--timeout=5", f"--state_dir={daemon_state}")
-        _run_ok(ctx, "live_daemon_strategy_resume", "--wait=True", "--timeout=5", f"--state_dir={daemon_state}")
-        _run_ok(ctx, "live_daemon_strategy_stop", "--wait=True", "--timeout=5", f"--state_dir={daemon_state}")
         _run_ok(
             ctx,
             "live_daemon_halt",
@@ -681,31 +700,39 @@ def test_real_cli_command_smoke(cli_ctx: CliContext) -> None:
     assert (ctx.qlib_dir / "features" / STEM).is_dir()
 
     _run_ok(ctx, "list_stocks")
-    _run_ok(ctx, "timing_strategies")
-    timing_signals = ctx.cwd / "timing_signals.csv"
+    _run_ok(ctx, "trading_definitions")
+    _run_ok(ctx, "trading_policies")
+    _run_ok(ctx, "trading_instances")
+    _run_ok(
+        ctx,
+        "trading_instance_create",
+        "--instance_id=cli-sma-filter",
+        "--strategy_id=sma_filter",
+        f"--universe={SYMBOL}",
+        "--params={\"window\":2}",
+        "--frequency=day",
+        f"--data_policy={{\"data_dir\":\"{ctx.raw_backward}\",\"feature_adjustment\":\"backward\"}}",
+        "--portfolio_policy={\"policy_id\":\"timing_fixed_exposure\",\"params\":{\"target_percent\":0.2}}",
+    )
+    _run_ok(ctx, "trading_instance_validate", "--instance_id=cli-sma-filter")
+    timing_signals = ctx.cwd / "timing_signals.json"
     timing_out = ctx.cwd / "timing_backtest"
     _run_ok(
         ctx,
-        "timing_signal",
-        "--strategy_name=sma_filter",
-        f"--symbols={SYMBOL}",
-        f"--data_dir={ctx.raw_backward}",
-        f"--start_date={START_DATE}",
-        f"--end_date={END_DATE}",
-        "--strategy_params={\"window\":2}",
-        f"--output={timing_signals}",
+        "trading_preview",
+        "--instance_id=cli-sma-filter",
+        f"--options={{\"data_dir\":\"{ctx.raw_backward}\",\"start_date\":\"{START_DATE}\",\"end_date\":\"{END_DATE}\"}}",
+        f"--output_path={timing_signals}",
     )
     assert timing_signals.is_file()
     _run_ok(
         ctx,
-        "timing_backtest",
-        "--strategy_name=sma_filter",
-        f"--symbols={SYMBOL}",
-        f"--data_dir={ctx.raw_backward}",
-        f"--start_date={START_DATE}",
-        f"--end_date={END_DATE}",
-        "--strategy_params={\"window\":2}",
+        "trading_backtest",
+        "--instance_id=cli-sma-filter",
+        f"--options={{\"data_dir\":\"{ctx.raw_backward}\",\"start_date\":\"{START_DATE}\",\"end_date\":\"{END_DATE}\"}}",
+        "--wait=True",
         f"--output_dir={timing_out}",
+        timeout=180,
     )
     assert (timing_out / "summary.json").is_file()
     _run_ok(

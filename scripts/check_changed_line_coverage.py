@@ -108,7 +108,8 @@ def _score(
     relevant = {
         path: lines
         for path, lines in changed.items()
-        if path.endswith(suffixes)
+        if lines
+        and path.endswith(suffixes)
         and not (
             path.endswith((".test.ts", ".test.tsx", ".d.ts", "/types.ts", "/main.tsx"))
         )

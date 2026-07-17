@@ -1274,6 +1274,8 @@ def test_account_sizer_reserves_fees_and_is_symbol_order_independent() -> None:
 def test_decision_pipeline_requires_complete_universe_warmup_and_latest_watermark(
     tmp_path: Path,
 ) -> None:
+    from dataclasses import replace
+
     from alphapilot.systems.trading.application import WarmupRequired
 
     registry = StrategyRegistry(local_root=tmp_path / "missing-strategies").discover(
@@ -1307,6 +1309,22 @@ def test_decision_pipeline_requires_complete_universe_warmup_and_latest_watermar
         store=StrategyRuntimeStore(tmp_path / "watermark.sqlite3"),
         calendar=calendar,
     )
+    undersized_window = replace(
+        instance,
+        data_policy={**instance.data_policy, "history_window": 2},
+        config_hash="",
+    )
+    with pytest.raises(ValueError, match="below required_history=3"):
+        pipeline.evaluate(
+            undersized_window,
+            _bars(
+                instance.universe,
+                ["2026-07-08", "2026-07-09", "2026-07-10"],
+                adjustment=PriceAdjustment.BACKWARD,
+                frequency="day",
+                data_version="features",
+            ),
+        )
     only_one = _bars(
         ("600000.SSE",),
         ["2026-07-08", "2026-07-09", "2026-07-10"],

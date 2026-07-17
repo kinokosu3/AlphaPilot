@@ -12,7 +12,7 @@ import pytest
 from alphapilot.systems.live import broker_uat as broker_uat_module
 from alphapilot.systems.live.broker_uat import BrokerUATHarness, CONFIRMATION
 from alphapilot.systems.live.redaction import redact_secrets
-from alphapilot.systems.timing.base import TimingBacktestRequest
+from alphapilot.systems.trading.contracts import SignalKind
 from alphapilot.systems.trading.domain import StrategyInstanceConfig
 from alphapilot.systems.trading.parity import (
     DecisionParityService,
@@ -105,7 +105,7 @@ def test_compatibility_equivalence_matrix_is_complete_and_machine_readable() -> 
     assert all(row["classification"] for row in matrix)
     assert all(row["semantic_fields"] for row in matrix)
     assert all(row["test_id"] for row in matrix)
-    assert all(row["disposition"] == "remove_in_0.2.0" for row in matrix)
+    assert all(row["disposition"] == "removed_in_0.2.0" for row in matrix)
     assert len({row["test_id"] for row in matrix}) == len(matrix)
 
 
@@ -1715,66 +1715,82 @@ def test_removal_source_scan_covers_all_first_party_code_except_compatibility_bo
     }
 
 
-def test_all_registered_timing_strategies_pass_legacy_to_formal_equivalence_matrix(
-    engine,
-    tmp_path: Path,
-) -> None:
-    data_root = tmp_path / "raw"
-    data_root.mkdir()
-    dates = pd.date_range("2026-01-01", periods=90, freq="D")
-    for stem, offset in (("sz000001", 0.0), ("sh600000", 2.0)):
-        closes = [10.0 + offset + index * 0.03 for index in range(len(dates))]
-        pd.DataFrame({
-            "date": dates.strftime("%Y-%m-%d"),
-            "code": [stem] * len(dates),
-            "open": closes,
-            "high": [value + 0.2 for value in closes],
-            "low": [value - 0.2 for value in closes],
-            "close": closes,
-            "volume": [10_000] * len(dates),
-            "amount": [100_000] * len(dates),
-        }).to_csv(data_root / f"{stem}.csv", index=False)
-
-    timing = engine.get_system("timing")
-    trading = engine.get_system("trading")
-    timing_ids = sorted(
-        definition.strategy_id
-        for definition in trading.registry.list()
-        if definition.signal_kind.value == "instrument_timing"
+def test_historical_timing_equivalence_projection_survives_engine_removal() -> None:
+    definition = SimpleNamespace(
+        strategy_id="sma_filter",
+        signal_kind=SignalKind.INSTRUMENT_TIMING,
+        code_hash="current-code",
     )
-    for strategy_id in timing_ids:
-        result = timing.run_backtest(TimingBacktestRequest(
-            strategy_name=strategy_id,
-            symbols=["sz.000001"],
-            start_date="2026-01-05",
-            end_date="2026-03-20",
-            data_dir=data_root,
-            adjust_mode="none",
-            output_dir=tmp_path / "matrix" / strategy_id,
-            target_percent=1.0,
-        ))
-        assert result.summary["compatibility_equivalence"]["status"] == "passed"
 
-    for label, symbols, target in (
-        ("multi", ["sz.000001", "sh.600000"], 0.2),
-        ("zero", ["sz.000001"], 0.0),
-    ):
-        timing.run_backtest(TimingBacktestRequest(
-            strategy_name="sma_filter",
-            symbols=symbols,
-            start_date="2026-01-05",
-            end_date="2026-03-20",
-            data_dir=data_root,
-            adjust_mode="none",
-            output_dir=tmp_path / "matrix" / label,
-            strategy_params={"window": 5},
-            target_percent=target,
-        ))
+    def get_definition(strategy_id: str):  # noqa: ANN202
+        if strategy_id != definition.strategy_id:
+            raise KeyError(strategy_id)
+        return definition
 
-    status = trading.compatibility_status()["timing_equivalence"]
-    assert status["passed"] is True
-    assert status["missing_strategies"] == []
-    assert status["missing_cases"] == []
+    registry = SimpleNamespace(list=lambda: [definition], get=get_definition)
+
+    def run(
+        run_id: str,
+        *,
+        universe: list[str],
+        target: float,
+        request: dict[str, object] | None = None,
+        status: str = "completed",
+        code_hash: str = "current-code",
+        strategy_id: str = "sma_filter",
+    ) -> dict[str, object]:
+        return {
+            "run_id": run_id,
+            "strategy_id": strategy_id,
+            "status": status,
+            "result": {"compatibility_equivalence": {"status": "passed"}},
+            "instance_config": {
+                "strategy_code_hash": code_hash,
+                "universe": universe,
+                "portfolio_policy": {"params": {"target_percent": target}},
+            },
+            "request": request or {},
+        }
+
+    runs = [
+        run(
+            "single-zero",
+            universe=["600000.SSE"],
+            target=0.0,
+            request={"start_date": "2026-01-01"},
+        ),
+        run("multi-twenty", universe=["600000.SSE", "000001.SZSE"], target=0.2),
+        run("single-full", universe=["600000.SSE"], target=1.0),
+        run("incomplete", universe=["600000.SSE"], target=1.0, status="failed"),
+        run("stale", universe=["600000.SSE"], target=1.0, code_hash="stale-code"),
+        run(
+            "unknown", universe=["600000.SSE"], target=1.0,
+            strategy_id="removed-strategy",
+        ),
+    ]
+    system = object.__new__(TradingStrategySystem)
+    system.registry = registry
+    system.store = SimpleNamespace(list_legacy_compatibility_runs=lambda: runs)
+
+    result = system._timing_equivalence_status()
+
+    assert result["passed"] is True
+    assert result["missing_strategies"] == []
+    assert result["missing_cases"] == []
+    assert result["coverage"]["sma_filter"]["passed_runs"] == 3
+
+
+def test_changed_line_coverage_ignores_deleted_files() -> None:
+    from scripts.check_changed_line_coverage import _score
+
+    result = _score(
+        {"alphapilot/removed.py": set(), "alphapilot/kept.py": {1}},
+        {"alphapilot/kept.py": {"executable": {1}, "covered": {1}}},
+        (".py",),
+    )
+
+    assert result["passed"] is True
+    assert result["missing_files"] == []
 
 
 def test_formal_cli_preview_files_and_waiting_backtest_replace_legacy_quick_commands(

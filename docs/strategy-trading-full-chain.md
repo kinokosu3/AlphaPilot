@@ -302,20 +302,19 @@ LIVE approval、Broker UAT、基准持仓、审计事件和逐环境旧入口调
 启动恢复顺序固定为：读取检查点和执行日志，查询 Broker 账户/持仓/委托/成交，修复本地
 投影并检测差异；差异未解决时维持暂停并阻断路由。
 
-## 兼容入口和删除条件
+## 0.2.0 入口收敛结果
 
-本轮不删除旧入口：
+0.2.0 在完成等价矩阵、受控环境零调用、XTP/EMT UAT 和发布构建门禁后，移除了：
 
-- `/api/timing/*` 和 `timing_*` CLI 是新能力迁移期间的兼容入口；API 返回标准弃用信息并
-  记录入口、环境、客户端和来源。它们已转接正式 registry、决策管线和 ReplayRuntime，临时
-  实例只能 REPLAY，不能产生部署证据。
-- `/api/live/daemon/strategy/*` 不再由 Portal 调用，但内部 daemon 控制命令仍保留。
-- daemon 的 strategy-name 参数只保留 PAPER 兼容并记录调用量。
-- `/api/strategies/*`、`strategy_create`、`strategy_backtest` 仍是研究资产接口，不等同于
-  正式可部署实例，因此暂不删除。
-- 手工 `live_order`、`live_cancel`、`live_submit_target` 是 UAT 和恢复入口，暂不删除。
+- `/api/timing/*`、`timing_*` CLI 和 `timing_backtest` Portal job kind；
+- `/api/live/daemon/strategy/*`、`live_daemon_strategy_*` 以及 daemon 的匿名 strategy-name 参数；
+- 同步实例 backtest、泛化 deployment action 和手工 stage-run 写接口。
 
-某个旧公开入口只有同时满足以下条件才可在单独破坏性版本删除：
+内部 daemon IPC 与 `strategy_instance_id` 子进程协议继续由 `RuntimeControlPort` 使用，不是公共
+兼容入口。`/api/strategies/*`、`strategy_create`、`strategy_backtest` 仍用于研究资产；人工
+`live_order`、`live_cancel`、`live_submit_target` 仍用于 UAT 和受审计恢复。
+
+删除前使用的门禁为：
 
 1. 每个旧用例通过新链路一次性完整语义等价矩阵，Portal、CLI、后台 job 和生产源码无旧引用；
 2. 所有受控环境从 migration cutoff 起，在仅使用正式新入口的验收周期内旧调用为零；

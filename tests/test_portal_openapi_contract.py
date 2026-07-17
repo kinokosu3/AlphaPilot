@@ -10,9 +10,9 @@ from fastapi.testclient import TestClient
 from alphapilot.modules.portal.api import create_app
 
 
-EXPECTED_OPERATION_COUNT = 165
-EXPECTED_PATH_COUNT = 150
-EXPECTED_CONTRACT_SHA256 = "473700062213573050785caa1093d5ee52aca1edc13b49d5fe9b061387d29b30"
+EXPECTED_OPERATION_COUNT = 151
+EXPECTED_PATH_COUNT = 136
+EXPECTED_CONTRACT_SHA256 = "2150630638df42351059638dbfcf4f45a46a25b2ca6f883be0ba04c01f3c82e2"
 HTTP_METHODS = {"get", "post", "put", "patch", "delete"}
 LEGACY_HTTP_OPERATIONS = {
     ("get", "/api/timing/strategies"),
@@ -80,8 +80,14 @@ def test_all_typed_operations_declare_validation_errors() -> None:
         assert "200" in operation["responses"], item
 
 
-def test_all_legacy_http_operations_are_marked_deprecated() -> None:
+def test_removed_http_operations_are_absent_and_none_remain_deprecated() -> None:
     spec = create_app().openapi()
+    operations = {
+        (method, path)
+        for path, path_item in spec["paths"].items()
+        for method in path_item
+        if method in HTTP_METHODS
+    }
     deprecated = {
         (method, path)
         for path, path_item in spec["paths"].items()
@@ -89,7 +95,8 @@ def test_all_legacy_http_operations_are_marked_deprecated() -> None:
         if method in HTTP_METHODS and operation.get("deprecated") is True
     }
 
-    assert deprecated == LEGACY_HTTP_OPERATIONS
+    assert LEGACY_HTTP_OPERATIONS.isdisjoint(operations)
+    assert deprecated == set()
 
 
 def test_representative_resource_and_validation_failures_never_return_500(isolated_env) -> None:

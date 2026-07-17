@@ -153,10 +153,10 @@ checkpoint/provenance、详细兼容调用、决策观测与 parity；v7 增加 
 - `POST /api/trading/deployments/{id}/promote`
 - `POST /api/trading/deployments/{id}/start|pause|reconcile|resume|stop|status`
 
-旧 `/api/timing/*` 和 daemon strategy-name 调用仍只在 0.1.x 兼容期存在，响应会给出固定
-Sunset 和正式 successor。timing signal/backtest 已转接仅 REPLAY 的正式临时实例；旧 PAPER
-daemon 会转换为普通持久化实例，之后只能通过 `strategy_instance_id` 控制。正式实例禁止跨部署
-状态目录运行，LIVE 自动策略只接受已经晋升且通过 qualification 的 `instance_id`。
+0.2.0 已移除旧 `/api/timing/*`、`timing_*` CLI、公开 daemon strategy-name 控制和匿名 PAPER
+runner。调用方必须先创建并验证持久化实例，再通过正式 preview、异步 backtest 和 deployment
+接口运行；daemon 子进程只接受内部 `strategy_instance_id` 协议。正式实例禁止跨部署状态目录
+运行，LIVE 自动策略只接受已经晋升且通过 qualification 的 `instance_id`。
 
 完整的多环境迁移、XTP/EMT UAT 和 0.2.0 删除门禁见
 [《0.2.0 策略链路迁移、券商 UAT 与旧入口删除手册》](strategy-trading-migration-0.2.md)。

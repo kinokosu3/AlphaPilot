@@ -51,26 +51,16 @@ def test_start_job_persists_unique_directories(tmp_path):
     assert {job["job_id"] for job in listed} == {first["job_id"], second["job_id"]}
 
 
-def test_timing_backtest_job_kind_dispatches_to_timing_module(monkeypatch):
-    calls: list[dict[str, Any]] = []
-
-    class FakeTimingModule:
-        def timing_backtest(self, **kwargs: Any) -> dict[str, Any]:
-            calls.append(kwargs)
-            return {"strategy": kwargs["strategy_name"], "artifact_dir": "/tmp/timing"}
-
-    class FakeEngine:
-        def get_module(self, name: str) -> Any:
-            assert name == "timing"
-            return FakeTimingModule()
-
-    monkeypatch.setattr(alphapilot.kernel, "build_engine", lambda discover=True: FakeEngine())
-
-    result = jobs._run_target("timing_backtest", {"strategy_name": "dual_ma", "symbols": ["000001"]})
-
-    assert "timing_backtest" in jobs.VALID_KINDS
-    assert result["strategy"] == "dual_ma"
-    assert calls == [{"strategy_name": "dual_ma", "symbols": ["000001"]}]
+def test_timing_backtest_job_kind_is_removed(tmp_path):
+    assert "timing_backtest" not in jobs.VALID_KINDS
+    with pytest.raises(ValueError, match="Unsupported portal job kind"):
+        jobs.start_job(
+            "timing_backtest",
+            {"strategy_name": "dual_ma"},
+            job_root=tmp_path,
+        )
+    with pytest.raises(ValueError, match="Unsupported portal job kind"):
+        jobs._run_target("timing_backtest", {"strategy_name": "dual_ma"})
 
 
 @pytest.mark.parametrize(
@@ -82,7 +72,6 @@ def test_timing_backtest_job_kind_dispatches_to_timing_module(monkeypatch):
         ("strategy_backtest", "strategy_backtest", "strategy_backtest", {"strategy_name": "qa"}),
         ("daily_signals", "daily_trade", "daily_signals", {"strategy_name": "qa"}),
         ("data", "data", "pipeline", {"action": "pipeline", "market": "qa"}),
-        ("timing_backtest", "timing", "timing_backtest", {"strategy_name": "dual_ma"}),
         ("mine_aff", "alphaforge_aff", "mine_aff", {"epochs": 1}),
         ("mine_gp", "alphaforge_search", "mine_gp", {"generations": 1}),
         ("mine_rl", "alphaforge_search", "mine_rl", {"steps": 128}),

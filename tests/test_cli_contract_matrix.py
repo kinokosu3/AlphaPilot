@@ -36,9 +36,9 @@ def _fire_exit_code(commands, command: list[str]) -> tuple[int, str]:  # noqa: A
     return 0, output.getvalue()
 
 
-def test_all_125_cli_commands_have_help_and_inspectable_signatures(engine) -> None:  # noqa: ANN001
+def test_all_117_cli_commands_have_help_and_inspectable_signatures(engine) -> None:  # noqa: ANN001
     commands = engine.collect_commands()
-    assert len(commands) == 125
+    assert len(commands) == 117
     assert set(commands) == set(EXPECTED_CLI_COMMANDS)
 
     for name, command in sorted(commands.items()):
@@ -55,55 +55,28 @@ def test_cli_unknown_command_has_nonzero_stable_error(engine) -> None:  # noqa: 
     assert "Could not consume arg" in output or "ERROR" in output
 
 
-def test_all_legacy_cli_help_declares_deprecation_and_successor(engine) -> None:  # noqa: ANN001
+def test_all_legacy_cli_commands_are_absent(engine) -> None:  # noqa: ANN001
     commands = engine.collect_commands()
+    assert LEGACY_CLI_COMMANDS.isdisjoint(commands)
     for name in sorted(LEGACY_CLI_COMMANDS):
-        code, help_text = _fire_exit_code(commands, [name, "--", "--help"])
-        assert code == 0, name
-        assert "Deprecated" in help_text, name
-        assert "trading_" in help_text, name
+        code, output = _fire_exit_code(commands, [name])
+        assert code != 0, name
+        assert "Could not consume arg" in output or "ERROR" in output
 
 
-def test_legacy_cli_execution_warns_and_records_the_exact_surface(
-    engine,
-    monkeypatch,
-    capsys,
-) -> None:  # noqa: ANN001
+def test_removed_cli_catalog_is_historical_and_not_dispatchable(engine) -> None:  # noqa: ANN001
     trading = engine.get_system("trading")
-    before = {
-        row["entrypoint"]: row["call_count"]
-        for row in trading.compatibility_status()["entrypoints"]
-    }
-    modules = {
-        "timing": engine.get_module("timing"),
-        "live": engine.get_module("live"),
-    }
-    for module in modules.values():
-        for command in LEGACY_CLI_COMMANDS:
-            if hasattr(module, command):
-                monkeypatch.setattr(
-                    module,
-                    command,
-                    lambda **_kwargs: {"ok": True},
-                )
-
-    for module in modules.values():
-        commands = module.commands()
-        for name in sorted(LEGACY_CLI_COMMANDS & commands.keys()):
-            assert commands[name]() == {"ok": True}
-
-    output = capsys.readouterr().out
-    after = {
-        row["entrypoint"]: row["call_count"]
+    rows = {
+        row["entrypoint"]: row
         for row in trading.compatibility_status()["entrypoints"]
     }
     for name in LEGACY_CLI_COMMANDS:
         entrypoint = f"CLI {name}"
-        assert f"DEPRECATED: {name}" in output
-        assert after[entrypoint] == before[entrypoint] + 1
+        assert rows[entrypoint]["status"] == "removed"
+        assert rows[entrypoint]["removal_release"] == "0.2.0"
 
 
-@pytest.mark.parametrize("command_name", ["pool_create", "live_order", "backtest", "timing_signal"])
+@pytest.mark.parametrize("command_name", ["pool_create", "live_order", "backtest", "trading_preview"])
 def test_representative_cli_missing_required_args_are_rejected(engine, command_name: str) -> None:  # noqa: ANN001
     code, output = _fire_exit_code(engine.collect_commands(), [command_name])
     assert code != 0

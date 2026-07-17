@@ -20,7 +20,7 @@ from alphapilot.systems.trading.ports import HistoricalExecutionSlice
 
 
 class LocalHistoricalDataAdapter:
-    """Read canonical local market data without routing through TimingSystem."""
+    """Read canonical local market data directly through storage helpers."""
 
     def __init__(self, context: Any, *, data_dir: str | None = None) -> None:
         self.context = context
@@ -113,39 +113,6 @@ class LocalHistoricalDataAdapter:
                 default_lot_size=default_lot_size,
             ),
             data_version=version,
-        )
-
-
-class TimingHistoricalDataAdapter:
-    """Expose existing local CSV storage through ``HistoricalDataPort``."""
-
-    def __init__(self, timing_system: Any, *, data_dir: str | None = None) -> None:
-        self.timing_system = timing_system
-        self.data_dir = data_dir
-
-    def load_completed_bars(
-        self,
-        *,
-        instruments: Sequence[str],
-        start: str | None,
-        end: str | None,
-        frequency: str,
-        adjustment: str,
-        data_dir: str | None = None,
-    ) -> list[CompletedBar]:
-        mode = PriceAdjustment(str(adjustment))
-        frame = self.timing_system.load_bars(
-            symbols=list(instruments),
-            start_date=start,
-            end_date=end,
-            freq=frequency,
-            data_dir=data_dir or self.data_dir,
-            adjust_mode=mode.value,
-        )
-        return completed_bars_from_frame(
-            frame,
-            frequency=frequency,
-            adjustment=mode,
         )
 
 

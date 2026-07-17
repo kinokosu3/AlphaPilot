@@ -35,7 +35,7 @@ AlphaPilot is a stock-focused quantitative research and trading platform coverin
 | Strategy retesting | `alphapilot strategy_backtest` | Reuse saved strategy assets and models for continued validation |
 | Daily signals | `alphapilot daily_signals` | Advance positions by trading day and generate single-day rebalance signals |
 | Trade sessions | `alphapilot trade_session_create` | Snapshot a strategy into a self-contained, resumable daily-trade account |
-| Quant timing | `alphapilot timing_backtest` | Technical-indicator signal previews, long/cash backtests, and timing artifacts |
+| Quant timing | `alphapilot trading_instance_create` / `trading_backtest` | Formal strategy instances, unified replay, and controlled deployment; legacy `timing_*` commands were removed in 0.2.0 |
 | Paper / live trading | `alphapilot live_*` | `dry_run` / `paper` / `live` modes, unified risk and OMS, daemon control, recovery reconciliation, and an audit ledger; XTP Pro / EMT are optional plugins |
 | Unified portal | `alphapilot portal` | Central UI for data, factors, backtests, timing, tasks, notifications, and live controls |
 | Data preparation | `alphapilot prepare_data` | baostock / tushare to Qlib data pipeline |
@@ -90,7 +90,7 @@ Main entry: `alphapilot strategy_backtest --strategy_name "<strategy name>" --mo
 The live subsystem connects target portfolios or timing signals to one execution path: `LiveRuntime → LiveEngine → RiskGate → BrokerGateway`. The default `dry_run` mode never routes orders, while `paper` is intended for local rehearsal. A command can route to a real broker only after `live` is selected and live execution is explicitly confirmed.
 
 - Three run modes—`dry_run`, `paper`, and `live`—with foreground and persistent daemon operation
-- Manual orders, cancellation, target-portfolio submission, and an optional built-in timing-strategy runner
+- Manual orders, cancellation, and target-portfolio submission; automated strategies start only through persistent instances and `trading_*` deployment controls
 - A single pre-trade gate for session, board-lot, price, cash, position, concentration, per-order, and daily-turnover checks
 - OMS state, append-only audit events, runtime snapshots, and recovery reconciliation; a trade-channel disconnect halts execution and requires review before resuming
 - XTP Pro and EMT broker/quote integrations are decoupled from the core as installable pip plugins; trading and quote providers can be configured independently
@@ -252,10 +252,17 @@ alphapilot trade_session_create --strategy_name "<strategy name>" --name demo_se
 alphapilot daily_signals --session demo_session
 ```
 
-Or run a technical-indicator timing backtest:
+Or create and replay a formal technical-indicator timing instance:
 
 ```bash
-alphapilot timing_backtest --strategy_name dual_ma --symbols 000001 --strategy_params '{"short_window":5,"long_window":20}'
+alphapilot trading_instance_create \
+  --instance_id=ma_5_20 --strategy_id=dual_ma --universe=sh.600000 \
+  --params='{"short_window":5,"long_window":20}' --frequency=day \
+  --portfolio_policy='{"policy_id":"timing_fixed_exposure","params":{"target_percent":0.2}}'
+alphapilot trading_instance_validate --instance_id=ma_5_20
+alphapilot trading_backtest --instance_id=ma_5_20 \
+  --options='{"data_dir":"./data","adjust_mode":"none"}' --wait=True \
+  --output_dir=./results/ma_5_20
 ```
 
 ### 7. Rehearse in Paper Mode, Then Add Live Trading (Optional)

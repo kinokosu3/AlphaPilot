@@ -112,7 +112,6 @@ def _register_builtin_defaults() -> None:
     register_system("factor", "alphapilot.systems.factor.service.FactorSystem")
     register_system("strategy", "alphapilot.systems.strategy.service.StrategySystem")
     register_system("backtest", "alphapilot.systems.backtest.service.QlibBacktestSystem")
-    register_system("timing", "alphapilot.systems.timing.service.TimingSystem")
     register_system("notify", "alphapilot.systems.notify.service.NotificationSystem")
     register_system("live", "alphapilot.systems.live.service.LiveSystem")
     register_system("trading", "alphapilot.systems.trading.service.TradingStrategySystem")
@@ -153,10 +152,6 @@ def _register_builtin_defaults() -> None:
     register_module(
         "daily_trade",
         "alphapilot.modules.daily_trade.module.DailyTradeModule",
-    )
-    register_module(
-        "timing",
-        "alphapilot.modules.timing.module.TimingModule",
     )
     register_module(
         "factor_cli",

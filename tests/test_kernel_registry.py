@@ -14,6 +14,13 @@ from conftest import (
 )
 
 
+def test_registry_resolves_preloaded_objects_without_importing() -> None:
+    from alphapilot.kernel.registry import _resolve_object
+
+    value = object()
+    assert _resolve_object(value) is value
+
+
 def test_engine_loads_all_builtin_systems(engine) -> None:
     assert set(engine.systems.keys()) == set(EXPECTED_SYSTEMS)
     # Every system must answer get_system without raising.

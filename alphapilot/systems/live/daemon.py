@@ -224,13 +224,8 @@ def start_daemon(
     ledger_dir: str | Path | None = None,
     state_dir: str | Path | None = None,
     duration: float | None = None,
-    timing_strategy: str | None = None,
     strategy_instance_id: str | None = None,
-    timing_params: dict[str, Any] | None = None,
-    timing_freq: str = "day",
     bar_seconds: int = 60,
-    min_bars: int = 30,
-    window: int = 250,
     record_market_data: bool | None = None,
     runtime_id: str | None = None,
 ) -> dict[str, Any]:
@@ -279,7 +274,7 @@ def start_daemon(
             raise ValueError("missing live provider env fields: " + ", ".join(sorted(set(missing))))
 
     symbols = _normalize_symbols(symbols or [])
-    if (timing_strategy or strategy_instance_id) and not symbols:
+    if strategy_instance_id and not symbols:
         raise ValueError("symbols are required when a strategy runner is enabled")
 
     current = load_daemon(cfg.state_dir)
@@ -290,10 +285,6 @@ def start_daemon(
     cfg.ledger_dir.mkdir(parents=True, exist_ok=True)
     log_path = cfg.state_dir / "runtime_daemon.log"
     runtime_identifier = str(runtime_id or uuid.uuid4().hex)
-    deprecation_warning = (
-        "timing_strategy is deprecated for daemon deployment; use strategy_instance_id"
-        if timing_strategy and not strategy_instance_id else ""
-    )
     args = [
         sys.executable,
         "-m",
@@ -326,16 +317,9 @@ def start_daemon(
         args.extend(["--cash", str(float(cash))])
     if duration is not None:
         args.extend(["--duration", str(float(duration))])
-    if timing_strategy:
-        args.extend(["--timing-strategy", timing_strategy])
-        args.extend(["--timing-freq", timing_freq])
-        args.extend(["--bar-seconds", str(int(bar_seconds))])
-        args.extend(["--min-bars", str(int(min_bars))])
-        args.extend(["--window", str(int(window))])
-        if timing_params:
-            args.extend(["--timing-params", json.dumps(timing_params, ensure_ascii=False)])
     if strategy_instance_id:
         args.extend(["--strategy-instance-id", str(strategy_instance_id)])
+        args.extend(["--bar-seconds", str(int(bar_seconds))])
 
     with log_path.open("ab") as log:
         proc = subprocess.Popen(  # noqa: S603 - args are constructed, not shell-expanded
@@ -351,7 +335,6 @@ def start_daemon(
         "pid": proc.pid,
         "status": "starting",
         "runtime_id": runtime_identifier,
-        "deprecation_warning": deprecation_warning,
         "alive": True,
         "starting": True,
         "running": False,
@@ -365,12 +348,7 @@ def start_daemon(
         "interval": float(interval),
         "timeout": float(timeout),
         "runner": _runner_config(
-            timing_strategy=timing_strategy,
-            timing_params=timing_params,
-            timing_freq=timing_freq,
             bar_seconds=bar_seconds,
-            min_bars=min_bars,
-            window=window,
             instance_id=strategy_instance_id,
         ),
         "ledger_dir": str(cfg.ledger_dir),
@@ -706,14 +684,13 @@ def _apply_command(
             if current is not None and current.status().get("active"):
                 raise ValueError("strategy runner is already active")
             strategy_instance_id = str(payload.get("instance_id") or "").strip() or None
-            strategy_name = str(payload.get("timing_strategy") or payload.get("strategy") or "").strip()
-            if not strategy_name and not strategy_instance_id:
-                raise ValueError("timing_strategy or instance_id is required")
+            if not strategy_instance_id:
+                raise ValueError("instance_id is required")
             symbols = _normalize_symbols(
                 _split_symbols_payload(payload.get("symbols")) or list(default_symbols or [])
             )
             if not symbols:
-                raise ValueError("symbols are required when timing_strategy is enabled")
+                raise ValueError("symbols are required when a strategy instance is enabled")
             allowed_symbols = set(_normalize_symbols(default_symbols or []))
             unexpected = sorted(set(symbols) - allowed_symbols)
             if unexpected:
@@ -721,22 +698,14 @@ def _apply_command(
                     "strategy symbols must be subscribed when daemon starts: "
                     + ", ".join(unexpected)
                 )
-            params = _parse_runner_params(payload.get("timing_params") or payload.get("params"))
-            freq = str(payload.get("timing_freq") or payload.get("freq") or "day")
-            bar_seconds = int(payload.get("bar_seconds") or 60)
-            min_bars = int(payload.get("min_bars") or 30)
-            window = int(payload.get("window") or 250)
-            runner = _build_timing_runner(
+            bar_seconds = int(
+                ((runner_holder or {}).get("config") or {}).get("bar_seconds") or 60
+            )
+            runner = _build_strategy_instance_runner(
                 runtime.engine,
                 symbols,
-                timing_strategy=strategy_name,
-                timing_params=params,
-                timing_freq=freq,
                 bar_seconds=bar_seconds,
-                min_bars=min_bars,
-                window=window,
                 kernel_engine=None if runner_holder is None else runner_holder.get("kernel_engine"),
-                state_dir=runtime.config.state_dir,
                 strategy_instance_id=strategy_instance_id,
                 bar_source=None if runner_holder is None else runner_holder.get("bar_source"),
                 runtime=runtime,
@@ -748,12 +717,7 @@ def _apply_command(
                 )
                 runner_holder["runner"] = runner
                 runner_holder["config"] = _runner_config(
-                    timing_strategy=strategy_name,
-                    timing_params=params,
-                    timing_freq=freq,
                     bar_seconds=bar_seconds,
-                    min_bars=min_bars,
-                    window=window,
                     instance_id=resolved_instance_id,
                 )
             result["message"] = "strategy_started"
@@ -811,17 +775,6 @@ def _runner_status(runner_holder: dict[str, Any] | None) -> dict[str, Any]:
     return {"enabled": True, "config": config, **runner.status()}
 
 
-def _parse_runner_params(raw: Any) -> dict[str, Any]:
-    if raw is None or raw == "":
-        return {}
-    if isinstance(raw, dict):
-        return dict(raw)
-    parsed = json.loads(str(raw))
-    if not isinstance(parsed, dict):
-        raise ValueError("timing_params must be a JSON object")
-    return parsed
-
-
 def _split_symbols_payload(raw: Any) -> list[str]:
     if raw is None or raw == "":
         return []
@@ -840,410 +793,86 @@ def _event_timeout(payload: dict[str, Any], default: float = 3.0) -> float:
 
 def _runner_config(
     *,
-    timing_strategy: str | None,
-    timing_params: dict[str, Any] | None,
-    timing_freq: str,
     bar_seconds: int,
-    min_bars: int,
-    window: int,
     instance_id: str | None = None,
 ) -> dict[str, Any]:
     return {
-        "enabled": bool(timing_strategy or instance_id),
-        "strategy": timing_strategy,
-        "params": timing_params or {},
-        "freq": timing_freq,
+        "enabled": bool(instance_id),
         "bar_seconds": int(bar_seconds),
-        "min_bars": int(min_bars),
-        "window": int(window),
         "instance_id": instance_id,
     }
 
 
-def _build_timing_runner(
+def _build_strategy_instance_runner(
     engine: Any,
     symbols: list[str],
     *,
-    timing_strategy: str | None,
-    timing_params: dict[str, Any] | None,
-    timing_freq: str,
     bar_seconds: int,
-    min_bars: int,
-    window: int,
     kernel_engine: Any | None = None,
-    state_dir: str | Path | None = None,
     strategy_instance_id: str | None = None,
     bar_source: Any | None = None,
     runtime: Any | None = None,
 ) -> Any | None:
-    if not timing_strategy and not strategy_instance_id:
+    """Create only a validated persistent instance runner.
+
+    Public strategy-name runners were removed in 0.2.0. The daemon remains an
+    implementation detail of RuntimeControlPort and therefore accepts only an
+    instance already owned by the trading application.
+    """
+
+    if not strategy_instance_id:
         return None
-    from alphapilot.systems.live.strategy_runner import LiveTimingRunner
-    from alphapilot.systems.timing.live_adapter import BatchStrategyAdapter
+    if kernel_engine is None or not kernel_engine.has_system("trading"):
+        raise RuntimeError("trading strategy system is required for instance deployment")
+    if runtime is None or bar_source is None:
+        raise RuntimeError("formal strategy instances require a bound live runtime and bar source")
+
+    from alphapilot.systems.live.instance_runner import StrategyInstanceRunner
     from alphapilot.systems.trading.domain import StrategyInstanceConfig
 
-    definition = None
-    stored_instance = None
-    trading = None
-    if strategy_instance_id:
-        if kernel_engine is None or not kernel_engine.has_system("trading"):
-            raise RuntimeError("trading strategy system is required for instance deployment")
-        trading = kernel_engine.get_system("trading")
-        if runtime is not None and runtime.execution_journal is not trading.store:
-            raise RuntimeError(
-                "formal strategy instances must use the configured deployment state directory"
-            )
-        stored_instance = trading.store.get_instance(strategy_instance_id)
-        validation = trading.validate_instance(strategy_instance_id)
-        if not validation.get("ok"):
-            raise ValueError("; ".join(validation.get("errors") or []))
-        expected_level = {
-            RunMode.PAPER: "paper",
-            RunMode.SHADOW: "shadow",
-            RunMode.LIVE: "live",
-        }.get(engine.config.mode)
-        if expected_level and stored_instance["deployment_level"] != expected_level:
-            raise ValueError(
-                f"strategy instance must be promoted to {expected_level.upper()} "
-                f"before running in {engine.config.mode}"
-            )
-        config = stored_instance["config"]
-        timing_strategy = str(config["strategy_id"])
-        timing_params = dict(config.get("params") or {})
-        timing_freq = str(config.get("frequency") or timing_freq)
-        symbols = list(config.get("universe") or symbols)
-        definition = trading.registry.get(timing_strategy)
-        if runtime is not None and bar_source is not None:
-            from alphapilot.systems.live.instance_runner import StrategyInstanceRunner
-
-            instance = StrategyInstanceConfig.from_dict(config)
-            runner = StrategyInstanceRunner(
-                runtime=runtime,
-                trading=trading,
-                instance=instance,
-                historical_data=trading.historical_data.with_data_dir(
-                    str(instance.data_policy.get("data_dir") or "") or None
-                ),
-                bar_source=bar_source,
-                bar_seconds=bar_seconds,
-            )
-            runner.start()
-            return runner
-        strategy = trading.registry.create(timing_strategy, timing_params)
-    elif kernel_engine is not None and kernel_engine.has_system("trading"):
-        if engine.config.mode in {RunMode.LIVE, RunMode.SHADOW}:
-            raise ValueError("legacy strategy_name routing is disabled in LIVE; use a promoted instance_id")
-        trading = kernel_engine.get_system("trading")
-        trading.store.record_legacy_usage(
-            "daemon --timing-strategy",
-            {
-                "strategy": timing_strategy,
-                "frequency": timing_freq,
-                "mode": str(engine.config.mode),
-            },
-            client_kind="daemon",
-            client_version="0.1.x",
-            source=str(getattr(runtime, "runtime_id", "") or "local-daemon"),
+    trading = kernel_engine.get_system("trading")
+    if runtime.execution_journal is not trading.store:
+        raise RuntimeError(
+            "formal strategy instances must use the configured deployment state directory"
         )
-        definition = trading.registry.get(timing_strategy)
-        strategy = (
-            None
-            if runtime is not None and bar_source is not None
-            else trading.registry.create(timing_strategy, timing_params or {})
-        )
-    else:
-        from alphapilot.systems.timing.strategies import create_strategy
-
-        strategy = create_strategy(timing_strategy, timing_params or {})
-    from alphapilot.systems.trading.registry import resolve_required_history
-
-    required_history = resolve_required_history(
-        definition,
-        dict(timing_params or {}),
-        fallback=int(min_bars or 1),
-    )
-    if not symbols:
-        raise ValueError("symbols are required when timing strategy is enabled")
-    instance = (
-        StrategyInstanceConfig.from_dict(stored_instance["config"])
-        if stored_instance is not None
-        else StrategyInstanceConfig(
-            instance_id=(
-                f"legacy-paper-{timing_strategy}-"
-                + uuid.uuid5(
-                    uuid.NAMESPACE_URL,
-                    json.dumps({
-                        "strategy": timing_strategy,
-                        "params": timing_params or {},
-                        "frequency": timing_freq,
-                        "symbols": sorted(symbols),
-                    }, sort_keys=True, separators=(",", ":")),
-                ).hex[:16]
-            ),
-            strategy_id=str(timing_strategy),
-            strategy_version=str(getattr(definition, "version", "legacy")),
-            params=dict(timing_params or {}),
-            universe=tuple(symbols),
-            frequency=timing_freq,
-            strategy_code_hash=str(getattr(definition, "code_hash", "") or ""),
-        )
-    )
-    policy_binding = dict(instance.portfolio_policy or {})
-    policy_params = dict(policy_binding.get("params") or {})
-    target_pct = float(
-        policy_params.get(
-            "target_percent",
-            instance.params.get("target_percent", 1.0),
-        )
-        or 0.0
-    )
-    if target_pct > float(engine.config.risk.max_position_pct) + 1e-9:
-        raise ValueError(
-            f"target_percent {target_pct:.1%} exceeds automated max_position_pct "
-            f"{engine.config.risk.max_position_pct:.1%}"
-        )
-    legacy_paper_adapter = False
-    if (
-        stored_instance is None
-        and trading is not None
-        and runtime is not None
-        and engine.config.mode == RunMode.PAPER
-    ):
-        stored_instance = _prepare_legacy_paper_instance(trading, instance, runtime)
-        instance = StrategyInstanceConfig.from_dict(stored_instance["config"])
-        legacy_paper_adapter = True
-        if bar_source is not None:
-            from alphapilot.systems.live.instance_runner import StrategyInstanceRunner
-
-            formal_runner = StrategyInstanceRunner(
-                runtime=runtime,
-                trading=trading,
-                instance=instance,
-                historical_data=trading.historical_data.with_data_dir(
-                    str(instance.data_policy.get("data_dir") or "") or None
-                ),
-                bar_source=bar_source,
-                bar_seconds=bar_seconds,
-                store=runtime.execution_journal,
-            )
-            formal_runner.start()
-            journal = runtime.execution_journal
-            if journal.get_active_stage_run(instance.instance_id, stage="paper") is None:
-                journal.start_stage_run(instance.instance_id, "paper")
-            journal.set_route_block("instance", instance.instance_id, active=False)
-            return formal_runner
-    route_port = (
-        runtime.automated_order_router(
-            instance_id=instance.instance_id,
-            config_hash=instance.config_hash,
-            deployment_level=(
-                stored_instance["deployment_level"]
-                if stored_instance is not None else engine.config.mode
-            ),
-        )
-        if runtime is not None else None
-    )
-    adapter = BatchStrategyAdapter(strategy, min_bars=required_history, window=max(window, required_history))
-    checkpoint = (
-        Path(state_dir).expanduser() / "strategy_instances" / instance.instance_id / "runner.json"
-        if state_dir is not None else None
-    )
-    restored = False
-    if checkpoint is not None and checkpoint.is_file():
-        try:
-            checkpoint_state = json.loads(checkpoint.read_text(encoding="utf-8"))
-            if checkpoint_state.get("config_hash") == instance.config_hash:
-                restored = True
-        except (OSError, ValueError, TypeError):
-            checkpoint_state = None
-    if not restored:
-        _warm_timing_adapter(
-            kernel_engine, adapter, symbols, freq=timing_freq,
-            bar_seconds=bar_seconds, window=max(window, required_history), engine=engine,
-        )
-    runner = LiveTimingRunner(
-        engine,
-        adapter,
-        symbols,
-        freq=timing_freq,
-        bar_seconds=bar_seconds,
-        lot_size=engine.config.risk.lot_size,
-        instance_id=instance.instance_id,
-        config_hash=instance.config_hash,
-        state_path=checkpoint,
-        bar_source=bar_source,
-        execution_journal=(
-            getattr(runtime, "execution_journal", None)
-            if runtime is not None else
-            getattr(trading, "store", None) if trading is not None else None
-        ),
-        route_port=route_port,
-        runtime_id=(getattr(runtime, "runtime_id", "") if runtime is not None else ""),
-    )
-    if restored and checkpoint_state is not None:
-        runner.restore(checkpoint_state, require_reconcile=engine.config.mode == RunMode.LIVE)
-    runner.start()
-    if legacy_paper_adapter and runtime is not None:
-        journal = runtime.execution_journal
-        if journal.get_active_stage_run(instance.instance_id, stage="paper") is None:
-            journal.start_stage_run(instance.instance_id, "paper")
-        journal.set_route_block("instance", instance.instance_id, active=False)
-    if engine.config.mode == RunMode.LIVE:
-        runner.mark_reconcile_required()
-    return runner
-
-
-def _prepare_legacy_paper_instance(trading: Any, config: Any, runtime: Any) -> dict[str, Any]:
-    """Adapt the deprecated strategy-name daemon path to a persisted PAPER instance."""
-
-    from alphapilot.systems.trading.domain import StrategyInstanceConfig
-
-    if runtime.route_authorizer is None:
-        raise RuntimeError("legacy PAPER automation requires a bound route authorizer")
-    store = runtime.execution_journal
-    required_store_methods = {
-        "get_instance", "create_instance", "update_instance", "record_stage",
-        "promote", "transition_runtime", "set_route_block", "start_stage_run",
-    }
-    if any(not callable(getattr(store, name, None)) for name in required_store_methods):
-        raise RuntimeError("legacy PAPER automation requires a persistent execution journal")
-    definition = trading.registry.get(config.strategy_id)
-    if config.strategy_version != definition.version:
-        raise ValueError("legacy strategy version does not match the registered definition")
-    if not definition.code_hash or config.strategy_code_hash != definition.code_hash:
-        raise ValueError("legacy strategy code hash does not match the trusted definition")
-    try:
-        current = store.get_instance(config.instance_id)
-    except KeyError:
-        normalized = trading.build_instance_config({
-            "instance_id": config.instance_id,
-            "strategy_id": config.strategy_id,
-            "strategy_version": config.strategy_version,
-            "params": dict(config.params),
-            "universe": list(config.universe),
-            "frequency": config.frequency,
-            "data_policy": {
-                **dict(config.data_policy),
-                "feature_adjustment": str(
-                    config.data_policy.get("feature_adjustment") or "backward"
-                ),
-                "legacy_daemon_import": True,
-            },
-        })
-        current = store.create_instance(normalized)
-    else:
-        if current["strategy_id"] != config.strategy_id:
-            raise ValueError(f"reserved legacy instance id {config.instance_id!r} is already in use")
-        requested_params = dict(config.params)
-        persisted_params = dict(current["config"].get("params") or {})
-        requested_target = float(requested_params.pop("target_percent", 1.0))
-        persisted_target = float(
-            (current["config"].get("portfolio_policy") or {}).get("params", {}).get(
-                "target_percent", 1.0,
-            )
-        )
-        if (
-            persisted_params != requested_params
-            or tuple(current["config"].get("universe") or ()) != tuple(config.universe)
-            or str(current["config"].get("frequency")) != str(config.frequency)
-            or abs(persisted_target - requested_target) > 1e-12
-        ):
-            raise ValueError(
-                "legacy daemon parameters changed; create a formal strategy instance instead"
-            )
-    persisted_config = StrategyInstanceConfig.from_dict(current["config"])
-    validation = trading.validate_instance_config(persisted_config)
+    stored = trading.store.get_instance(strategy_instance_id)
+    validation = trading.validate_instance(strategy_instance_id)
     if not validation.get("ok"):
         raise ValueError("; ".join(validation.get("errors") or []))
-    if current["deployment_level"] == "replay":
-        store.record_stage(
-            config.instance_id,
-            "replay",
-            passed=True,
-            details={"source": "deprecated_paper_strategy_adapter"},
+
+    expected_level = {
+        RunMode.PAPER: "paper",
+        RunMode.SHADOW: "shadow",
+        RunMode.LIVE: "live",
+    }.get(engine.config.mode)
+    if expected_level and stored["deployment_level"] != expected_level:
+        raise ValueError(
+            f"strategy instance must be promoted to {expected_level.upper()} "
+            f"before running in {engine.config.mode}"
         )
-        current = store.promote(config.instance_id, "paper")
-    elif current["deployment_level"] != "paper":
-        raise ValueError("legacy strategy-name automation is restricted to PAPER deployment")
 
-    account = runtime.engine.oms.account
-    if account is None or not str(account.account_id):
-        raise RuntimeError("PAPER account snapshot is not ready")
-    store.transition_runtime(
-        config.instance_id,
-        lifecycle="warming_up",
-        desired_state="running",
-        observed_state="warming_up",
-        account_id=str(account.account_id),
-        broker=str(runtime.config.trade_broker or runtime.config.broker or "paper"),
-        runtime_id=runtime.runtime_id,
-        runner_heartbeat_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        reconcile_required=False,
-        binding_active=False,
-        last_error={},
+    instance = StrategyInstanceConfig.from_dict(stored["config"])
+    subscribed = set(_normalize_symbols(symbols))
+    required = set(_normalize_symbols(list(instance.universe)))
+    missing = sorted(required - subscribed)
+    if missing:
+        raise ValueError(
+            "strategy instance symbols must be subscribed when daemon starts: "
+            + ", ".join(missing)
+        )
+
+    runner = StrategyInstanceRunner(
+        runtime=runtime,
+        trading=trading,
+        instance=instance,
+        historical_data=trading.historical_data.with_data_dir(
+            str(instance.data_policy.get("data_dir") or "") or None
+        ),
+        bar_source=bar_source,
+        bar_seconds=bar_seconds,
     )
-    store.set_route_block(
-        "instance",
-        config.instance_id,
-        active=True,
-        reason="legacy PAPER runner is awaiting start confirmation",
-    )
-    return store.get_instance(config.instance_id)
-
-
-def _warm_timing_adapter(
-    kernel_engine: Any | None,
-    adapter: Any,
-    symbols: list[str],
-    *,
-    freq: str,
-    bar_seconds: int,
-    window: int,
-    engine: Any,
-) -> None:
-    """Best-effort preload from the canonical local history stores."""
-    try:
-        import pandas as pd
-
-        live_daily = None
-        if freq == "day":
-            from alphapilot.systems.live.bars import DAY_INTERVAL
-            from alphapilot.systems.live.market_data import load_market_bars
-
-            rows: list[dict[str, Any]] = []
-            provider = engine.config.quote_provider or engine.config.trade_broker or "quote"
-            for symbol in symbols:
-                rows.extend(load_market_bars(
-                    engine.config.market_data.data_dir, provider, symbol, DAY_INTERVAL, limit=window
-                ))
-            if rows:
-                live_daily = pd.DataFrame(rows).rename(columns={"date": "datetime"})
-        if freq == "day" and kernel_engine is not None:
-            bars = kernel_engine.get_system("timing").load_bars(
-                symbols=symbols, freq="day", adjust_mode="backward"
-            )
-            if live_daily is not None:
-                bars = pd.concat([bars, live_daily], ignore_index=True)
-                bars = bars.drop_duplicates(["datetime", "instrument"], keep="last")
-            adapter.warm_up(bars.groupby("instrument", group_keys=False).tail(window))
-            return
-        if freq == "day" and live_daily is not None:
-            adapter.warm_up(live_daily)
-            return
-        if freq == "min" and int(bar_seconds) in (60, 300):
-            from alphapilot.systems.live.market_data import load_market_bars
-
-            rows: list[dict[str, Any]] = []
-            provider = engine.config.quote_provider or engine.config.trade_broker or "quote"
-            for symbol in symbols:
-                rows.extend(load_market_bars(
-                    engine.config.market_data.data_dir, provider, symbol, int(bar_seconds), limit=window
-                ))
-            if rows:
-                frame = pd.DataFrame(rows).rename(columns={"date": "datetime"})
-                adapter.warm_up(frame)
-    except Exception:  # noqa: BLE001 - not ready is represented as WARMING_UP
-        return
+    runner.start()
+    return runner
 
 
 def run_daemon(
@@ -1259,13 +888,8 @@ def run_daemon(
     ledger_dir: str | Path | None = None,
     state_dir: str | Path | None = None,
     duration: float | None = None,
-    timing_strategy: str | None = None,
     strategy_instance_id: str | None = None,
-    timing_params: dict[str, Any] | None = None,
-    timing_freq: str = "day",
     bar_seconds: int = 60,
-    min_bars: int = 30,
-    window: int = 250,
     record_market_data: bool | None = None,
     runtime_id: str | None = None,
 ) -> int:
@@ -1320,10 +944,6 @@ def run_daemon(
         "pid": os.getpid(),
         "status": "connecting",
         "runtime_id": runtime.runtime_id,
-        "deprecation_warning": (
-            "timing_strategy is deprecated for daemon deployment; use strategy_instance_id"
-            if timing_strategy and not strategy_instance_id else ""
-        ),
         "mode": cfg.mode,
         "broker": cfg.broker,
         "trade_broker": cfg.trade_broker,
@@ -1334,12 +954,7 @@ def run_daemon(
         "commands_processed": 0,
         "recovery": None,
         "runner": _runner_config(
-            timing_strategy=timing_strategy,
-            timing_params=timing_params,
-            timing_freq=timing_freq,
             bar_seconds=bar_seconds,
-            min_bars=min_bars,
-            window=window,
             instance_id=strategy_instance_id,
         ),
     }
@@ -1354,32 +969,15 @@ def run_daemon(
             runtime.enable_market_data(symbols, recording=record_market_data)
         runtime.connect(paper_cash=cash)
         ready = runtime.wait_ready(timeout=timeout)
-        runner = _build_timing_runner(
+        runner = _build_strategy_instance_runner(
             runtime.engine,
             symbols or [],
-            timing_strategy=timing_strategy,
-            timing_params=timing_params,
-            timing_freq=timing_freq,
             bar_seconds=bar_seconds,
-            min_bars=min_bars,
-            window=window,
             kernel_engine=engine,
-            state_dir=cfg.state_dir,
             strategy_instance_id=strategy_instance_id,
             bar_source=runtime.market_data,
             runtime=runtime,
         )
-        if runner is not None and not strategy_instance_id:
-            resolved_instance_id = str(runner.status().get("instance_id") or "") or None
-            meta["runner"] = _runner_config(
-                timing_strategy=timing_strategy,
-                timing_params=timing_params,
-                timing_freq=timing_freq,
-                bar_seconds=bar_seconds,
-                min_bars=min_bars,
-                window=window,
-                instance_id=resolved_instance_id,
-            )
         if symbols and runner is None:
             runtime.engine.subscribe_market_data(symbols)
         runner_holder = {
@@ -1465,15 +1063,6 @@ def _normalize_symbols(symbols: list[str]) -> list[str]:
     return output
 
 
-def _parse_json_obj(raw: str | None) -> dict[str, Any]:
-    if not raw:
-        return {}
-    parsed = json.loads(raw)
-    if not isinstance(parsed, dict):
-        raise ValueError("JSON value must be an object")
-    return parsed
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the AlphaPilot live runtime daemon.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1490,13 +1079,8 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--state-dir")
     run.add_argument("--runtime-id")
     run.add_argument("--duration", type=float)
-    run.add_argument("--timing-strategy")
     run.add_argument("--strategy-instance-id")
-    run.add_argument("--timing-params")
-    run.add_argument("--timing-freq", default="day")
     run.add_argument("--bar-seconds", type=int, default=60)
-    run.add_argument("--min-bars", type=int, default=30)
-    run.add_argument("--window", type=int, default=250)
     run.add_argument("--record-market-data", action=argparse.BooleanOptionalAction, default=None)
     ns = parser.parse_args(argv)
     if ns.command == "run":
@@ -1513,13 +1097,8 @@ def main(argv: list[str] | None = None) -> int:
             state_dir=ns.state_dir,
             runtime_id=ns.runtime_id,
             duration=ns.duration,
-            timing_strategy=ns.timing_strategy,
             strategy_instance_id=ns.strategy_instance_id,
-            timing_params=_parse_json_obj(ns.timing_params),
-            timing_freq=ns.timing_freq,
             bar_seconds=ns.bar_seconds,
-            min_bars=ns.min_bars,
-            window=ns.window,
             record_market_data=ns.record_market_data,
         )
     return 2

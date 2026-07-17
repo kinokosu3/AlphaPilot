@@ -160,25 +160,21 @@ alphapilot live_daemon_order --symbol SH600000 --side buy --volume 100 --price 1
 alphapilot live_daemon_cancel --order_id <order_id> --wait True --event_timeout 10
 alphapilot live_daemon_stop
 
-# 显式挂载内置择时策略 runner（留空 timing_strategy 时只维护状态，不跑策略）
-alphapilot live_daemon_start \
-  --mode paper \
-  --symbols 600000 \
-  --timing_strategy sma_filter \
-  --timing_params '{"window": 20, "target_percent": 0.5}' \
-  --timing_freq min
-
-# daemon 运行中接管策略 runner
-alphapilot live_daemon_strategy_status --wait True
-alphapilot live_daemon_strategy_pause --wait True
-alphapilot live_daemon_strategy_resume --wait True
-alphapilot live_daemon_strategy_stop --wait True
-alphapilot live_daemon_strategy_start \
-  --timing_strategy sma_filter \
-  --symbols 600000 \
-  --timing_params '{"window": 20, "target_percent": 0.5}' \
-  --timing_freq min \
-  --wait True
+# 自动策略必须先创建持久化实例并完成 REPLAY 证据，再由正式 deployment 控制
+alphapilot trading_instance_create \
+  --instance_id=sma20-paper --strategy_id=sma_filter --universe=SH600000 \
+  --params='{"window":20}' --frequency=day \
+  --portfolio_policy='{"policy_id":"timing_fixed_exposure","params":{"target_percent":0.5}}'
+alphapilot trading_instance_validate --instance_id=sma20-paper
+alphapilot trading_backtest --instance_id=sma20-paper \
+  --options='{"data_dir":"./data","adjust_mode":"none"}' --wait=True
+alphapilot trading_promote --instance_id=sma20-paper --to=paper
+alphapilot trading_start --instance_id=sma20-paper
+alphapilot trading_status --instance_id=sma20-paper
+alphapilot trading_pause --instance_id=sma20-paper
+alphapilot trading_reconcile --instance_id=sma20-paper
+alphapilot trading_resume --instance_id=sma20-paper
+alphapilot trading_stop --instance_id=sma20-paper
 
 # 只生成目标组合执行计划（默认不路由）
 alphapilot live_submit_target \
@@ -211,11 +207,11 @@ no-UI/daemon 模式在 AlphaPilot 里的对应层：子进程持有 gateway/OMS/
 撤单默认只撤 OMS 中仍处于 active 的委托；恢复时确实需要直发券商撤单时可传
 `--force True --symbol <symbol>`。重连默认 `auto_resume=False`：连接、查询和 recovery
 完成后仍保持 halted，需要人工检查后再 `live_daemon_resume`。路由结果会报告 `planned/submitted/unrouted/fully_routed`，风控拒单会留在 ledger
-并让 daemon 命令返回 `ok=False` 或 `fully_routed=False`。`live_daemon_start` 只有在显式传
-`--timing_strategy` 时才会挂载 `LiveTimingRunner`；策略产生的委托仍统一走
-`LiveEngine.submit -> RiskGate -> BrokerGateway`。策略 runner 支持运行中
-`status/start/pause/resume/stop`，其中 `pause` 只暂停策略信号生成和 algo 推进，
-不会断开行情和 daemon；`stop` 清空 runner 的待执行请求。`live_order` 仅用于人工调试，
+并让 daemon 命令返回 `ok=False` 或 `fully_routed=False`。0.2.0 后 `live_daemon_start` 不再接受
+匿名策略名和参数；自动策略由 `DeploymentCoordinator` 以持久化 `strategy_instance_id` 启动，
+产生的委托仍统一走 `LiveEngine.submit -> RiskGate -> BrokerGateway`。`trading_pause` 只暂停该实例
+的新决策并尽力撤销其活动委托，不会断开行情和 daemon；`trading_stop` 同时撤销路由授权。
+`live_order` 仅用于人工调试，
 真实 live 同样需要 `--confirm_live True`。默认 `dry_run` 不会路由任何订单。
 
 daemon 还会维护 `runtime_command_status.jsonl`，记录命令从 `accepted` 到
@@ -244,29 +240,25 @@ Portal 后端也暴露同一套控制面：
 - `POST /api/live/runtime/connect`：一次性连接验证，只登录和查询，不下单；
 - `GET/POST /api/live/daemon/{status,start,stop}`：管理长驻 runtime daemon；
 - `POST /api/live/daemon/{halt,resume,refresh,reconnect,cancel}`：向长驻 daemon 发送进程内控制命令；
-- `POST /api/live/daemon/strategy/{status,start,pause,resume,stop}`：运行中接管策略 runner；
 - `POST /api/live/daemon/{order,submit-target}`：显式向长驻 daemon 发送下单/目标组合命令；
 - `/api/live/paper/*`：纸面账户演练，内部同样复用 `LiveRuntime`。
+- `/api/trading/deployments/{id}/{start,pause,reconcile,resume,stop,status}`：正式自动策略生命周期。
 
 Portal 前端的“实盘交易”页面已经接入这些能力：runtime 预检/连接、daemon 启停、
-急停/恢复/刷新/保守重连、活动委托撤单、策略 runner `status/start/pause/resume/stop`、风控/恢复摘要、
+急停/恢复/刷新/保守重连、活动委托撤单、正式 deployment 生命周期、风控/恢复摘要、
 命令流水和 ledger 事件查询都在同一个操作台里。真实 live 模式的连接与策略启动
 会弹确认；策略产生的委托仍然进入 `LiveEngine.submit -> RiskGate -> BrokerGateway`
 这条统一链路。
 
-## 5. 策略接入（择时 → 实盘）
+## 5. 策略接入（策略实例 → 实盘）
 
-链路：tick → `live/bars.py BarAggregator` → `timing/live_adapter.py
-BatchStrategyAdapter`（现有 8 个规则策略零改动包装，信号翻转才发意图）→
-`live/executor.orders_from_intents` → `LiveEngine.submit`（风控网关）。
+正式链路为：已完成 Bar → `SignalProvider` → `PortfolioPolicy` → `PortfolioDecision` → D+1
+`AccountSizer` → 可恢复 `ExecutionPlan` → OMS → Risk → Broker。规则择时 v1 会由兼容 provider
+包装进这条链路；v2 provider 直接实现生命周期。策略代码不能访问 Broker，也不能自行发送订单。
 
-`live/strategy_runner.py LiveTimingRunner` 两种驱动模式：
-
-- `freq="day"`（默认）：收盘日线出信号，次日开盘集合竞价通过
-  `CallAuctionAlgo` 执行 —— 与回测 `shift(1)` 语义一致；
-- `freq="min"`：tick 聚合分钟 bar，bar 收盘立即提交。
-
-外层循环周期性调用 `runner.step()`（可挂到 `EventDispatcher.add_periodic`）。
+日频 A 股/ETF 实例可按 REPLAY → PAPER → SHADOW → LIVE 晋升；分钟实例当前只允许到 SHADOW。
+daemon 只是 `RuntimeControlPort` 的实现细节，只接受已验证实例 ID。重启后 LIVE 固定进入待对账，
+必须由正式 reconcile/resume 流程恢复，不能通过匿名 runner 绕过部署状态。
 
 ## 常见失败
 

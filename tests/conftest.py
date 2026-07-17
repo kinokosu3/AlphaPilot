@@ -76,11 +76,6 @@ EXPECTED_CLI_COMMANDS: frozenset[str] = frozenset(
         "live_daemon_refresh",
         "live_daemon_reconnect",
         "live_daemon_cancel",
-        "live_daemon_strategy_pause",
-        "live_daemon_strategy_resume",
-        "live_daemon_strategy_start",
-        "live_daemon_strategy_status",
-        "live_daemon_strategy_stop",
         "live_daemon_submit_target",
         "live_market_bars",
         "live_market_snapshot",
@@ -123,9 +118,6 @@ EXPECTED_CLI_COMMANDS: frozenset[str] = frozenset(
         "strategy_backtest_list",
         "strategy_create",
         "timezone",
-        "timing_backtest",
-        "timing_signal",
-        "timing_strategies",
         "trading_audit",
         "trading_authorize_live",
         "trading_backtest",
@@ -169,7 +161,7 @@ EXPECTED_CLI_COMMANDS: frozenset[str] = frozenset(
 )
 
 EXPECTED_SYSTEMS: frozenset[str] = frozenset(
-    {"data", "factor", "strategy", "backtest", "timing", "notify", "live", "trading"}
+    {"data", "factor", "strategy", "backtest", "notify", "live", "trading"}
 )
 EXPECTED_MODULES: frozenset[str] = frozenset(
     {
@@ -187,7 +179,6 @@ EXPECTED_MODULES: frozenset[str] = frozenset(
         "report_factor",
         "stock_pool",
         "strategy_backtest",
-        "timing",
         "trading_cli",
     }
 )

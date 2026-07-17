@@ -313,46 +313,12 @@ def test_live_daemon_control_endpoints(engine, isolated_env) -> None:
         assert market["subscribed_symbols"] == ["600000.SSE"]
         assert market["recorder"]["enabled"] is True
 
-        runner_status = client.post(
-            "/api/live/daemon/strategy/status",
-            json={"state_dir": str(state_dir), "wait": True, "timeout": 5},
-        ).json()
-        assert runner_status["accepted"] is True
-        assert runner_status["daemon"]["last_command"]["runner_status"]["enabled"] is False
-
-        strategy_started = client.post(
-            "/api/live/daemon/strategy/start",
-            json={
-                "state_dir": str(state_dir),
-                "timing_strategy": "sma_filter",
-                "symbols": ["600000"],
-                "timing_params": {"window": 2, "target_percent": 0.2},
-                "timing_freq": "min",
-                "min_bars": 2,
-                "wait": True,
-                "timeout": 5,
-            },
-        ).json()
-        assert strategy_started["accepted"] is True
-        assert strategy_started["daemon"]["last_command"]["runner_status"]["active"] is True
-
-        strategy_paused = client.post(
-            "/api/live/daemon/strategy/pause",
-            json={"state_dir": str(state_dir), "wait": True, "timeout": 5},
-        ).json()
-        assert strategy_paused["daemon"]["last_command"]["runner_status"]["paused"] is True
-
-        strategy_resumed = client.post(
-            "/api/live/daemon/strategy/resume",
-            json={"state_dir": str(state_dir), "wait": True, "timeout": 5},
-        ).json()
-        assert strategy_resumed["daemon"]["last_command"]["runner_status"]["active"] is True
-
-        strategy_stopped = client.post(
-            "/api/live/daemon/strategy/stop",
-            json={"state_dir": str(state_dir), "wait": True, "timeout": 5},
-        ).json()
-        assert strategy_stopped["daemon"]["last_command"]["runner_status"]["stopped"] is True
+        for action in ("status", "start", "pause", "resume", "stop"):
+            removed = client.post(
+                f"/api/live/daemon/strategy/{action}",
+                json={"state_dir": str(state_dir)},
+            )
+            assert removed.status_code == 404
 
         halted = client.post(
             "/api/live/daemon/halt",

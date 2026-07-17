@@ -145,55 +145,21 @@ def test_live_module_daemon_start_status_stop(engine, tmp_path) -> None:
         timeout=1.0,
         state_dir=str(state_dir),
         ledger_dir=str(ledger_dir),
-        timing_strategy="sma_filter",
-        timing_params=json.dumps({"window": 2, "target_percent": 0.2}),
-        timing_freq="min",
-        min_bars=2,
     )
     assert started["started"] is True
     try:
         deadline = time.time() + 5.0
         status = live.live_daemon_status(mode="paper", state_dir=str(state_dir))
-        while time.time() < deadline and not (status.get("running") and status.get("runner_status") is not None):
+        while time.time() < deadline and not status.get("running"):
             time.sleep(0.1)
             status = live.live_daemon_status(mode="paper", state_dir=str(state_dir))
         assert status["running"] is True, status
         assert status["pid"] == started["pid"]
         assert "runtime_state.json" in status["state_path"]
-        assert status["runner"]["enabled"] is True
-        assert status["runner"]["strategy"] == "sma_filter"
-        assert status.get("runner_status") is not None
-        assert status["runner_status"]["active"] is True
-
-        strategy_status = live.live_daemon_strategy_status(state_dir=str(state_dir), wait=True, timeout=5.0)
-        assert strategy_status["accepted"] is True
-        assert strategy_status["daemon"]["last_command"]["ok"] is True
-        assert strategy_status["daemon"]["last_command"]["runner_status"]["active"] is True
-
-        paused = live.live_daemon_strategy_pause(state_dir=str(state_dir), wait=True, timeout=5.0)
-        assert paused["daemon"]["last_command"]["runner_status"]["paused"] is True
-        assert paused["daemon"]["last_command"]["runner_status"]["active"] is False
-
-        resumed_strategy = live.live_daemon_strategy_resume(state_dir=str(state_dir), wait=True, timeout=5.0)
-        assert resumed_strategy["daemon"]["last_command"]["runner_status"]["active"] is True
-
-        stopped_strategy = live.live_daemon_strategy_stop(state_dir=str(state_dir), wait=True, timeout=5.0)
-        assert stopped_strategy["daemon"]["last_command"]["runner_status"]["stopped"] is True
-        status = live.live_daemon_status(mode="paper", state_dir=str(state_dir))
         assert status["runner"]["enabled"] is False
 
-        restarted_strategy = live.live_daemon_strategy_start(
-            "sma_filter",
-            symbols="600000",
-            timing_params=json.dumps({"window": 2, "target_percent": 0.2}),
-            timing_freq="min",
-            min_bars=2,
-            state_dir=str(state_dir),
-            wait=True,
-            timeout=5.0,
-        )
-        assert restarted_strategy["accepted"] is True
-        assert restarted_strategy["daemon"]["last_command"]["runner_status"]["active"] is True
+        commands = live.commands()
+        assert not any(name.startswith("live_daemon_strategy_") for name in commands)
 
         halted = live.live_daemon_halt(reason="test", state_dir=str(state_dir), wait=True, timeout=5.0)
         assert halted["accepted"] is True

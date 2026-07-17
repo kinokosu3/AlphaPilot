@@ -44,7 +44,6 @@ VALID_KINDS = {
     "strategy_backtest",
     "daily_signals",
     "data",
-    "timing_backtest",
     *ALPHAFORGE_JOBS,
 }
 
@@ -278,8 +277,6 @@ def _run_target(kind: JobKind, kwargs: dict[str, Any]) -> Any:
         return engine.get_module("strategy_backtest").strategy_backtest(**kwargs)
     if kind == "daily_signals":
         return engine.get_module("daily_trade").daily_signals(**kwargs)
-    if kind == "timing_backtest":
-        return engine.get_module("timing").timing_backtest(**kwargs)
     if kind == "data":
         call_kwargs = dict(kwargs)
         action = call_kwargs.pop("action", "pipeline")
