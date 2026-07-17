@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from datetime import datetime, timedelta
@@ -38,6 +39,7 @@ from alphapilot.systems.trading.release_verification import (
 from alphapilot.systems.trading.service import (
     TradingStrategySystem,
     _latest_cutoff,
+    _uat_evidence_matches_installed_artifacts,
     _utc_timestamp,
 )
 from alphapilot.systems.trading.store import StrategyRuntimeStore
@@ -334,7 +336,7 @@ def test_removal_check_derives_the_complete_post_cutoff_acceptance_cycle() -> No
     ]
     evidence = {
         "evidence_id": "uat-evidence", "evidence_hash": "uat-hash",
-        "environment": "protected", "plugin_version": "1.2.3",
+        "environment": "protected",
         "sdk_hash": "sdk-hash", "runtime_code_hash": "runtime-hash",
         "passed_at": "2026-02-11T00:00:00+00:00",
         "expires_at": "2026-05-01T00:00:00+00:00",
@@ -355,7 +357,12 @@ def test_removal_check_derives_the_complete_post_cutoff_acceptance_cycle() -> No
             "updated_at": "2026-02-10T01:00:00+00:00",
             "results": [{"session": "2026-02-05", "status": "pass"}],
         }],
-        valid_broker_uat_evidence=lambda *_args, **_kwargs: dict(evidence),
+        valid_broker_uat_evidence=lambda broker, **_kwargs: {
+            **evidence,
+            "plugin_version": f"{broker}-version",
+            "plugin_hash": f"{broker}-hash",
+            "sdk_version": f"{broker}-sdk",
+        },
         list_stage_runs=lambda _instance_id: list(stage_runs),
     )
     system = object.__new__(TradingStrategySystem)
@@ -399,6 +406,50 @@ def test_removal_check_derives_the_complete_post_cutoff_acceptance_cycle() -> No
 
     with pytest.raises(ValueError, match="acceptance_instance_id"):
         system.removal_check("")
+
+
+def test_uat_evidence_survives_only_commit_drift_when_artifacts_are_unchanged() -> None:
+    old_commit = "a" * 40
+    metadata = {
+        "broker": "xtp",
+        "plugin_id": "xtp",
+        "distribution": "alphapilot-xtp",
+        "plugin_version": "1.2.3",
+        "gateway_path": "alphapilot_xtp.gateway:XtpGateway",
+        "gateway_source_hash": "gateway-hash",
+        "distribution_hash": "distribution-hash",
+        "sdk_version": "native-sha256:sdk",
+        "sdk_declared_version": "",
+        "sdk_hash": "sdk-hash",
+        "runtime_code_hash": "runtime-hash",
+        "code_commit": "b" * 40,
+    }
+    current_material = dict(metadata)
+    metadata["plugin_hash"] = hashlib.sha256(
+        json.dumps(current_material, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    historical_material = {**current_material, "code_commit": old_commit}
+    evidence = {
+        "plugin_version": metadata["plugin_version"],
+        "plugin_hash": hashlib.sha256(
+            json.dumps(
+                historical_material,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest(),
+        "sdk_version": metadata["sdk_version"],
+        "sdk_hash": metadata["sdk_hash"],
+        "runtime_code_hash": metadata["runtime_code_hash"],
+        "code_commit": old_commit,
+    }
+
+    assert _uat_evidence_matches_installed_artifacts(evidence, metadata) is True
+
+    changed_plugin = {**metadata, "gateway_source_hash": "changed-gateway"}
+    assert _uat_evidence_matches_installed_artifacts(evidence, changed_plugin) is False
+    changed_runtime = {**metadata, "runtime_code_hash": "changed-runtime"}
+    assert _uat_evidence_matches_installed_artifacts(evidence, changed_runtime) is False
 
 
 def test_trading_service_time_helpers_and_local_uat_forwarding() -> None:
@@ -1474,6 +1525,49 @@ def test_removal_gate_rejects_environment_report_from_another_commit(
     report = readiness.evaluate(instance.instance_id)
 
     assert report["checks"]["environment_report_commits_match"] is False
+
+
+def test_removed_manifest_requires_the_removal_build_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = StrategyRuntimeStore(tmp_path / "removed-manifest.sqlite3")
+    for item in ENTRYPOINTS:
+        store.register_compatibility_entrypoint(
+            item.entrypoint,
+            kind=item.kind,
+            replacement=item.replacement,
+            deprecated_since="0.1.x",
+            sunset_at="Thu, 31 Dec 2026 00:00:00 GMT",
+            removal_release="0.2.0",
+            status="removed",
+        )
+    selected: list[str] = []
+
+    def fake_validation(
+        _root: Path,
+        *,
+        expected_commit: str,
+        build_kind: str = "compatibility",
+    ) -> dict[str, object]:
+        assert expected_commit == "c" * 40
+        selected.append(build_kind)
+        return {"passed": True, "report_hash": "report-hash"}
+
+    monkeypatch.setattr(
+        "alphapilot.systems.trading.compatibility.validate_release_verification",
+        fake_validation,
+    )
+    readiness = RemovalReadinessService(store, repository_root=tmp_path)
+    monkeypatch.setattr(
+        readiness,
+        "_git_state",
+        lambda: {"commit": "c" * 40, "clean": True},
+    )
+
+    readiness.evaluate("missing-instance")
+
+    assert selected == ["removal"]
 
 
 def test_schema_v5_upgrades_through_v8_once_with_online_backup(tmp_path: Path) -> None:

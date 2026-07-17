@@ -80,6 +80,52 @@ def _latest_cutoff(values: list[str]) -> str:
     return max(parsed).isoformat(timespec="seconds") if parsed else ""
 
 
+def _uat_evidence_matches_installed_artifacts(
+    evidence: dict[str, Any],
+    metadata: dict[str, Any],
+) -> bool:
+    """Accept UAT evidence only when the installed artifacts are unchanged.
+
+    UAT schema v8 stored ``code_commit`` both as its own audit field and inside
+    ``plugin_hash``.  A later documentation/API-only commit therefore changed
+    the computed plugin hash even when the plugin, native SDK and live routing
+    core were byte-for-byte identical.  Rebuild the historical fingerprint
+    with the evidence commit so that only this redundant commit component may
+    differ; every actual artifact fingerprint remains mandatory.
+    """
+
+    for field in (
+        "plugin_version",
+        "sdk_version",
+        "sdk_hash",
+        "runtime_code_hash",
+    ):
+        if str(evidence.get(field) or "") != str(metadata.get(field) or ""):
+            return False
+    persisted_hash = str(evidence.get("plugin_hash") or "")
+    if not persisted_hash:
+        return False
+    if persisted_hash == str(metadata.get("plugin_hash") or ""):
+        return True
+    evidence_commit = str(evidence.get("code_commit") or "").strip().lower()
+    if len(evidence_commit) != 40 or any(
+        character not in "0123456789abcdef" for character in evidence_commit
+    ):
+        return False
+    historical_fingerprint = {
+        key: value for key, value in metadata.items() if key != "plugin_hash"
+    }
+    historical_fingerprint["code_commit"] = evidence_commit
+    historical_hash = hashlib.sha256(
+        json.dumps(
+            historical_fingerprint,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return persisted_hash == historical_hash
+
+
 class TradingStrategySystem(BaseSystem):
     name = "trading"
 
@@ -1109,14 +1155,21 @@ class TradingStrategySystem(BaseSystem):
                 metadata = self.broker_uat_harness.plugin_metadata(broker)
                 evidence = self.store.valid_broker_uat_evidence(
                     broker,
+                    environment=str(
+                        os.getenv("ALPHAPILOT_BROKER_UAT_ENVIRONMENT") or ""
+                    ).strip(),
                     plugin_version=metadata["plugin_version"],
-                    plugin_hash=metadata["plugin_hash"],
                     sdk_version=metadata["sdk_version"],
                     sdk_hash=metadata["sdk_hash"],
                     runtime_code_hash=metadata["runtime_code_hash"],
                     scenario_version=2,
                     passed_after=observation_cutoff,
                 )
+                if evidence is not None and not _uat_evidence_matches_installed_artifacts(
+                    evidence,
+                    metadata,
+                ):
+                    evidence = None
             except Exception:  # noqa: BLE001 - missing plugin/SDK invalidates UAT proof
                 evidence = None
             broker_evidence[broker] = evidence

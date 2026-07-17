@@ -344,9 +344,21 @@ class RemovalReadinessService:
             int((row.get("evidence") or {}).get("unmigrated_legacy_job_count") or 0) == 0
             for row in environments
         )
+        # Before removal, readiness is proven by the compatibility build.  Once
+        # every registered surface is marked removed, the runtime must require
+        # the independently generated removal build instead.  Keeping this
+        # selection derived from the fixed manifest prevents an environment
+        # variable from downgrading the gate to the older report.
+        release_build_kind = (
+            "removal"
+            if compatibility
+            and all(str(row.get("status") or "") == "removed" for row in compatibility)
+            else "compatibility"
+        )
         release_verification = validate_release_verification(
             self.repository_root,
             expected_commit=str(commit.get("commit") or ""),
+            build_kind=release_build_kind,
         )
         checks["release_verification"] = bool(release_verification["passed"])
         report = {
