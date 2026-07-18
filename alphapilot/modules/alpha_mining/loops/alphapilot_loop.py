@@ -57,6 +57,18 @@ def stop_event_check(func):
 
 class AlphaPilotLoop(LoopBase, metaclass=LoopMeta):
     skip_loop_error = (FactorEmptyError,)
+
+    def __getstate__(self) -> dict[str, Any]:
+        """Exclude process-local services from workflow snapshots.
+
+        ``Context`` retains the live ``MainEngine`` and all registered systems
+        and modules.  That object graph contains locks, executors, and other
+        process-local resources that cannot be pickled.  A resumed mining run
+        rebinds the current context in ``AlphaMiningModule.run_mining``.
+        """
+        state = self.__dict__.copy()
+        state["context"] = None
+        return state
     
     @measure_time
     def __init__(
