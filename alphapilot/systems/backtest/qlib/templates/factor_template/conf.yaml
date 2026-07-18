@@ -62,14 +62,14 @@ port_analysis_config: &port_analysis_config
         module_path: qlib.contrib.strategy
         kwargs:
             signal: <PRED> # 使用模型预测评分作为选股信号
-            topk: 15       # 每日持仓股票数量
+            topk: 20       # 每日持仓股票数量
             n_drop: 5      # 如果持仓股排名落后超过则卖出调仓
-            hold_thresh: 1 # 最小持仓天数
+            hold_thresh: 3 # 最小持仓计数阈值（买入后最早第 4 个交易日可卖）
             risk_degree: 0.90 #最多用90%的资金
     backtest:
         start_time: 2024-01-01 # 模拟回测的开始时间（对齐测试集起点）
         end_time: 2026-05-22   # 模拟回测的结束时间
-        account: 50000        # 初始模拟账户资金
+        account: 200000       # 初始模拟账户资金
         benchmark: *benchmark  # 基准
         exchange_kwargs:
             limit_threshold: 0.095 # 涨跌停限制（0.095 避开了 A 股 10% 无法成交的封板状态）

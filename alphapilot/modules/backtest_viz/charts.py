@@ -6,21 +6,20 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from alphapilot.systems.backtest.artifacts import BacktestArtifacts
+from alphapilot.systems.backtest.artifacts import BacktestArtifacts, build_nav_returns
+
+
+def nav_return_series(report: pd.DataFrame) -> pd.DataFrame:
+    return build_nav_returns(report)
 
 
 def cum_series(report: pd.DataFrame) -> pd.DataFrame:
-    df = pd.DataFrame(index=report.index)
-    df["策略(不含成本)"] = report["return"].cumsum()
-    df["策略(含成本)"] = (report["return"] - report["cost"]).cumsum()
-    df["基准"] = report["bench"].cumsum()
-    df["超额(不含成本)"] = (report["return"] - report["bench"]).cumsum()
-    df["超额(含成本)"] = (report["return"] - report["bench"] - report["cost"]).cumsum()
-    return df
+    """Backward-compatible alias; values now use compounded NAV returns."""
+    return nav_return_series(report)
 
 
 def return_figure(report: pd.DataFrame, compare: BacktestArtifacts | None = None) -> go.Figure:
-    cum = cum_series(report)
+    nav_returns = nav_return_series(report)
     fig = go.Figure()
     colors = {
         "策略(不含成本)": "#2563eb",
@@ -31,28 +30,28 @@ def return_figure(report: pd.DataFrame, compare: BacktestArtifacts | None = None
     for col in ["策略(不含成本)", "策略(含成本)", "基准"]:
         fig.add_trace(
             go.Scatter(
-                x=cum.index,
-                y=cum[col],
+                x=nav_returns.index,
+                y=nav_returns[col],
                 mode="lines",
                 name=col,
                 line=dict(width=2, color=colors[col]),
             )
         )
     if compare is not None:
-        compare_cum = cum_series(compare.report)
+        compare_nav_returns = nav_return_series(compare.report)
         fig.add_trace(
             go.Scatter(
-                x=compare_cum.index,
-                y=compare_cum["策略(含成本)"],
+                x=compare_nav_returns.index,
+                y=compare_nav_returns["策略(含成本)"],
                 mode="lines",
                 name=f"对比: {compare.workspace.name[:8]}…",
                 line=dict(width=2, dash="dash", color="#dc2626"),
             )
         )
     fig.update_layout(
-        title="累计收益对比",
+        title="净值收益对比",
         xaxis_title="日期",
-        yaxis_title="累计收益率",
+        yaxis_title="净值收益率",
         hovermode="x unified",
         height=420,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
@@ -62,12 +61,31 @@ def return_figure(report: pd.DataFrame, compare: BacktestArtifacts | None = None
 
 
 def excess_figure(report: pd.DataFrame) -> go.Figure:
-    cum = cum_series(report)
+    nav_returns = nav_return_series(report)
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=cum.index, y=cum["超额(不含成本)"], name="超额(不含成本)", line=dict(color="#7c3aed")))
-    fig.add_trace(go.Scatter(x=cum.index, y=cum["超额(含成本)"], name="超额(含成本)", line=dict(color="#0891b2")))
+    fig.add_trace(
+        go.Scatter(
+            x=nav_returns.index,
+            y=nav_returns["超额(不含成本)"],
+            name="超额(不含成本)",
+            line=dict(color="#7c3aed"),
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=nav_returns.index,
+            y=nav_returns["超额(含成本)"],
+            name="超额(含成本)",
+            line=dict(color="#0891b2"),
+        )
+    )
     fig.add_hline(y=0, line_dash="dot", line_color="#94a3b8")
-    fig.update_layout(title="累计超额收益", xaxis_title="日期", yaxis_title="超额", height=320)
+    fig.update_layout(
+        title="超额净值收益",
+        xaxis_title="日期",
+        yaxis_title="超额净值收益率",
+        height=320,
+    )
     return fig
 
 

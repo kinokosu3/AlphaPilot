@@ -83,9 +83,9 @@ class QlibYamlParams(BaseModel):
     model_module: str = "qlib.contrib.model.gbdt"
     model_kwargs: dict[str, Any] = Field(default_factory=dict)
 
-    topk: int = 15
+    topk: int = 20
     n_drop: int = 5
-    hold_thresh: int = 1
+    hold_thresh: int = 3
     risk_degree: float = 0.90
 
     # Trading/rebalancing strategy is configurable; ``strategy_kwargs`` (when
@@ -96,7 +96,7 @@ class QlibYamlParams(BaseModel):
 
     backtest_start: str = "2024-01-01"
     backtest_end: str = "2026-05-22"
-    account: float = 50000
+    account: float = 200000
     limit_threshold: float = 0.095
     open_cost: float = 0.00015
     close_cost: float = 0.00015

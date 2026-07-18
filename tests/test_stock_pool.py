@@ -51,6 +51,15 @@ def test_create_normalizes_dedupes_and_syncs_instruments(engine, isolated_env) -
     assert "SH600519" in body and "SZ000001" in body
 
 
+def test_create_accepts_chinese_pool_name(engine, isolated_env) -> None:
+    module = engine.get_module("stock_pool")
+    report = module.pool_create(name="中证1000", symbols="600519.SH")
+
+    assert report["name"] == "中证1000"
+    assert (isolated_env.important / "stock_pools" / "中证1000.json").is_file()
+    assert (isolated_env.qlib_dir / "instruments" / "中证1000.txt").is_file()
+
+
 def test_create_reports_invalid_and_missing_data(engine, isolated_env) -> None:
     # one symbol has a local CSV, the others do not
     _write_raw_csv(isolated_env.raw_data, "sh600519", "2017-01-03", "2020-12-31")

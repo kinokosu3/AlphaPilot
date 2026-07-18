@@ -1,7 +1,7 @@
 // Pure P&L math for a trade session, derived from its compact daily log + cash-flow ledger.
 // Kept framework-free so it is unit-testable (see sessionPnl.test.ts); the chart component in
-// pages.tsx binds straight to the arrays/totals returned here. Mirrors the backtest page's
-// cumulative-return convention (arithmetic sum of daily returns) so the two pages read alike.
+// pages.tsx binds straight to the arrays/totals returned here. This live-session view deliberately
+// keeps arithmetic return points; the backtest page uses compounded NAV returns instead.
 
 export type PnlRow = {
   date?: string;

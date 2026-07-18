@@ -1704,15 +1704,17 @@ def create_app(
             rep = data.report.copy()
             rep.index.name = "date"
             report = rep.reset_index()
-            cum_df = charts.cum_series(data.report)
-            cum_df.index.name = "date"
-            cum = cum_df.reset_index()
+            nav_returns_df = charts.nav_return_series(data.report)
+            nav_returns_df.index.name = "date"
+            nav_returns = nav_returns_df.reset_index()
             return _jsonable(
                 {
                     "workspace_id": workspace_id,
                     "summary": build_summary(data.report),
                     "report": report,
-                    "cumulative": cum,
+                    # Keep the response field for compatibility; its values are
+                    # compounded NAV returns rather than arithmetic cumulative sums.
+                    "cumulative": nav_returns,
                     "trades": data.trades,
                     "holdings": data.holdings,
                     "metrics": data.metrics,

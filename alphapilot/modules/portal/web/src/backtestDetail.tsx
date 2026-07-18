@@ -2,10 +2,12 @@ import React, { useEffect, useMemo, useState } from "react";
 import { api } from "./api";
 import { LazyPlot as Plot } from "./components/LazyPlot";
 import { Alert, chartHeight, DataTable, Spinner, Tabs } from "./components";
+import { dayKey, navReturnSeries, numv, repDay, summarizeBacktest } from "./backtestReturns";
+import type { BacktestRow } from "./backtestReturns";
 import { useAsync } from "./hooks";
 import { useI18n } from "./i18n";
 
-type Row = Record<string, unknown>;
+type Row = BacktestRow;
 
 export type BacktestDetailData = {
   workspace_id?: string;
@@ -17,90 +19,11 @@ export type BacktestDetailData = {
   metrics?: Record<string, unknown> | null;
 };
 
-// --- formatting + small numeric helpers ------------------------------------
-const numv = (v: unknown): number => {
-  const n = typeof v === "number" ? v : parseFloat(String(v));
-  return Number.isFinite(n) ? n : 0;
-};
-const dayKey = (v: unknown): string => String(v ?? "").slice(0, 10);
-// report rows are named `date` (api renames the index), but fall back to
-// `datetime` in case the source index kept that name.
-const repDay = (r: Row): string => dayKey(r.date ?? r.datetime);
 const pct = (v: number): string => `${(v * 100).toFixed(2)}%`;
 const pct4 = (v: number): string => `${(v * 100).toFixed(4)}%`;
 const money = (v: number): string => v.toLocaleString("en-US", { maximumFractionDigits: 0 });
 
 const CHART_MARGIN = { l: 56, r: 48, t: 28, b: 40 };
-
-/** Mirror of `backtest_viz.charts.cum_series` (cumulative sums over the slice). */
-function cumSeries(rows: Row[]) {
-  const date: string[] = [];
-  const stratNoCost: number[] = [];
-  const stratCost: number[] = [];
-  const bench: number[] = [];
-  const excessNoCost: number[] = [];
-  const excessCost: number[] = [];
-  let a = 0;
-  let b = 0;
-  let c = 0;
-  let d = 0;
-  let e = 0;
-  for (const r of rows) {
-    const ret = numv(r["return"]);
-    const cost = numv(r.cost);
-    const bch = numv(r.bench);
-    a += ret;
-    b += ret - cost;
-    c += bch;
-    d += ret - bch;
-    e += ret - bch - cost;
-    date.push(repDay(r));
-    stratNoCost.push(a);
-    stratCost.push(b);
-    bench.push(c);
-    excessNoCost.push(d);
-    excessCost.push(e);
-  }
-  return { date, stratNoCost, stratCost, bench, excessNoCost, excessCost };
-}
-
-/** Mirror of `artifacts.build_summary` for the six displayed KPIs. */
-function summarize(rows: Row[]) {
-  let cumRet = 0;
-  let cumRetCost = 0;
-  let cumBench = 0;
-  let cumExcess = 0;
-  let peak = -Infinity;
-  let maxDD = 0;
-  let turnoverSum = 0;
-  let costSum = 0;
-  let lastAccount = 0;
-  let n = 0;
-  for (const r of rows) {
-    const ret = numv(r["return"]);
-    const cost = numv(r.cost);
-    const bch = numv(r.bench);
-    cumRet += ret;
-    cumRetCost += ret - cost;
-    cumBench += bch;
-    cumExcess += ret - bch;
-    peak = Math.max(peak, cumRet);
-    maxDD = Math.min(maxDD, cumRet - peak);
-    turnoverSum += numv(r.turnover);
-    costSum += cost;
-    if (r.account != null) lastAccount = numv(r.account);
-    n += 1;
-  }
-  return {
-    cumReturnCost: cumRetCost,
-    benchCum: cumBench,
-    excessNoCost: cumExcess,
-    maxDD,
-    meanTurnover: n ? turnoverSum / n : 0,
-    totalCost: costSum,
-    finalAccount: lastAccount
-  };
-}
 
 function Metric({ label, value }: { label: string; value: string }) {
   return (
@@ -146,15 +69,15 @@ export function BacktestDetail({ detail, workspaces }: { detail: BacktestDetailD
   };
 
   const reportSlice = useMemo(() => report.filter((r) => inRange(r.date ?? r.datetime)), [report, start, end]);
-  const cum = useMemo(() => cumSeries(reportSlice), [reportSlice]);
-  const summary = useMemo(() => summarize(reportSlice), [reportSlice]);
+  const navReturns = useMemo(() => navReturnSeries(reportSlice), [reportSlice]);
+  const summary = useMemo(() => summarizeBacktest(reportSlice), [reportSlice]);
 
   const days = useMemo(() => reportSlice.map((r) => repDay(r)), [reportSlice]);
   const effectiveDay = days.includes(selectedDay) ? selectedDay : days[days.length - 1] || "";
 
-  const compareCum = useMemo(() => {
+  const compareNavReturns = useMemo(() => {
     if (!compareRows) return null;
-    return cumSeries(compareRows.filter((r) => inRange(r.date ?? r.datetime)));
+    return navReturnSeries(compareRows.filter((r) => inRange(r.date ?? r.datetime)));
   }, [compareRows, start, end]);
 
   async function pickCompare(id: string) {
@@ -170,18 +93,18 @@ export function BacktestDetail({ detail, workspaces }: { detail: BacktestDetailD
     }
   }
 
-  const x = cum.date;
+  const x = navReturns.date;
   const accX = reportSlice.map((r) => repDay(r));
 
-  const cumData: Row[] = [
-    { x, y: cum.stratNoCost, type: "scatter", mode: "lines", name: t("btStratNoCost"), line: { color: "#2563eb", width: 2 } },
-    { x, y: cum.stratCost, type: "scatter", mode: "lines", name: t("btStratCost"), line: { color: "#16a34a", width: 2 } },
-    { x, y: cum.bench, type: "scatter", mode: "lines", name: t("btBench"), line: { color: "#f97316", width: 2 } }
+  const navReturnData: Row[] = [
+    { x, y: navReturns.stratNoCost, type: "scatter", mode: "lines", name: t("btStratNoCost"), line: { color: "#2563eb", width: 2 } },
+    { x, y: navReturns.stratCost, type: "scatter", mode: "lines", name: t("btStratCost"), line: { color: "#16a34a", width: 2 } },
+    { x, y: navReturns.bench, type: "scatter", mode: "lines", name: t("btBench"), line: { color: "#f97316", width: 2 } }
   ];
-  if (compareCum) {
-    cumData.push({
-      x: compareCum.date,
-      y: compareCum.stratCost,
+  if (compareNavReturns) {
+    navReturnData.push({
+      x: compareNavReturns.date,
+      y: compareNavReturns.stratCost,
       type: "scatter",
       mode: "lines",
       name: `${t("btCompareTrace")}: ${compareId.slice(0, 8)}…`,
@@ -245,18 +168,18 @@ export function BacktestDetail({ detail, workspaces }: { detail: BacktestDetailD
 
       {/* KPI grid */}
       <div className="metric-grid compact">
-        <Metric label={t("kpiCumReturnCost")} value={pct(summary.cumReturnCost)} />
-        <Metric label={t("kpiBenchCum")} value={pct(summary.benchCum)} />
-        <Metric label={t("kpiExcess")} value={pct(summary.excessNoCost)} />
-        <Metric label={t("kpiMaxDD")} value={pct(summary.maxDD)} />
+        <Metric label={t("kpiNavReturnNet")} value={pct(summary.navReturnNet)} />
+        <Metric label={t("kpiBenchmarkNavReturn")} value={pct(summary.benchmarkNavReturn)} />
+        <Metric label={t("kpiExcessNavReturn")} value={pct(summary.excessNavReturnGross)} />
+        <Metric label={t("kpiMaxDD")} value={pct(summary.maxDrawdownNet)} />
         <Metric label={t("kpiTurnover")} value={pct(summary.meanTurnover)} />
         <Metric label={t("kpiCost")} value={summary.totalCost.toFixed(4)} />
       </div>
 
-      {/* cumulative return */}
+      {/* compounded NAV return */}
       <h3>{t("btCumulative")}</h3>
       <Plot
-        data={cumData}
+        data={navReturnData}
         layout={{ autosize: true, height: chartHeight(), margin: CHART_MARGIN, hovermode: "x unified", legend: { orientation: "h" } }}
         useResizeHandler
         style={{ width: "100%" }}
@@ -268,8 +191,8 @@ export function BacktestDetail({ detail, workspaces }: { detail: BacktestDetailD
           <h3>{t("btExcess")}</h3>
           <Plot
             data={[
-              { x, y: cum.excessNoCost, type: "scatter", mode: "lines", name: t("btExcessNoCost"), line: { color: "#7c3aed" } },
-              { x, y: cum.excessCost, type: "scatter", mode: "lines", name: t("btExcessCost"), line: { color: "#0891b2" } }
+              { x, y: navReturns.excessNoCost, type: "scatter", mode: "lines", name: t("btExcessNoCost"), line: { color: "#7c3aed" } },
+              { x, y: navReturns.excessCost, type: "scatter", mode: "lines", name: t("btExcessCost"), line: { color: "#0891b2" } }
             ]}
             layout={{
               autosize: true,

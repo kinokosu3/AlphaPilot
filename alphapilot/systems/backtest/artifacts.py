@@ -305,35 +305,99 @@ def load_backtest(workspace: Path | str) -> BacktestArtifacts:
     )
 
 
+def _numeric_report_column(report: pd.DataFrame, column: str) -> pd.Series:
+    """Return one numeric report column, treating missing/invalid observations as zero."""
+    if column not in report.columns:
+        return pd.Series(0.0, index=report.index, dtype=float)
+    return pd.to_numeric(report[column], errors="coerce").fillna(0.0).astype(float)
+
+
+def compound_returns(returns: pd.Series) -> pd.Series:
+    """Convert periodic returns to return on a 1.0 NAV base."""
+    clean = pd.to_numeric(returns, errors="coerce").fillna(0.0).astype(float)
+    return (1.0 + clean).cumprod() - 1.0
+
+
+def build_nav_returns(report: pd.DataFrame) -> pd.DataFrame:
+    """Build gross, net, benchmark, and relative-excess NAV return series.
+
+    Qlib's daily ``return`` is gross of ``cost``.  The net curve therefore compounds
+    ``return - cost``.  Excess return is the strategy wealth ratio relative to benchmark
+    wealth, rather than an arithmetic sum of daily return differences.
+    """
+    returns = _numeric_report_column(report, "return")
+    cost = _numeric_report_column(report, "cost")
+    bench = _numeric_report_column(report, "bench")
+
+    gross = compound_returns(returns)
+    net = compound_returns(returns - cost)
+    benchmark = compound_returns(bench)
+    benchmark_nav = 1.0 + benchmark
+
+    nav_returns = pd.DataFrame(index=report.index)
+    nav_returns["策略(不含成本)"] = gross
+    nav_returns["策略(含成本)"] = net
+    nav_returns["基准"] = benchmark
+    nav_returns["超额(不含成本)"] = ((1.0 + gross).div(benchmark_nav) - 1.0).where(
+        benchmark_nav.ne(0.0), 0.0
+    )
+    nav_returns["超额(含成本)"] = ((1.0 + net).div(benchmark_nav) - 1.0).where(
+        benchmark_nav.ne(0.0), 0.0
+    )
+    return nav_returns
+
+
+def _max_drawdown(nav_return: pd.Series) -> float:
+    if nav_return.empty:
+        return 0.0
+    nav = 1.0 + nav_return
+    # Include the initial 1.0 NAV in the running peak so an immediate loss is
+    # counted as drawdown instead of being treated as a new starting peak.
+    running_peak = nav.cummax().clip(lower=1.0)
+    drawdown = nav.div(running_peak) - 1.0
+    return float(drawdown.min())
+
+
 def build_summary(report: pd.DataFrame) -> dict[str, float]:
-    """Backtest summary metrics. Robust to missing columns; always returns all keys.
+    """Backtest summary metrics based on compounded NAV returns.
 
     This is the single source of truth for the portfolio summary; ``portfolio_artifacts``
     delegates here so the displayed and exported numbers stay consistent.
     """
-    returns = report["return"] if "return" in report.columns else pd.Series(dtype=float)
-    bench = report["bench"] if "bench" in report.columns else pd.Series(0.0, index=returns.index)
+    nav_returns = build_nav_returns(report)
+    gross = nav_returns["策略(不含成本)"]
+    net = nav_returns["策略(含成本)"]
+    benchmark = nav_returns["基准"]
+    excess = nav_returns["超额(不含成本)"]
 
-    cum_return = returns.cumsum()
-    cum_bench = bench.cumsum()
-    cum_excess = (returns - bench).cumsum()
-    cum_return_w_cost = (
-        (returns - report["cost"]).cumsum() if "cost" in report.columns else cum_return
-    )
-
-    dd = cum_return - cum_return.cummax()
-    max_dd = float(dd.min()) if len(dd) else 0.0
-
-    return {
-        "累计收益(不含成本)": float(cum_return.iloc[-1]) if len(cum_return) else 0.0,
-        "累计收益(含成本)": float(cum_return_w_cost.iloc[-1]) if len(cum_return_w_cost) else 0.0,
-        "基准累计收益": float(cum_bench.iloc[-1]) if len(cum_bench) else 0.0,
-        "累计超额(不含成本)": float(cum_excess.iloc[-1]) if len(cum_excess) else 0.0,
-        "最大回撤(不含成本)": max_dd,
-        "平均日换手": float(report["turnover"].mean()) if "turnover" in report.columns else 0.0,
+    summary = {
+        "净值收益(不含成本)": float(gross.iloc[-1]) if len(gross) else 0.0,
+        "净值收益(含成本)": float(net.iloc[-1]) if len(net) else 0.0,
+        "基准净值收益": float(benchmark.iloc[-1]) if len(benchmark) else 0.0,
+        "超额净值收益(不含成本)": float(excess.iloc[-1]) if len(excess) else 0.0,
+        "最大回撤(不含成本)": _max_drawdown(gross),
+        "最大回撤(含成本)": _max_drawdown(net),
+        "平均日换手": (
+            float(report["turnover"].mean()) if "turnover" in report.columns else 0.0
+        ),
         "累计手续费": float(report["cost"].sum()) if "cost" in report.columns else 0.0,
-        "期末总资产": float(report["account"].iloc[-1]) if "account" in report.columns and len(report) else 0.0,
+        "期末总资产": (
+            float(report["account"].iloc[-1])
+            if "account" in report.columns and len(report)
+            else 0.0
+        ),
     }
+    # Existing exported summaries and API clients may still read the historical
+    # keys. Keep them as aliases, but serve the corrected NAV-based values.
+    summary.update(
+        {
+            "累计收益(不含成本)": summary["净值收益(不含成本)"],
+            "累计收益(含成本)": summary["净值收益(含成本)"],
+            "基准累计收益": summary["基准净值收益"],
+            "累计超额(不含成本)": summary["超额净值收益(不含成本)"],
+        }
+    )
+    return summary
 
 
 LEADERBOARD_GLOB = "*_leaderboard.csv"

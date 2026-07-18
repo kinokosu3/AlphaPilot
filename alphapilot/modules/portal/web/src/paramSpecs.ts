@@ -276,13 +276,13 @@ export function strategyParamFields(opts: { showAccount?: boolean } = {}): Field
     },
   ];
   if (showAccount) {
-    fields.push({ key: "yaml_params.account", label: "初始资金", type: "number", placeholder: "50000", helpText: "回测账户初始现金", visibleWhen: gate });
+    fields.push({ key: "yaml_params.account", label: "初始资金", type: "number", placeholder: "200000", helpText: "回测账户初始现金", visibleWhen: gate });
   }
   fields.push(
     { key: "yaml_params.strategy_class", label: "调仓策略", type: "select", defaultValue: "", options: strategyClassOptions, visibleWhen: gate },
-    { key: "yaml_params.topk", label: "持仓数 Top-k", type: "number", placeholder: "15", visibleWhen: gate },
+    { key: "yaml_params.topk", label: "持仓数 Top-k", type: "number", placeholder: "20", visibleWhen: gate },
     { key: "yaml_params.n_drop", label: "每日剔除数", type: "number", placeholder: "5", visibleWhen: gate },
-    { key: "yaml_params.hold_thresh", label: "最短持有天数", type: "number", placeholder: "1", visibleWhen: gate },
+    { key: "yaml_params.hold_thresh", label: "最小持仓计数阈值", type: "number", placeholder: "3", helpText: "3 表示买入后最早第 4 个交易日可卖", visibleWhen: gate },
     { key: "yaml_params.risk_degree", label: "仓位比例 (0-1)", type: "number", placeholder: "0.9", visibleWhen: gate },
     { key: "yaml_params.open_cost", label: "买入成本", type: "number", placeholder: "0.00015", visibleWhen: gate },
     { key: "yaml_params.close_cost", label: "卖出成本", type: "number", placeholder: "0.00015", visibleWhen: gate },

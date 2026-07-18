@@ -25,8 +25,11 @@ from alphapilot.systems.data.stock_list import (
 if TYPE_CHECKING:
     from alphapilot.kernel.config import DataConfig
 
-# Pool names double as Qlib instruments filenames; keep them filesystem-safe.
-_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+# Pool names double as Qlib instruments filenames; keep them filesystem-safe while
+# allowing natural-language names such as ``中证1000``.  Python's Unicode-aware
+# ``\w`` matches letters and numbers from all scripts (plus underscore); path
+# separators, dots, whitespace and shell punctuation remain disallowed.
+_NAME_RE = re.compile(r"^[\w-]+$")
 # Reserved Qlib instrument-set names a pool must never overwrite.
 _RESERVED_NAMES = frozenset({"all"})
 
@@ -70,7 +73,7 @@ class StockPoolRepository:
             raise StockPoolError("股票池名称不能为空")
         if not _NAME_RE.match(cleaned):
             raise StockPoolError(
-                f"股票池名称仅支持字母、数字、下划线和连字符: {name!r}"
+                f"股票池名称仅支持 Unicode 字母、数字、下划线和连字符: {name!r}"
             )
         if cleaned in _RESERVED_NAMES:
             raise StockPoolError(f"{cleaned!r} 是保留名称，不能用作股票池名")
