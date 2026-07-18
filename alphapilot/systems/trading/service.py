@@ -682,8 +682,8 @@ class TradingStrategySystem(BaseSystem):
             raw_bars,
             config=ReplayConfig(
                 initial_cash=float(_option(payload, "cash", 100_000.0)),
-                open_cost=float(_option(payload, "open_cost", 0.0003)),
-                close_cost=float(_option(payload, "close_cost", 0.0013)),
+                open_cost=float(_option(payload, "open_cost", 0.00015)),
+                close_cost=float(_option(payload, "close_cost", 0.00015)),
                 min_cost=float(_option(payload, "min_cost", 5.0)),
                 slippage=float(_option(payload, "slippage", 0.0)),
                 lot_size=int(_option(payload, "trade_unit", 100)),

@@ -67,9 +67,9 @@ port_analysis_config: &port_analysis_config
         benchmark: *benchmark  # 基准
         exchange_kwargs:
             limit_threshold: 0.095 # 涨跌停限制（0.095 避开了 A 股 10% 无法成交的封板状态）
-            deal_price: ["$open", "$close"]  # 买入用开盘价，卖出用收盘价（list 形式必须带 $ 前缀）
-            open_cost: 0.0002      # 买入费率（万2）
-            close_cost: 0.0008     # 卖出费率（万8）
+            deal_price: ["$open", "$open"]  # 买卖均用开盘价，避免同一日收盘卖出后再回填到开盘买入
+            open_cost: 0.00015     # 买入费率（万1.5）
+            close_cost: 0.00015    # 卖出费率（万1.5）
             min_cost: 5            # 每笔最低交易手续费（5 元）
 task:
     model:

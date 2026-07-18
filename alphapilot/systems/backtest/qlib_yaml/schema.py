@@ -98,8 +98,8 @@ class QlibYamlParams(BaseModel):
     backtest_end: str = "2026-05-22"
     account: float = 50000
     limit_threshold: float = 0.095
-    open_cost: float = 0.0002
-    close_cost: float = 0.0008
+    open_cost: float = 0.00015
+    close_cost: float = 0.00015
     min_cost: float = 5
     # Board-lot size for trading. A-shares trade in lots of 100. Consumed by the daily-trade
     # rebalance (``live/rebalance.py``) to constrain buy/sell to whole lots; ``0`` disables it.

@@ -29,7 +29,7 @@
   },
   "frozen_template": {
     "path": "alphapilot/systems/backtest/qlib_yaml/templates/conf_cn_combined_kdd_ver.yaml.j2",
-    "sha256": "c6cb8284e92eaec5c5320d18d82e0ee10e1483abfb36d9243f94e61cb43458f8"
+    "sha256": "f2c83614d0368ce9c1bd8a404e5ae3cc257b89383ba45fbef06ef2c83aa88852"
   },
   "qlib_params": {
     "template_type": "combined",
@@ -64,8 +64,8 @@
     "risk_degree": 0.9,
     "account": 50000,
     "limit_threshold": 0.095,
-    "open_cost": 0.0002,
-    "close_cost": 0.0008,
+    "open_cost": 0.00015,
+    "close_cost": 0.00015,
     "min_cost": 5
   },
   "llm": {

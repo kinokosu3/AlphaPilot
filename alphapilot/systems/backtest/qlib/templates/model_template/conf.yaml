@@ -46,9 +46,9 @@ port_analysis_config: &port_analysis_config
         benchmark: *benchmark
         exchange_kwargs:
             limit_threshold: 0.095
-            deal_price: close
-            open_cost: 0.0005
-            close_cost: 0.0015
+            deal_price: ["$open", "$open"]
+            open_cost: 0.00015
+            close_cost: 0.00015
             min_cost: 5
 task:
     model:

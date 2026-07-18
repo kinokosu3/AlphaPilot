@@ -65,9 +65,9 @@ port_analysis_config: &port_analysis_config
         benchmark: *benchmark  # 基准
         exchange_kwargs:
             limit_threshold: 0.095 # 涨跌停限制（0.095 避开了 A 股 10% 无法成交的封板状态）
-            deal_price: ["$open", "$close"]  # 买入用开盘价，卖出用收盘价（list 形式必须带 $ 前缀）
-            open_cost: 0.0002      # 买入费率（万2）
-            close_cost: 0.0008     # 卖出费率（万8）
+            deal_price: ["$open", "$open"]  # 买卖均用开盘价，避免同一日收盘卖出后再回填到开盘买入
+            open_cost: 0.00015     # 买入费率（万1.5）
+            close_cost: 0.00015    # 卖出费率（万1.5）
             min_cost: 5            # 每笔最低交易手续费（5 元）
 task:
     model:
@@ -185,7 +185,7 @@ task:
 #     exchange_kwargs:            # 传给 qlib.backtest.Exchange
 #       limit_threshold: 0.095     # float：|涨跌幅|<阈值才可交易（A 股常用 0.095）
 #       # 或 tuple 表达式: [buy_limit_expr, sell_limit_expr]
-#       deal_price: close | ["$open","$close"] | ["$open","$close"]  # 已用买卖分价
+#       deal_price: open | ["$open","$open"]  # 已用开盘同价成交
 #       # 仅支持 quote 字段名 $open/$close/$vwap，不支持 $open/$factor 等表达式
 #       open_cost / close_cost    # 买卖费率（已用）
 #       min_cost: 5               # 单笔最低佣金（已用）

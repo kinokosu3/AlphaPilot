@@ -68,7 +68,9 @@ def _round_to_lot(amount: float, unit: int) -> float:
 def build_exchange_kwargs(params: Any) -> dict:
     kwargs: dict[str, Any] = {
         "limit_threshold": params.limit_threshold,
-        "deal_price": ["$open", "$close"],
+        # Use one executable timestamp for both sides.  Mixing an opening buy with a
+        # closing sale lets qlib's serial executor fund the earlier buy with later cash.
+        "deal_price": ["$open", "$open"],
         "open_cost": params.open_cost,
         "close_cost": params.close_cost,
         "min_cost": params.min_cost,

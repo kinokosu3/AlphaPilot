@@ -41,8 +41,8 @@ from alphapilot.systems.trading.store import StrategyRuntimeStore
 @dataclass(frozen=True)
 class ReplayConfig:
     initial_cash: float = 100_000.0
-    open_cost: float = 0.0003
-    close_cost: float = 0.0013
+    open_cost: float = 0.00015
+    close_cost: float = 0.00015
     min_cost: float = 5.0
     slippage: float = 0.0
     lot_size: int = 100

@@ -117,10 +117,10 @@ class RiskLimits:
     )
     #: Conservative fee assumptions used by account sizing before routing.
     buy_fee_rate: float = field(
-        default_factory=lambda: _env_float("ALPHAPILOT_LIVE_BUY_FEE_RATE", 0.0003)
+        default_factory=lambda: _env_float("ALPHAPILOT_LIVE_BUY_FEE_RATE", 0.00015)
     )
     sell_fee_rate: float = field(
-        default_factory=lambda: _env_float("ALPHAPILOT_LIVE_SELL_FEE_RATE", 0.0013)
+        default_factory=lambda: _env_float("ALPHAPILOT_LIVE_SELL_FEE_RATE", 0.00015)
     )
     min_fee: float = field(
         default_factory=lambda: _env_float("ALPHAPILOT_LIVE_MIN_FEE", 5.0)

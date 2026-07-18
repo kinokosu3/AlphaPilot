@@ -40,7 +40,11 @@ def test_round_to_lot_passthrough_when_disabled() -> None:
 
 def test_build_exchange_kwargs_includes_trade_unit_only_when_positive() -> None:
     params = QlibYamlParams.defaults_for("combined")
-    assert build_exchange_kwargs(params)["trade_unit"] == 100
+    default_kwargs = build_exchange_kwargs(params)
+    assert default_kwargs["trade_unit"] == 100
+    assert default_kwargs["deal_price"] == ["$open", "$open"]
+    assert default_kwargs["open_cost"] == 0.00015
+    assert default_kwargs["close_cost"] == 0.00015
 
     disabled = params.model_copy(update={"trade_unit": 0})
     assert "trade_unit" not in build_exchange_kwargs(disabled)

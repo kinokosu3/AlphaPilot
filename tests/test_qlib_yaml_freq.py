@@ -53,9 +53,18 @@ def test_day_render_has_no_loader_freq_and_time_per_step_day() -> None:
     text = render_yaml_text(QlibYamlParams.defaults_for("baseline"))
     doc = yaml.safe_load(text)
     assert doc["port_analysis_config"]["executor"]["kwargs"]["time_per_step"] == "day"
-    # Daily must not emit a loader ``freq`` key (keeps output byte-identical to before).
+    # Daily must not emit a loader ``freq`` key (keeps the legacy daily loader shape).
     assert list(doc["data_handler_config"]["data_loader"]["kwargs"].keys()) == ["config"]
     assert "ann_scaler: 252" in text
+
+
+@pytest.mark.parametrize("template_type", ["baseline", "combined"])
+def test_render_uses_open_price_for_buys_and_sells(template_type: str) -> None:
+    doc = yaml.safe_load(render_yaml_text(QlibYamlParams.defaults_for(template_type)))
+    exchange = doc["port_analysis_config"]["backtest"]["exchange_kwargs"]
+    assert exchange["deal_price"] == ["$open", "$open"]
+    assert exchange["open_cost"] == pytest.approx(0.00015)
+    assert exchange["close_cost"] == pytest.approx(0.00015)
 
 
 def test_minute_render_emits_freq_and_time_per_step() -> None:

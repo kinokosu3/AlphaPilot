@@ -79,7 +79,7 @@ port_analysis_config: &port_analysis_config
         benchmark: *benchmark
         exchange_kwargs:
             limit_threshold: {{ p.limit_threshold }}
-            deal_price: ["$open", "$close"]
+            deal_price: ["$open", "$open"]
             open_cost: {{ p.open_cost }}
             close_cost: {{ p.close_cost }}
             min_cost: {{ p.min_cost | int if p.min_cost == p.min_cost | int else p.min_cost }}
