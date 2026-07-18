@@ -1393,7 +1393,9 @@ def test_live_approval_binds_confirmed_baseline_and_is_consumed_once(engine) -> 
             session=f"2026-05-{day + 1:02d}",
         )
     trading.store.finish_stage_run(paper_run["run_id"], trading_sessions=20)
-    assert trading.evaluate_stage(row["instance_id"], "paper")["passed"]
+    assert trading.store.evaluate_stage(
+        row["instance_id"], "paper", minimum_sessions=20
+    )["passed"]
     trading.store.promote(row["instance_id"], "shadow")
     run = trading.store.start_stage_run(row["instance_id"], "shadow")
     for day in range(5):
@@ -1436,7 +1438,9 @@ def test_live_approval_binds_confirmed_baseline_and_is_consumed_once(engine) -> 
         shadow_stage_run_id=run["run_id"],
     )
     assert parity["status"] == "passed"
-    assert trading.evaluate_stage(row["instance_id"], "shadow")["passed"]
+    assert trading.store.evaluate_stage(
+        row["instance_id"], "shadow", minimum_sessions=5
+    )["passed"]
     operator = OperatorContext(
         operator_id="risk-operator", request_id="approval-request",
         reason="dedicated account baseline confirmed", auth_source="test",

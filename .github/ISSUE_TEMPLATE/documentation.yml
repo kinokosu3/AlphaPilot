@@ -7,7 +7,7 @@ body:
     id: location
     attributes:
       label: "Location / 文档位置"
-      placeholder: "README.md#quick-start, docs/alphapilot-cli.md, docs/DOCKER.md..."
+      placeholder: "docs/index.md, docs/user/live-trading.md, docs/reference/cli.md..."
     validations:
       required: true
 

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-对比「因子窗口探测」与「补行情后始终全量拉因子」的下载耗时。
+手工对比「因子窗口探测」与「补行情后始终全量拉因子」的下载耗时。
 
 不修改项目源码：通过 monkeypatch 在探测版 /  legacy 版之间切换因子处理逻辑。
 在临时目录中复制样本股的行情与因子 CSV，避免污染 ~/.qlib 生产数据。
 
 用法（在仓库根目录）::
 
-    python tests/benchmark_factor_probe_download.py \\
+    python scripts/benchmark_factor_probe_download.py \\
         --stock_csv important_data/stock_lists/main_stock_2026_4_27.csv \\
         --end_date 2026-06-12 \\
         --sample_size 20

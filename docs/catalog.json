@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "systems": {
+    "data": {"title": "数据系统", "user_doc": "user/data-and-pools.md", "developer_doc": "developer/systems/data.md"},
+    "factor": {"title": "因子系统", "user_doc": "user/factor-mining-and-library.md", "developer_doc": "developer/systems/factor.md"},
+    "strategy": {"title": "策略资产系统", "user_doc": "user/strategy-assets-and-backtests.md", "developer_doc": "developer/systems/strategy.md"},
+    "backtest": {"title": "回测系统", "user_doc": "user/strategy-assets-and-backtests.md", "developer_doc": "developer/systems/backtest.md"},
+    "notify": {"title": "通知系统", "user_doc": "user/scheduling-notifications-and-operations.md", "developer_doc": "developer/systems/notify.md"},
+    "live": {"title": "交易运行时系统", "user_doc": "user/live-trading.md", "developer_doc": "developer/systems/live.md"},
+    "trading": {"title": "策略交易应用系统", "user_doc": "user/strategy-instances.md", "developer_doc": "developer/systems/trading.md"}
+  },
+  "modules": {
+    "alpha_mining": {"title": "LLM 因子挖掘", "user_doc": "user/factor-mining-and-library.md", "developer_doc": "developer/modules/alpha-mining.md"},
+    "alphaforge_aff": {"title": "AlphaForge AFF", "user_doc": "user/factor-mining-and-library.md", "developer_doc": "developer/modules/alphaforge-aff.md"},
+    "alphaforge_search": {"title": "AlphaForge GP/RL", "user_doc": "user/factor-mining-and-library.md", "developer_doc": "developer/modules/alphaforge-search.md"},
+    "backtest_viz": {"title": "独立回测可视化", "user_doc": "user/strategy-assets-and-backtests.md", "developer_doc": "developer/modules/backtest-viz.md"},
+    "daily_trade": {"title": "每日交易会话", "user_doc": "user/daily-trade.md", "developer_doc": "developer/modules/daily-trade.md"},
+    "data_viz": {"title": "独立行情可视化", "user_doc": "user/data-and-pools.md", "developer_doc": "developer/modules/data-viz.md"},
+    "factor": {"title": "因子库 CLI", "user_doc": "user/factor-mining-and-library.md", "developer_doc": "developer/modules/factor.md"},
+    "live": {"title": "交易运行时 CLI", "user_doc": "user/live-trading.md", "developer_doc": "developer/modules/live.md"},
+    "platform": {"title": "平台运维", "user_doc": "user/scheduling-notifications-and-operations.md", "developer_doc": "developer/modules/platform.md"},
+    "portal": {"title": "Portal、调度与通知入口", "user_doc": "user/portal-overview.md", "developer_doc": "developer/modules/portal.md"},
+    "qlib_yaml": {"title": "Qlib YAML", "user_doc": "user/strategy-assets-and-backtests.md", "developer_doc": "developer/modules/qlib-yaml.md"},
+    "report_factor": {"title": "研报因子提取", "user_doc": "user/factor-mining-and-library.md", "developer_doc": "developer/modules/report-factor.md"},
+    "stock_pool": {"title": "股票池", "user_doc": "user/data-and-pools.md", "developer_doc": "developer/modules/stock-pool.md"},
+    "strategy_backtest": {"title": "策略资产复测", "user_doc": "user/strategy-assets-and-backtests.md", "developer_doc": "developer/modules/strategy-backtest.md"},
+    "trading_cli": {"title": "策略实例与部署 CLI", "user_doc": "user/strategy-instances.md", "developer_doc": "developer/modules/trading-cli.md"}
+  },
+  "portal_pages": [
+    {"route": "/", "title": "首页", "features": "服务状态、快速入口、最近挖掘记录", "cli": "modules、list_mine_logs", "api": "/api/status、/api/mining", "equivalence": "Portal 聚合视图；CLI 分项等价", "user_doc": "user/portal-overview.md", "screenshot": "assets/portal/home.png"},
+    {"route": "/mining", "title": "因子挖掘", "features": "LLM、AFF、GP、RL 挖掘与会话日志", "cli": "mine、mine_aff、mine_gp、mine_rl", "api": "/api/jobs、/api/mining", "equivalence": "CLI/API 等价；Portal 提供交互日志", "user_doc": "user/factor-mining-and-library.md", "screenshot": "assets/portal/mining.png"},
+    {"route": "/backtest", "title": "回测", "features": "因子/策略回测、工作区、图表与排行榜", "cli": "backtest、strategy_backtest", "api": "/api/jobs、/api/backtests", "equivalence": "计算能力等价；图表为 Portal 展示", "user_doc": "user/strategy-assets-and-backtests.md", "screenshot": "assets/portal/backtest.png"},
+    {"route": "/timing", "title": "择时（策略实例）", "features": "定义、政策、实例、研究资产导入、preview 与统一回测", "cli": "trading_*", "api": "/api/trading", "equivalence": "CLI/API 等价", "user_doc": "user/strategy-instances.md", "screenshot": "assets/portal/strategy-instances.png"},
+    {"route": "/library", "title": "因子与策略库", "features": "因子、分类、研报提取、策略资产与导入导出", "cli": "factor_*、strategy_*", "api": "/api/factors、/api/strategies、/api/report-factors", "equivalence": "PDF 草稿复核为 Portal 优先，其余可组合调用", "user_doc": "user/factor-mining-and-library.md", "screenshot": "assets/portal/library.png"},
+    {"route": "/market", "title": "行情数据", "features": "数据任务、单股维护、股票池和 K 线", "cli": "prepare_data、pool_*", "api": "/api/data、/api/market、/api/modules/run", "equivalence": "数据操作等价；K 线为 Portal/回退 UI", "user_doc": "user/data-and-pools.md", "screenshot": "assets/portal/market.png"},
+    {"route": "/daily-trade", "title": "每日交易", "features": "滚动会话、每日信号、资金调整、历史和净值", "cli": "daily_signals、trade_session_*", "api": "/api/daily-trade、/api/trade-sessions", "equivalence": "CLI/API 等价", "user_doc": "user/daily-trade.md", "screenshot": "assets/portal/daily-trade.png"},
+    {"route": "/live", "title": "模拟与实盘", "features": "runtime、daemon、手工交易、部署、证据、对账和 kill switch", "cli": "live_*、trading_*", "api": "/api/live、/api/trading", "equivalence": "CLI/API 等价；Portal 强化确认与观察", "user_doc": "user/live-trading.md", "screenshot": "assets/portal/live.png"},
+    {"route": "/scheduler", "title": "调度", "features": "计划任务 CRUD、立即运行和调度 daemon", "cli": "scheduler（仅 daemon）", "api": "/api/schedules", "equivalence": "计划 CRUD 为 Portal/API-only", "user_doc": "user/scheduling-notifications-and-operations.md", "screenshot": "assets/portal/scheduler.png"},
+    {"route": "/notifications", "title": "通知", "features": "渠道配置、测试、命令接收、配对和事件", "cli": "notify_commands（仅接收器）", "api": "/api/notify", "equivalence": "配置/测试/配对为 Portal/API-only", "user_doc": "user/scheduling-notifications-and-operations.md", "screenshot": "assets/portal/notifications.png"},
+    {"route": "/advanced", "title": "高级设置", "features": "Portal/环境配置、日志清理和模块调用", "cli": "timezone、clean_logs、modules、portal_restart", "api": "/api/portal、/api/logs、/api/modules", "equivalence": "可组合 CLI 等价；表单为 Portal 展示", "user_doc": "user/scheduling-notifications-and-operations.md", "screenshot": "assets/portal/advanced.png"}
+  ],
+  "cli_status": {
+    "deprecated": ["ui", "backtest_ui"],
+    "fallback": ["data_viz", "backtest_viz"],
+    "local_uat": ["trading_broker_uat_start", "trading_broker_uat_resume", "trading_broker_uat_abort", "trading_broker_uat_preflight", "trading_broker_uat_status"],
+    "removed": ["trading_stage_start", "trading_stage_finish", "trading_stage_evaluate", "timing_strategies", "timing_signal", "timing_backtest", "live_daemon_strategy_status", "live_daemon_strategy_start", "live_daemon_strategy_pause", "live_daemon_strategy_resume", "live_daemon_strategy_stop"]
+  }
+}

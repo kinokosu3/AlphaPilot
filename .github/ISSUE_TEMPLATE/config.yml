@@ -1,11 +1,14 @@
 blank_issues_enabled: false
 contact_links:
+  - name: "Documentation Center / 文档中心"
+    url: "https://github.com/ai-yang/AlphaPilot/blob/main/docs/index.md"
+    about: "User guides, developer docs, CLI, Portal, and API references. / 用户、开发、CLI、Portal 与 API 文档入口。"
   - name: "README / 项目说明"
-    url: "https://github.com/ai-yang/money_is_all_you_need#readme"
+    url: "https://github.com/ai-yang/AlphaPilot#readme"
     about: "Start here for installation, core features, and workflows. / 安装、核心功能和典型工作流请先查看这里。"
   - name: "CLI Reference / CLI 命令参考"
-    url: "https://github.com/ai-yang/money_is_all_you_need/blob/main/docs/alphapilot-cli.md"
+    url: "https://github.com/ai-yang/AlphaPilot/blob/main/docs/alphapilot-cli.md"
     about: "Command usage and options. / 命令用法和参数说明。"
   - name: "Docker Deployment / Docker 部署"
-    url: "https://github.com/ai-yang/money_is_all_you_need/blob/main/docs/DOCKER.md"
+    url: "https://github.com/ai-yang/AlphaPilot/blob/main/docs/DOCKER.md"
     about: "Docker setup and deployment notes. / Docker 安装和部署说明。"

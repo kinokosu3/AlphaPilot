@@ -65,15 +65,13 @@ def test_live_stage_overwrites_manually_entered_execution_summary(tmp_path: Path
     system, store, instance_id = _live_system(tmp_path / "manual-summary.sqlite3")
     run = store.start_stage_run(instance_id, "live")
 
-    finished = system.finish_stage_run(
+    finished = store.finish_stage_run(
         run["run_id"],
-        {
-            "trading_sessions": 5,
-            "metrics": {
-                "execution_quality_order_count": 10,
-                "median_implementation_shortfall_bp": 1.0,
-                "p95_implementation_shortfall_bp": 2.0,
-            },
+        trading_sessions=5,
+        metrics={
+            "execution_quality_order_count": 10,
+            "median_implementation_shortfall_bp": 1.0,
+            "p95_implementation_shortfall_bp": 2.0,
         },
     )
 
@@ -128,16 +126,14 @@ def test_live_stage_derives_quality_from_raw_fills_and_requires_sessions(
             price=10.005,
         )
 
-    finished = system.finish_stage_run(
+    finished = store.finish_stage_run(
         run["run_id"],
-        {
-            "trading_sessions": 5,
-            "metrics": {
-                # These values must be replaced by the raw-fill calculation.
-                "execution_quality_order_count": 999,
-                "median_implementation_shortfall_bp": 999.0,
-                "p95_implementation_shortfall_bp": 999.0,
-            },
+        trading_sessions=5,
+        metrics={
+            # These values must be replaced by the raw-fill calculation.
+            "execution_quality_order_count": 999,
+            "median_implementation_shortfall_bp": 999.0,
+            "p95_implementation_shortfall_bp": 999.0,
         },
     )
 
@@ -146,7 +142,7 @@ def test_live_stage_derives_quality_from_raw_fills_and_requires_sessions(
     assert finished["metrics"]["p95_implementation_shortfall_bp"] < 50
     assert finished["metrics"]["execution_quality_source"] == "broker_fill_reconciliation"
     assert len(finished["metrics"]["execution_quality_fingerprint"]) == 64
-    evidence = system.evaluate_stage(instance_id, "live")
+    evidence = store.evaluate_stage(instance_id, "live", minimum_sessions=5)
     assert evidence["passed"] is True
     assert evidence["trading_sessions"] == 5
     assert evidence["execution_quality"]["passed"] is True

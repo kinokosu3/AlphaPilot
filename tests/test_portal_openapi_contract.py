@@ -12,7 +12,7 @@ from alphapilot.modules.portal.api import create_app
 
 EXPECTED_OPERATION_COUNT = 152
 EXPECTED_PATH_COUNT = 136
-EXPECTED_CONTRACT_SHA256 = "43e9f517118155f52aa1f410081be2bb42b5462a197483058f231a0db54e54fe"
+EXPECTED_CONTRACT_SHA256 = "23b645eaa6c1fa98230f16b32994847f19809e2bd7cbdbaa81cabf218443021a"
 HTTP_METHODS = {"get", "post", "put", "patch", "delete"}
 LEGACY_HTTP_OPERATIONS = {
     ("get", "/api/timing/strategies"),
@@ -66,6 +66,11 @@ def test_openapi_operation_snapshot_is_exact() -> None:
     assert len(contract) == EXPECTED_OPERATION_COUNT
     assert len({item["operation_id"] for item in contract}) == EXPECTED_OPERATION_COUNT
     assert hashlib.sha256(encoded).hexdigest() == EXPECTED_CONTRACT_SHA256
+
+    by_path = {(item["method"], item["path"]): item for item in contract}
+    for action in ("start", "pause", "reconcile", "resume", "stop"):
+        item = by_path[("POST", f"/api/trading/deployments/{{instance_id}}/{action}")]
+        assert item["operation_id"] == f"trading_deployment_{action}"
 
 
 def test_all_typed_operations_declare_validation_errors() -> None:

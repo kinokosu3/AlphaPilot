@@ -13,9 +13,9 @@ Advisory checks (printed but do not fail the run):
   - backward adjust cross-vendor (factor vendor semantics often differ)
 
 Usage:
-    python test_tushare_adjust_compare.py
-    python test_tushare_adjust_compare.py --symbols sh.600000 sz.000001 --start-date 2024-01-01
-    python test_tushare_adjust_compare.py --skip-download   # reuse files under --work-dir
+    python scripts/compare_tushare_adjust.py
+    python scripts/compare_tushare_adjust.py --symbols sh.600000 sz.000001 --start-date 2024-01-01
+    python scripts/compare_tushare_adjust.py --skip-download   # reuse files under --work-dir
 
 Requires TUSHARE_TOKEN in the environment or .env.
 """
@@ -109,10 +109,26 @@ def _compare_pair(
 ) -> CompareResult:
     merged = left.merge(right, on="date", how="inner", suffixes=("_l", "_r"))
     if merged.empty:
-        return CompareResult(label, symbol, 0, float("nan"), float("nan"), False, "no overlapping dates")
+        return CompareResult(
+            label,
+            symbol,
+            0,
+            float("nan"),
+            float("nan"),
+            False,
+            note="no overlapping dates",
+        )
 
     if "close_l" not in merged.columns or "close_r" not in merged.columns:
-        return CompareResult(label, symbol, 0, float("nan"), float("nan"), False, "missing close column")
+        return CompareResult(
+            label,
+            symbol,
+            0,
+            float("nan"),
+            float("nan"),
+            False,
+            note="missing close column",
+        )
 
     diff = (merged["close_l"] - merged["close_r"]).abs()
     denom = merged[["close_l", "close_r"]].abs().max(axis=1).clip(lower=1e-6)

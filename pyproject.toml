@@ -43,6 +43,7 @@ strategy = "alphapilot.systems.strategy.service:StrategySystem"
 trading = "alphapilot.systems.trading.service:TradingStrategySystem"
 backtest = "alphapilot.systems.backtest.service:QlibBacktestSystem"
 notify = "alphapilot.systems.notify.service:NotificationSystem"
+live = "alphapilot.systems.live.service:LiveSystem"
 
 [project.entry-points."alphapilot.modules"]
 alpha_mining = "alphapilot.modules.alpha_mining.module:AlphaMiningModule"
@@ -54,10 +55,12 @@ backtest_viz = "alphapilot.modules.backtest_viz.module:BacktestVizModule"
 strategy_backtest = "alphapilot.modules.strategy_backtest.module:StrategyBacktestModule"
 daily_trade = "alphapilot.modules.daily_trade.module:DailyTradeModule"
 qlib_yaml = "alphapilot.modules.qlib_yaml.module:QlibYamlModule"
-factor_cli = "alphapilot.modules.factor.module:FactorModule"
+factor = "alphapilot.modules.factor.module:FactorModule"
 alphaforge_aff = "alphapilot.modules.alphaforge_aff.module:AlphaForgeAFFModule"
 alphaforge_search = "alphapilot.modules.alphaforge_search.module:AlphaForgeSearchModule"
 stock_pool = "alphapilot.modules.stock_pool.module:StockPoolModule"
+live = "alphapilot.modules.live.module:LiveModule"
+trading_cli = "alphapilot.modules.trading.module:TradingModule"
 
 # Optional deps for the AlphaForge-derived mining modules: ``alphaforge``
 # covers AFF (GAN) + GP + RL.

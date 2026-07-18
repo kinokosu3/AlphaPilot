@@ -97,7 +97,12 @@ def _wheel_smoke() -> dict[str, Any]:
                     sys.executable,
                     "-c",
                     "import alphapilot; import alphapilot.systems.trading.service; "
-                    "import alphapilot.modules.portal.api",
+                    "import alphapilot.modules.portal.api; "
+                    "from alphapilot.kernel import build_engine; "
+                    "engine = build_engine(discover=True); "
+                    "assert len(engine.systems) == 7, engine.systems; "
+                    "assert len(engine.modules) == 15, engine.modules; "
+                    "assert len(engine.collect_commands()) == 117; engine.shutdown()",
                 ],
                 cwd=root,
                 env=env,

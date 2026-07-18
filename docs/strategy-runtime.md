@@ -105,12 +105,9 @@ PAPER/SHADOW 启动时创建绑定当前 `config_hash` 的 stage run。runner �
 才会完成；PAPER 默认至少 20 个交易日，SHADOW 默认至少 5 个交易日。调用方声明的天数不会
 替代运行时实际记录的会话日期；同一配置多次重启或多段运行中的同一交易日只计一次。
 
-stage run 只能由 runtime 自动开始、记录和结束。以下手工写接口仅作为 0.1.x 兼容面保留，
-不接受调用方填写的交易日数量，也不能生成正式 qualification 所需的可信证据；0.2.0 将删除：
-
-- `POST /api/trading/stage-runs/{instance_id}/{paper|shadow}/start`
-- `POST /api/trading/stage-runs/{run_id}/finish`
-- `POST /api/trading/stage-runs/{instance_id}/{paper|shadow}/evaluate`
+stage run 只能由 runtime 自动开始、记录和结束。0.2.0 已删除手工 start/finish/evaluate
+HTTP 与 CLI；调用方不能填写交易日数量或直接写入通过状态。底层 Store 方法只供
+DeploymentCoordinator、runtime 和内部恢复测试使用。
 
 正式只读接口为：
 
@@ -151,7 +148,8 @@ checkpoint/provenance、详细兼容调用、决策观测与 parity；v7 增加 
 - `POST /api/trading/strategy-instances/{id}/backtest-runs`
 - `GET /api/trading/deployments/{id}`
 - `POST /api/trading/deployments/{id}/promote`
-- `POST /api/trading/deployments/{id}/start|pause|reconcile|resume|stop|status`
+- `POST /api/trading/deployments/{id}/{start|pause|reconcile|resume|stop}`
+- `GET /api/trading/deployments/{id}/status`
 
 0.2.0 已移除旧 `/api/timing/*`、`timing_*` CLI、公开 daemon strategy-name 控制和匿名 PAPER
 runner。调用方必须先创建并验证持久化实例，再通过正式 preview、异步 backtest 和 deployment

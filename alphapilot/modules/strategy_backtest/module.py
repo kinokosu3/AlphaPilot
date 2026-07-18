@@ -46,6 +46,7 @@ class StrategyBacktestModule(BaseModule):
         self.context = context
 
     def strategy_backtest_list(self) -> list[dict[str, Any]]:
+        """List saved research strategy assets with compact model and metric status."""
         strategy_system = self.context.strategy()
         out: list[dict[str, Any]] = []
         for r in strategy_system.list_strategy_records():
@@ -112,6 +113,7 @@ class StrategyBacktestModule(BaseModule):
         save_as: str | None = None,
         **options: Any,
     ) -> list[dict[str, Any]]:
+        """Retrain or evaluate a saved research strategy asset through Qlib."""
         strategy_system = self.context.strategy()
         req = StrategyBacktestRequest(
             strategy_name=strategy_name,

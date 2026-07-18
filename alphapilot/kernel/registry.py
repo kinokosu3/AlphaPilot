@@ -154,7 +154,7 @@ def _register_builtin_defaults() -> None:
         "alphapilot.modules.daily_trade.module.DailyTradeModule",
     )
     register_module(
-        "factor_cli",
+        "factor",
         "alphapilot.modules.factor.module.FactorModule",
     )
     register_module(
@@ -168,6 +168,10 @@ def _register_builtin_defaults() -> None:
     register_module(
         "stock_pool",
         "alphapilot.modules.stock_pool.module.StockPoolModule",
+    )
+    register_module(
+        "strategy_backtest",
+        "alphapilot.modules.strategy_backtest.module.StrategyBacktestModule",
     )
     register_module(
         "live",

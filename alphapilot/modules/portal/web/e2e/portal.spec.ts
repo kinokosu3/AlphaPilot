@@ -46,12 +46,13 @@ test.describe("Portal interaction contract", () => {
       if (!["127.0.0.1", "localhost"].includes(url.hostname)) externalRequests.push(request.url());
     });
     await page.goto("/live");
-    await expect(page.getByRole("tab", { name: /PAPER/ })).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("tab", { name: /Paper/i })).toHaveAttribute("aria-selected", "true");
     await expect(page.getByLabel("初始资金")).toBeVisible();
     await page.getByLabel("初始资金").fill("250000");
     await page.getByRole("button", { name: "启动 daemon" }).click();
     await expect(page.locator(".live-workspace-status .pill.running")).toBeVisible({ timeout: 20_000 });
-    await expect(page.getByRole("tab", { name: /LIVE/ })).toBeDisabled();
+    await expect(page.getByRole("tab", { name: /Paper/i })).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("tab", { name: /Live/i })).toBeEnabled();
     await page.getByText("更多技术操作").click();
     await page.getByRole("button", { name: "停止 daemon" }).click();
     await page.getByRole("alertdialog").getByRole("button", { name: "确认" }).click();
@@ -72,6 +73,6 @@ test.describe("Portal interaction contract", () => {
     await page.goto("/library");
     await expect(page.getByRole("heading", { name: /因子.*策略库|Factor/ }).first()).toBeVisible();
     await page.goto("/live");
-    await expect(page.getByRole("tab", { name: /PAPER/ })).toBeVisible();
+    await expect(page.getByRole("tab", { name: /Paper/i })).toBeVisible();
   });
 });

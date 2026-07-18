@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,7 +11,11 @@ from alphapilot.systems.live.brokers.paper import PaperBroker
 from alphapilot.systems.live.clock import SimulatedClock
 from alphapilot.systems.live.config import LiveConfig, RiskLimits, RunMode
 from alphapilot.systems.live.ledger import Ledger
-from alphapilot.systems.live.recovery import recover_risk_state_from_ledger, reconcile_ledger_with_oms
+from alphapilot.systems.live.recovery import (
+    _persisted_risk_state,
+    recover_risk_state_from_ledger,
+    reconcile_ledger_with_oms,
+)
 from alphapilot.systems.live.runtime import LiveRuntime
 from alphapilot.systems.live.types import Account, Exchange, OrderRequest
 
@@ -160,6 +165,57 @@ def test_runtime_recovery_preserves_loss_latch_and_canary_baseline(
     with pytest.raises(ValueError, match="has not recovered"):
         second.engine.resume()
     second.close()
+
+
+def test_persisted_daily_risk_uses_configured_trading_timezone(tmp_path: Path) -> None:
+    state_path = tmp_path / "runtime-state.json"
+    config = LiveConfig(
+        mode=RunMode.PAPER,
+        broker="paper",
+        timezone="Asia/Shanghai",
+    )
+    state_path.write_text(
+        json.dumps(
+            {
+                "written_at": "2026-07-17T16:05:00+00:00",
+                "config": {
+                    "mode": config.mode,
+                    "trade_broker": config.trade_broker,
+                },
+                "account": {"account_id": "paper"},
+                "engine": {
+                    "risk": {
+                        "day_start_equity": 100_000.0,
+                        "canary_start_equity": 100_000.0,
+                        "loss_halt_rule": "daily_loss",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime = SimpleNamespace(
+        state_path=state_path,
+        config=config,
+        engine=SimpleNamespace(
+            oms=SimpleNamespace(
+                account=Account(
+                    "paper",
+                    balance=98_900,
+                    available=98_900,
+                    gateway="paper",
+                )
+            )
+        ),
+    )
+
+    same_session = _persisted_risk_state(runtime, day=date(2026, 7, 18))
+    next_session = _persisted_risk_state(runtime, day=date(2026, 7, 19))
+
+    assert same_session["day_start_equity"] == 100_000.0
+    assert same_session["loss_halt_rule"] == "daily_loss"
+    assert next_session["day_start_equity"] == 0.0
+    assert next_session["canary_start_equity"] == 100_000.0
 
 
 def test_recovery_reports_unsupported_order_trade_queries(tmp_path: Path) -> None:

@@ -10,10 +10,19 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUN_ID = os.getenv("ALPHAPILOT_PORTAL_INTERACTION_RUN_ID") or time.strftime("%Y%m%d_%H%M%S")
-QA_ROOT = REPO_ROOT / "git_ignore_folder" / "qa" / "portal_interaction" / RUN_ID
+QA_ROOT = Path(
+    os.getenv(
+        "ALPHAPILOT_PORTAL_QA_ROOT",
+        REPO_ROOT / "git_ignore_folder" / "qa" / "portal_interaction" / RUN_ID,
+    )
+).resolve()
 
 
 def configure_environment() -> None:
+    if os.getenv("ALPHAPILOT_GENERATE_DOC_SCREENSHOTS") == "1":
+        # The documentation fixture uses a fixed, non-user-specific /tmp path
+        # so screenshots stay reproducible and never expose a developer home.
+        shutil.rmtree(QA_ROOT, ignore_errors=True)
     paths = {
         "ALPHAPILOT_IMPORTANT_DATA_DIR": QA_ROOT / "important_data",
         "ALPHAPILOT_FACTOR_ZOO_DIR": QA_ROOT / "factor_zoo",
@@ -43,6 +52,11 @@ def configure_environment() -> None:
             "ALPHAPILOT_NOTIFY_CREDENTIALS_PATH": str(QA_ROOT / "notify.json"),
             "ALPHAPILOT_LIVE_MODE": "paper",
             "ALPHAPILOT_LIVE_BROKER": "paper",
+            # Browser interaction tests exercise only the isolated PAPER
+            # workflow. Operator authentication has dedicated API/unit
+            # coverage; disabling it here avoids injecting a plaintext token
+            # into Playwright traces, videos, or documentation screenshots.
+            "ALPHAPILOT_OPERATOR_AUTH_REQUIRED": "false",
             "ALPHAPILOT_PICKLE_CACHE_ENABLED": "false",
             "ALPHAPILOT_TIMEZONE": "Asia/Shanghai",
             "USE_LOCAL": "True",

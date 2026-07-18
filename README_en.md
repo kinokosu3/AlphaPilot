@@ -53,9 +53,9 @@ AlphaPilot's primary workflow is automated factor research. You can start an LLM
 Main entry: `alphapilot mine --direction "your market hypothesis"`
 
 <div align="center">
-  <img src="docs/mining.png" alt="Factor mining page: LLM factor mining and formula-based mining" width="860">
+  <img src="docs/assets/portal/mining.png" alt="Factor mining page: LLM factor mining and formula-based mining" width="860">
   <br><br>
-  <img src="docs/factor_zoo.png" alt="Factor / strategy library: unified factor asset management" width="860">
+  <img src="docs/assets/portal/library.png" alt="Factor / strategy library: unified factor asset management" width="860">
 </div>
 
 ### Backtesting and Evaluation
@@ -70,7 +70,7 @@ The project includes multiple backtesting and evaluation modes. It supports form
 Main entry: `alphapilot backtest --factor_path /path/to/factors.csv`
 
 <div align="center">
-  <img src="docs/backtest.png" alt="Backtesting: cumulative returns, excess returns, and account composition" width="860">
+  <img src="docs/assets/portal/backtest.png" alt="Backtesting: cumulative returns, excess returns, and account composition" width="860">
 </div>
 
 ### Strategy Retesting and Daily Signals
@@ -121,7 +121,7 @@ AlphaPilot provides a unified Web portal for daily research and runtime operatio
 Main entry: `alphapilot portal`
 
 <div align="center">
-  <img src="docs/portal.png" alt="Portal home page and task panel" width="860">
+  <img src="docs/assets/portal/home.png" alt="Portal home page and task panel" width="860">
 </div>
 
 ### Data Preparation and Management
@@ -136,9 +136,9 @@ The project includes a complete A-share data preparation pipeline, from raw mark
 Main entry: `alphapilot prepare_data download --stock_csv important_data/stock_lists/main_stock_2026_4_27.csv`
 
 <div align="center">
-  <img src="docs/stock_zoo.png" alt="Market data: data actions, stock pools, and single-stock management" width="860">
+  <img src="docs/assets/portal/market.png" alt="Market data: data actions, stock pools, and single-stock management" width="860">
   <br><br>
-  <img src="docs/data_zoo.png" alt="Market data: local K-line viewer" width="860">
+  <img src="docs/assets/portal/market.png" alt="Market data: local K-line viewer" width="860">
 </div>
 
 ### Notifications and Remote Control
@@ -154,7 +154,7 @@ Research tasks often take a long time. AlphaPilot includes task notifications an
 Main entry: `alphapilot notify_commands --channel telegram`
 
 <div align="center">
-  <img src="docs/notification.png" alt="Notification settings and command receiver" width="860">
+  <img src="docs/assets/portal/notifications.png" alt="Notification settings and command receiver" width="860">
 </div>
 
 ## 🚀 Quick Start
@@ -295,9 +295,9 @@ Broker SDK bindings and adapters are not synchronized with the core repository; 
 
 ## 📚 More Documentation
 
-- [Full CLI command reference](docs/alphapilot-cli.md)
-- [Project structure and architecture](docs/alphapilot-structure.md)
-- [Docker deployment and service mode](docs/DOCKER.md)
+- [Chinese documentation center: user guides, developer docs, and generated CLI/API references](docs/index.md)
+
+The Chinese documentation center is the canonical, code-checked manual for the current `0.2.x` line. This English README remains a project overview and is not maintained as a complete translated copy of every interface.
 - [Docker run notes and troubleshooting](docs/DOCKER-RUN.md)
 - [XTP Pro / EMT live-trading setup](docs/live-xtp.md)
 - [Live broker/quote pip plugin guide](docs/live-plugins.md)

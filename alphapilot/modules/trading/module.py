@@ -60,12 +60,15 @@ class TradingModule(BaseModule):
         )
 
     def trading_definitions(self) -> dict[str, Any]:
+        """List installed strategy definitions and their parameter contracts."""
         return self._print(self._system().list_definitions())
 
     def trading_policies(self) -> dict[str, Any]:
+        """List installed portfolio-policy definitions and parameter contracts."""
         return self._print(self._system().list_portfolio_policy_definitions())
 
     def trading_instances(self) -> list[dict[str, Any]]:
+        """List persisted strategy instances and their lifecycle state."""
         return self._print(self._system().list_instances())
 
     def trading_instance_create(
@@ -78,6 +81,7 @@ class TradingModule(BaseModule):
         data_policy: Any = None,
         portfolio_policy: Any = None,
     ) -> dict[str, Any]:
+        """Create a strategy instance from a registered definition."""
         return self._print(self._system().create_instance({
             "instance_id": instance_id,
             "strategy_id": strategy_id,
@@ -96,6 +100,7 @@ class TradingModule(BaseModule):
         portfolio_policy: Any = None,
         risk_policy: Any = None,
     ) -> dict[str, Any]:
+        """Snapshot a saved research asset into a deployable selection instance."""
         return self._print(self._system().create_instance_from_research_asset({
             "instance_id": instance_id,
             "strategy_name": strategy_name,
@@ -105,31 +110,8 @@ class TradingModule(BaseModule):
         }))
 
     def trading_instance_validate(self, instance_id: str) -> dict[str, Any]:
+        """Validate one strategy instance, artifact, data policy and parameters."""
         return self._print(self._system().validate_instance(instance_id))
-
-    def trading_stage_start(self, instance_id: str, stage: str) -> dict[str, Any]:
-        return self._print(self._system().start_stage_run(instance_id, stage))
-
-    def trading_stage_finish(
-        self,
-        run_id: str,
-        trading_sessions: int,
-        metrics: Any = None,
-        status: str = "completed",
-    ) -> dict[str, Any]:
-        return self._print(
-            self._system().finish_stage_run(
-                run_id,
-                {
-                    "trading_sessions": int(trading_sessions),
-                    "metrics": _object(metrics),
-                    "status": status,
-                },
-            )
-        )
-
-    def trading_stage_evaluate(self, instance_id: str, stage: str) -> dict[str, Any]:
-        return self._print(self._system().evaluate_stage(instance_id, stage))
 
     def trading_preview(
         self,
@@ -138,6 +120,7 @@ class TradingModule(BaseModule):
         output_path: str = "",
         output_format: str = "json",
     ) -> dict[str, Any]:
+        """Evaluate one instance and optionally export its signal as JSON or CSV."""
         result = self._system().preview_instance(instance_id, _object(options))
         if output_path:
             destination = Path(output_path).expanduser()
@@ -179,6 +162,7 @@ class TradingModule(BaseModule):
         wait: bool = False,
         output_dir: str = "",
     ) -> dict[str, Any]:
+        """Start an asynchronous unified replay, optionally waiting for completion."""
         request = _object(options)
         if output_dir:
             request["output_dir"] = str(Path(output_dir).expanduser())
@@ -191,9 +175,11 @@ class TradingModule(BaseModule):
         return self._print(run)
 
     def trading_backtest_status(self, run_id: str, detail: bool = False) -> dict[str, Any]:
+        """Read a unified replay run, optionally including full artifacts."""
         return self._print(self._system().get_backtest_run(run_id, detail=bool(detail)))
 
     def trading_backtest_cancel(self, run_id: str) -> dict[str, Any]:
+        """Request cancellation of a queued or running unified replay."""
         return self._print(self._system().cancel_backtest_run(run_id))
 
     def trading_promote(
@@ -207,6 +193,7 @@ class TradingModule(BaseModule):
         operator_id: str = "local-cli",
         reason: str = "CLI deployment promotion",
     ) -> dict[str, Any]:
+        """Promote an instance to a deployment stage after qualification checks."""
         system = self._system()
         result = system.promote(instance_id, {
             "to": to,
@@ -225,6 +212,7 @@ class TradingModule(BaseModule):
         return self._print(result)
 
     def trading_execution_binding(self, instance_id: str) -> dict[str, Any]:
+        """Read the execution environment bound to a strategy instance."""
         return self._print(self._system().execution_binding(instance_id))
 
     def trading_bind_execution(
@@ -235,6 +223,7 @@ class TradingModule(BaseModule):
         quote_provider: str = "paper",
         account_profile: str = "",
     ) -> dict[str, Any]:
+        """Bind an instance to a trade provider, quote provider and account profile."""
         return self._print(self._system().bind_execution(instance_id, {
             "execution_environment": execution_environment,
             "trade_provider": trade_provider,
@@ -248,6 +237,7 @@ class TradingModule(BaseModule):
         label: str = "",
         expires_in_days: int | None = None,
     ) -> dict[str, Any]:
+        """Create a local operator token; its plaintext is returned only once."""
         return self._print(self._system().create_operator_token(
             operator_id,
             label=label,
@@ -264,6 +254,7 @@ class TradingModule(BaseModule):
         ttl_seconds: int = 300,
         baseline_positions: Any = None,
     ) -> dict[str, Any]:
+        """Create a short-lived LIVE approval bound to instance, account and broker."""
         operator = OperatorContext(
             operator_id=operator_id,
             request_id=uuid.uuid4().hex,
@@ -297,29 +288,35 @@ class TradingModule(BaseModule):
     def trading_start(
         self, instance_id: str, operator_id: str = "local-cli", reason: str = "CLI start",
     ) -> dict[str, Any]:
+        """Start the deployment runtime for a persisted strategy instance."""
         return self._lifecycle(instance_id, "start", operator_id, reason)
 
     def trading_pause(
         self, instance_id: str, operator_id: str = "local-cli", reason: str = "CLI pause",
     ) -> dict[str, Any]:
+        """Pause new decisions and request cancellation of instance orders."""
         return self._lifecycle(instance_id, "pause", operator_id, reason)
 
     def trading_reconcile(
         self, instance_id: str, operator_id: str = "local-cli", reason: str = "CLI reconcile",
     ) -> dict[str, Any]:
+        """Reconcile runtime state with broker account, orders and fills."""
         return self._lifecycle(instance_id, "reconcile", operator_id, reason)
 
     def trading_resume(
         self, instance_id: str, operator_id: str = "local-cli", reason: str = "CLI resume",
     ) -> dict[str, Any]:
+        """Resume a reconciled deployment after an explicit operator action."""
         return self._lifecycle(instance_id, "resume", operator_id, reason)
 
     def trading_stop(
         self, instance_id: str, operator_id: str = "local-cli", reason: str = "CLI stop",
     ) -> dict[str, Any]:
+        """Stop a deployment and revoke its automated routing authority."""
         return self._lifecycle(instance_id, "stop", operator_id, reason)
 
     def trading_status(self, instance_id: str) -> dict[str, Any]:
+        """Show desired/observed deployment, heartbeat and reconciliation status."""
         return self._print(public_account_state(self._system().deployment(instance_id)))
 
     def trading_kill_switch(
@@ -330,6 +327,7 @@ class TradingModule(BaseModule):
         reason: str,
         operator_id: str = "local-cli",
     ) -> dict[str, Any]:
+        """Engage or release an instance, account or global kill switch."""
         if not str(reason).strip():
             raise ValueError("kill switch changes require an operator reason")
         system = self._system()
@@ -344,6 +342,7 @@ class TradingModule(BaseModule):
         return self._print(result)
 
     def trading_audit(self, limit: int = 200) -> list[dict[str, Any]]:
+        """List recent operator audit events with sensitive account data redacted."""
         return self._print(public_account_state(self._system().audit_events(limit=limit)))
 
     def trading_compatibility(
@@ -352,6 +351,7 @@ class TradingModule(BaseModule):
         export_path: str = "",
         import_path: str = "",
     ) -> dict[str, Any]:
+        """Inspect, set or exchange legacy-entrypoint migration cutoff reports."""
         system = self._system()
         imported = None
         if import_path:
@@ -378,6 +378,7 @@ class TradingModule(BaseModule):
         return self._print(result)
 
     def trading_removal_check(self, acceptance_instance_id: str) -> dict[str, Any]:
+        """Evaluate the auditable legacy-entrypoint removal qualification report."""
         return self._print(self._system().removal_check(acceptance_instance_id))
 
     def trading_parity_start(
@@ -386,12 +387,14 @@ class TradingModule(BaseModule):
         replay_run_id: str,
         shadow_stage_run_id: str,
     ) -> dict[str, Any]:
+        """Compare replay and SHADOW observations for one strategy instance."""
         return self._print(self._system().start_parity_run(instance_id, {
             "replay_run_id": replay_run_id,
             "shadow_stage_run_id": shadow_stage_run_id,
         }))
 
     def trading_parity_status(self, run_id: str) -> dict[str, Any]:
+        """Read a persisted parity run and its per-session comparison results."""
         return self._print(self._system().get_parity_run(run_id))
 
     def trading_qualification(
@@ -400,6 +403,7 @@ class TradingModule(BaseModule):
         account_id: str = "",
         broker: str = "",
     ) -> dict[str, Any]:
+        """Summarize deployment stage, parity, reconciliation, UAT and approval gates."""
         return self._print(
             self._system().qualification(
                 instance_id,
@@ -421,6 +425,7 @@ class TradingModule(BaseModule):
         operator_id: str = "local-cli",
         reason: str = "bounded real-broker UAT",
     ) -> dict[str, Any]:
+        """Start a bounded, callback-derived real-broker UAT scenario."""
         system = self._system()
         try:
             result = system.start_broker_uat({
@@ -464,6 +469,7 @@ class TradingModule(BaseModule):
         }))
 
     def trading_broker_uat_status(self, run_id: str = "", broker: str = "") -> Any:
+        """Show one broker UAT run or list runs, optionally filtered by broker."""
         if run_id:
             return self._print(self._system().get_broker_uat_run(run_id))
         return self._print(self._system().list_broker_uat_runs(broker or None))
@@ -476,6 +482,7 @@ class TradingModule(BaseModule):
         operator_id: str = "local-cli",
         reason: str = "resume broker UAT after diagnosed failure",
     ) -> dict[str, Any]:
+        """Resume an interrupted broker UAT after local diagnosis and confirmation."""
         system = self._system()
         result = system.resume_broker_uat(run_id, {
             "confirmation": confirmation,
@@ -495,6 +502,7 @@ class TradingModule(BaseModule):
         reason: str,
         operator_id: str = "local-cli",
     ) -> dict[str, Any]:
+        """Abort a broker UAT while preserving callback and cleanup evidence."""
         system = self._system()
         result = system.abort_broker_uat(run_id, {
             "confirmation": confirmation,
@@ -515,9 +523,6 @@ class TradingModule(BaseModule):
             "trading_instance_create": self.trading_instance_create,
             "trading_instance_from_research": self.trading_instance_from_research,
             "trading_instance_validate": self.trading_instance_validate,
-            "trading_stage_start": self.trading_stage_start,
-            "trading_stage_finish": self.trading_stage_finish,
-            "trading_stage_evaluate": self.trading_stage_evaluate,
             "trading_preview": self.trading_preview,
             "trading_backtest": self.trading_backtest,
             "trading_backtest_status": self.trading_backtest_status,

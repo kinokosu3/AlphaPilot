@@ -1431,7 +1431,11 @@ def create_app(
                 except Exception as exc:  # noqa: BLE001
                     raise _api_error(exc) from exc
             return endpoint
-        app.post(f"/api/trading/deployments/{{instance_id}}/{_action}")(
+        app.post(
+            f"/api/trading/deployments/{{instance_id}}/{_action}",
+            summary=f"Trading Deployment {_action.title()}",
+            operation_id=f"trading_deployment_{_action}",
+        )(
             _make_action(_action)
         )
 

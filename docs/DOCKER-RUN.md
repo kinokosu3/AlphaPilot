@@ -25,7 +25,7 @@
 ## 1. 运行步骤（可复现）
 
 ```bash
-cd /Users/wangrui/MyCodes/money_is_all_you_need
+cd /path/to/AlphaPilot
 
 # 1) 准备 .env（compose 的 env_file，放 LLM key / TUSHARE_TOKEN 等）
 cp .env.docker.example .env          # 然后编辑填入你的值

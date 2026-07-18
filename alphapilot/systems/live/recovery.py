@@ -9,11 +9,12 @@ today's submitted orders.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 import hashlib
 import json
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from alphapilot.systems.live.config import uses_real_providers
 
@@ -26,7 +27,7 @@ class RecoveryService:
 
     def __init__(self, runtime: Any, *, day: date | datetime | str | None = None) -> None:
         self.runtime = runtime
-        self.day = day or datetime.now().date()
+        self.day = day or datetime.now(_runtime_timezone(runtime)).date()
 
     def run(self) -> dict[str, Any]:
         engine = self.runtime.engine
@@ -165,12 +166,43 @@ def _persisted_risk_state(runtime: Any, *, day: date | datetime | str) -> dict[s
     risk = dict(((saved.get("engine") or {}).get("risk") or {}))
     if not risk:
         return {}
-    written = str(saved.get("written_at") or "")[:10]
-    requested = day.isoformat() if isinstance(day, (date, datetime)) else str(day)
-    requested = requested.replace("/", "-")[:10]
+    runtime_timezone = _runtime_timezone(runtime)
+    written = _timestamp_day(saved.get("written_at"), runtime_timezone)
+    requested = _requested_day(day, runtime_timezone)
     if not written or written != requested:
         risk["day_start_equity"] = 0.0
     return risk
+
+
+def _runtime_timezone(runtime: Any) -> ZoneInfo | timezone:
+    name = str(getattr(getattr(runtime, "config", None), "timezone", "") or "UTC")
+    try:
+        return ZoneInfo(name)
+    except ZoneInfoNotFoundError:
+        return timezone.utc
+
+
+def _timestamp_day(value: Any, target_timezone: ZoneInfo | timezone) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return raw.replace("/", "-")[:10]
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(target_timezone).date().isoformat()
+
+
+def _requested_day(value: date | datetime | str, target_timezone: ZoneInfo | timezone) -> str:
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            value = value.astimezone(target_timezone)
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value).replace("/", "-")[:10]
 
 
 def reconcile_ledger_with_oms(ledger: Any, oms: Any, *, day: date | datetime | str | None = None) -> dict[str, Any]:

@@ -15,7 +15,7 @@
   <img alt="Notify" src="https://img.shields.io/badge/Notify-Telegram%20%7C%20Feishu-26A5E4?logo=telegram&logoColor=white">
 </p>
 
-[快速开始](#-快速开始)&nbsp;·&nbsp;[核心功能](#-核心功能)&nbsp;·&nbsp;[典型工作流](#-典型工作流)&nbsp;·&nbsp;[文档](#-更多文档)&nbsp;·&nbsp;[Docker 部署](docs/DOCKER.md)
+[快速开始](#-快速开始)&nbsp;·&nbsp;[核心功能](#核心功能)&nbsp;·&nbsp;[典型工作流](#-典型工作流)&nbsp;·&nbsp;[文档](#-更多文档)&nbsp;·&nbsp;[Docker 部署](docs/DOCKER.md)
 
 </div>
 
@@ -53,9 +53,9 @@ AlphaPilot 的主线能力是自动化因子研究。你可以用自然语言启
 关键入口：`alphapilot mine --direction "你的市场假说"`
 
 <div align="center">
-  <img src="docs/mining.png" alt="因子挖掘页面：LLM 因子挖掘与公式化挖掘" width="860">
+  <img src="docs/assets/portal/mining.png" alt="因子挖掘页面：LLM 因子挖掘与公式化挖掘" width="860">
   <br><br>
-  <img src="docs/factor_zoo.png" alt="因子 / 策略库：因子资产统一管理" width="860">
+  <img src="docs/assets/portal/library.png" alt="因子 / 策略库：因子资产统一管理" width="860">
 </div>
 
 ### 回测与评估
@@ -70,7 +70,7 @@ AlphaPilot 的主线能力是自动化因子研究。你可以用自然语言启
 关键入口：`alphapilot backtest --factor_path /path/to/factors.csv`
 
 <div align="center">
-  <img src="docs/backtest.png" alt="回测：累计收益 / 超额收益 / 账户资产构成" width="860">
+  <img src="docs/assets/portal/backtest.png" alt="回测：累计收益 / 超额收益 / 账户资产构成" width="860">
 </div>
 
 ### 策略复测与日频信号
@@ -121,7 +121,7 @@ AlphaPilot 提供统一 Web 门户作为日常研究与运行入口，将数据�
 关键入口：`alphapilot portal`
 
 <div align="center">
-  <img src="docs/portal.png" alt="门户首页与任务面板" width="860">
+  <img src="docs/assets/portal/home.png" alt="门户首页与任务面板" width="860">
 </div>
 
 ### 数据准备与管理
@@ -136,9 +136,9 @@ AlphaPilot 提供统一 Web 门户作为日常研究与运行入口，将数据�
 关键入口：`alphapilot prepare_data download --stock_csv important_data/stock_lists/main_stock_2026_4_27.csv`
 
 <div align="center">
-  <img src="docs/stock_zoo.png" alt="市场数据：数据动作、股票池与单股管理" width="860">
+  <img src="docs/assets/portal/market.png" alt="市场数据：数据动作、股票池与单股管理" width="860">
   <br><br>
-  <img src="docs/data_zoo.png" alt="市场数据：本地 K 线查看" width="860">
+  <img src="docs/assets/portal/market.png" alt="市场数据：本地 K 线查看" width="860">
 </div>
 
 ### 通知与远程控制
@@ -154,7 +154,7 @@ AlphaPilot 提供统一 Web 门户作为日常研究与运行入口，将数据�
 关键入口：`alphapilot notify_commands --channel telegram`
 
 <div align="center">
-  <img src="docs/notification.png" alt="通知配置与命令接收器" width="860">
+  <img src="docs/assets/portal/notifications.png" alt="通知配置与命令接收器" width="860">
 </div>
 
 ## 🚀 快速开始
@@ -296,6 +296,7 @@ alphapilot live_connect --mode live --broker xtp --timeout 30
 
 ## 📚 更多文档
 
+- [中文文档中心：用户手册、开发文档与完整参考](docs/index.md)
 - [完整 CLI 命令参考](docs/alphapilot-cli.md)
 - [项目目录与架构说明](docs/alphapilot-structure.md)
 - [Docker 部署与服务化运行](docs/DOCKER.md)

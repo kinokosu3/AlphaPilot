@@ -49,14 +49,13 @@ def _stem(ts_code: str) -> str:
 
 STEMS = [_stem(c) for c in TS_CODES]
 
-# Skip the whole module up front unless real network runs are explicitly enabled.
-pytestmark = pytest.mark.real_data
-
-if not os.getenv("ALPHAPILOT_RUN_REAL_CLI"):
-    pytest.skip(
-        "real data pipeline disabled; set ALPHAPILOT_RUN_REAL_CLI=1 to run",
-        allow_module_level=True,
-    )
+pytestmark = [
+    pytest.mark.real_data,
+    pytest.mark.skipif(
+        not os.getenv("ALPHAPILOT_RUN_REAL_CLI"),
+        reason="real data pipeline disabled; set ALPHAPILOT_RUN_REAL_CLI=1 to run",
+    ),
+]
 
 
 @dataclass

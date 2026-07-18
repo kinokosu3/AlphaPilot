@@ -30,13 +30,13 @@ END_DATE = "2026-06-26"  # ~4 trading days -> ~48 5min bars/day each
 MARKET = "mini3_5min"
 FREQ = "5min"
 
-pytestmark = pytest.mark.real_data
-
-if not os.getenv("ALPHAPILOT_RUN_REAL_CLI"):
-    pytest.skip(
-        "real minute pipeline disabled; set ALPHAPILOT_RUN_REAL_CLI=1 to run",
-        allow_module_level=True,
-    )
+pytestmark = [
+    pytest.mark.real_data,
+    pytest.mark.skipif(
+        not os.getenv("ALPHAPILOT_RUN_REAL_CLI"),
+        reason="real minute pipeline disabled; set ALPHAPILOT_RUN_REAL_CLI=1 to run",
+    ),
+]
 
 
 def _stem(ts_code: str) -> str:

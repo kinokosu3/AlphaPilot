@@ -1288,29 +1288,6 @@ class TradingStrategySystem(BaseSystem):
         ).hexdigest()
         return report
 
-    def start_stage_run(self, instance_id: str, stage: str) -> dict[str, Any]:
-        if stage not in {"paper", "shadow", "live"}:
-            raise ValueError("stage run evidence is supported only for PAPER, SHADOW and LIVE")
-        return self.store.start_stage_run(instance_id, stage)
-
-    def finish_stage_run(self, run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return self.store.finish_stage_run(
-            run_id,
-            trading_sessions=int(payload.get("trading_sessions") or 0),
-            metrics=dict(payload.get("metrics") or {}),
-            status=str(payload.get("status") or "completed"),
-        )
-
-    def evaluate_stage(self, instance_id: str, stage: str) -> dict[str, Any]:
-        minimums = {"paper": 20, "shadow": 5, "live": 5}
-        if stage not in minimums:
-            raise ValueError("only PAPER, SHADOW and LIVE have mechanical stage-run gates")
-        return self.store.evaluate_stage(
-            instance_id,
-            stage,
-            minimum_sessions=minimums[stage],
-        )
-
     def _rebind_definition_hashes(self) -> None:
         """Invalidate old evidence when installed strategy code has changed."""
 
