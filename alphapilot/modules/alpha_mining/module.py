@@ -56,9 +56,10 @@ class AlphaMiningModule(BaseModule):
 
         ``yaml_params``: optional JSON string / file path overriding the qlib config used by the
         in-loop factor evaluation (money ``account`` / rebalance ``topk``/``n_drop`` / costs /
-        date segments). ``None`` keeps today's behavior. ``market``: instrument pool for the
-        factor h5 spec. ``save_factors_to_library``: when True, each round's mined factor
-        expressions are also added to the factor library (zoo) under a ``mined`` category.
+        date segments). ``None`` keeps today's behavior. ``market``: instrument pool for both
+        factor H5 calculation and the final Qlib model/backtest. ``save_factors_to_library``:
+        when True, each round's mined factor expressions are also added to the factor library
+        (zoo) under a ``mined`` category.
         """
         from alphapilot.core.utils import import_class
         from alphapilot.log import logger

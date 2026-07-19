@@ -18,7 +18,11 @@ data_handler_config: &data_handler_config
                 - class: qlib.contrib.data.loader.QlibDataLoader
                   kwargs:
                     config:
+{% if p.feature_expressions %}
                         feature: {{ p.feature_expressions | tojson }}
+{% else %}
+                        # Fixed price/volume features are disabled; use only StaticDataLoader factors.
+{% endif %}
                         label:
                             - ["{{ p.label_expression }}"]
                             - ["LABEL0"]

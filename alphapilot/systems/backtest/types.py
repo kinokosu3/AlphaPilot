@@ -32,7 +32,7 @@ class FactorBacktestRequest:
     """Optional ``QlibYamlParams`` (or plain dict) rendered into the workspace yaml to
     override model / strategy / dataset. ``None`` keeps today's static template behavior."""
     market: str | None = None
-    """Instrument-pool name for the factor h5 spec; ``None`` resolves from yaml_params/default."""
+    """Instrument pool for both factor H5 data and the final Qlib model/backtest config."""
     freq: str = "day"
     """Bar frequency: ``day`` (default) or intraday ``5min``/``15min``/``30min``/``60min``.
     Intraday reads the per-frequency qlib dir and builds an intraday factor h5 cache."""

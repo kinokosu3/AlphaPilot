@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import os
 import pickle
+import re
 import shutil
 from pathlib import Path
 from typing import Any, Union
 
 import pandas as pd
+import yaml
 
 from alphapilot.components.runner import CachedRunner
 from alphapilot.core.conf import RD_AGENT_SETTINGS
@@ -61,6 +63,12 @@ def _portfolio_artifact_names() -> tuple[str, ...]:
 
 _PORTFOLIO_ARTIFACT_NAMES = _portfolio_artifact_names()
 
+# Cache semantics changed when the final qrun YAML became hard-bound to the
+# factor-data market and the combined template stopped adding four fixed PV
+# features.  Keep this explicit so old, incorrectly scoped portfolio results
+# cannot be restored for a newly fixed run.
+_FACTOR_RUNNER_CONFIG_VERSION = "v2-market-bound-generated-features-only"
+
 
 def _backtest_cacheable(exp: Any) -> bool:
     """A cached qrun is reusable only while its material artifacts still exist.
@@ -90,15 +98,17 @@ def _coerce_yaml_params(yaml_params: Any) -> Any:
     """Return a ``QlibYamlParams`` from an instance or plain dict.
 
     A plain dict is treated as a *patch*: when it omits ``template_type`` we default it to
-    ``combined`` (the LLM-factor norm). Otherwise ``model_validate`` defaults to ``baseline`` and
-    would silently render the wrong qlib template for combined-factor runs.
+    ``combined`` (the LLM-factor norm), then merge it onto that template's complete defaults.
+    This avoids restoring baseline-only defaults such as the four fixed price/volume features.
     """
     from alphapilot.systems.backtest.qlib_yaml.schema import QlibYamlParams
 
     if isinstance(yaml_params, QlibYamlParams):
         return yaml_params
-    if isinstance(yaml_params, dict) and "template_type" not in yaml_params:
-        yaml_params = {"template_type": "combined", **yaml_params}
+    if isinstance(yaml_params, dict):
+        template_type = yaml_params.get("template_type", "combined")
+        base = QlibYamlParams.defaults_for(template_type)
+        return QlibYamlParams.merge_patch(base, yaml_params)
     return QlibYamlParams.model_validate(yaml_params)
 
 
@@ -135,6 +145,59 @@ def _render_yaml_params_to_workspace(yaml_params: Any, workspace_path: Path) -> 
     return config_name
 
 
+_MARKET_ANCHOR_RE = re.compile(
+    r"^(?P<prefix>market:\s*&market)\s+[^#\r\n]*?(?P<comment>\s+#.*)?$",
+    flags=re.MULTILINE,
+)
+
+
+def _bind_market_to_workspace_config(config_path: Path, market: str) -> None:
+    """Bind the resolved factor-data universe to the exact YAML qrun will execute.
+
+    Portal mining historically passed ``market`` only to factor-H5 preparation.  When
+    no ``yaml_params`` override was supplied, qrun then copied the static template and
+    silently trained/backtested on its hard-coded ``main_stock_2026_4_27`` universe.
+    Patch the top-level ``&market`` anchor after either copying or rendering the YAML,
+    then parse it back and fail closed unless both the top-level value and handler
+    instruments resolve to the requested market.
+    """
+
+    resolved = str(market).strip()
+    if not resolved or "\n" in resolved or "\r" in resolved:
+        raise ValueError("factor-data market must be a non-empty single-line string")
+    path = Path(config_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Qlib config not found for market binding: {path}")
+
+    original = path.read_text(encoding="utf-8")
+    yaml_scalar = json.dumps(resolved, ensure_ascii=False)
+
+    def replacement(match: re.Match[str]) -> str:
+        return f"{match.group('prefix')} {yaml_scalar}{match.group('comment') or ''}"
+
+    updated, replacements = _MARKET_ANCHOR_RE.subn(replacement, original)
+    if replacements != 1:
+        raise ValueError(
+            f"Expected exactly one top-level 'market: &market' anchor in {path}, "
+            f"found {replacements}"
+        )
+
+    parsed = yaml.safe_load(updated)
+    handler = parsed.get("data_handler_config") if isinstance(parsed, dict) else None
+    actual_market = parsed.get("market") if isinstance(parsed, dict) else None
+    actual_instruments = handler.get("instruments") if isinstance(handler, dict) else None
+    if actual_market != resolved or actual_instruments != resolved:
+        raise ValueError(
+            "Qlib market binding validation failed: "
+            f"market={actual_market!r}, instruments={actual_instruments!r}, "
+            f"expected={resolved!r}"
+        )
+
+    if updated != original:
+        path.write_text(updated, encoding="utf-8")
+    logger.info(f"[factor_runner] bound qlib market/instruments={resolved!r} -> {path.name}")
+
+
 class QlibFactorRunner(CachedRunner[Any]):
     """Factor runner that prepares factor outputs then executes qlib."""
 
@@ -148,6 +211,7 @@ class QlibFactorRunner(CachedRunner[Any]):
 
     def get_cache_key(self, exp: Any, **kwargs: Any) -> str:
         parts: list[str] = []
+        parts.append(f"factor_runner_config:{_FACTOR_RUNNER_CONFIG_VERSION}")
         for based_exp in exp.based_experiments:
             for task in based_exp.sub_tasks:
                 parts.append(task.get_task_information())
@@ -229,6 +293,10 @@ class QlibFactorRunner(CachedRunner[Any]):
         if yaml_params is not None:
             config_name = _render_yaml_params_to_workspace(yaml_params, workspace_path)
             exp.qlib_config_name = config_name
+        factor_data_ctx = getattr(exp, "factor_data_context", None)
+        factor_market = getattr(getattr(factor_data_ctx, "spec", None), "market", None)
+        if factor_market:
+            _bind_market_to_workspace_config(workspace_path / config_name, factor_market)
         if run_env.get(PRETRAINED_ENV_VAR):
             patch_qlib_conf_for_pretrained(workspace_path, config_name)
             logger.info(

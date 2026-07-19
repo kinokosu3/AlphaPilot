@@ -16,12 +16,15 @@ BASELINE_FEATURES = [
     "$close/Ref($close, 1)-1",
 ]
 
-COMBINED_FEATURES = [
-    "($close - $open) / $open",
-    "$close / Ref($close, 1) - 1",
-    "$volume / Mean($volume, 20)",
-    "($high - $low) / Ref($close, 1)",
-]
+# Combined LLM-factor runs intentionally use only the generated factors loaded
+# from ``combined_factors_df.pkl``.  The previous four fixed price/volume
+# features are kept here as comments for easy rollback, but are disabled:
+#
+# "($close - $open) / $open"
+# "$close / Ref($close, 1) - 1"
+# "$volume / Mean($volume, 20)"
+# "($high - $low) / Ref($close, 1)"
+COMBINED_FEATURES: list[str] = []
 
 
 def _parse_date(value: str) -> datetime:
@@ -153,6 +156,16 @@ class QlibYamlParams(BaseModel):
             self.ann_scaler = spec.ann_scaler
         return self
 
+    @model_validator(mode="after")
+    def apply_template_feature_defaults(self) -> "QlibYamlParams":
+        """Choose feature defaults by template when the caller omitted the field."""
+
+        if "feature_expressions" not in self.model_fields_set:
+            self.feature_expressions = list(
+                COMBINED_FEATURES if self.template_type == "combined" else BASELINE_FEATURES
+            )
+        return self
+
     @property
     def time_per_step(self) -> str:
         """Qlib executor ``time_per_step`` for this frequency (day -> "day")."""
@@ -176,8 +189,12 @@ class QlibYamlParams(BaseModel):
             raise ValueError("backtest_start must be within or after test_start")
         if _parse_date(self.backtest_end) > _parse_date(self.test_end):
             raise ValueError("backtest_end must not exceed test_end")
-        if not self.feature_expressions:
-            raise ValueError("feature_expressions must not be empty")
+        if not self.feature_expressions and not self.include_static_factors:
+            raise ValueError(
+                "feature_expressions may be empty only when static factors are enabled"
+            )
+        if self.template_type == "baseline" and not self.feature_expressions:
+            raise ValueError("baseline feature_expressions must not be empty")
         return self
 
     @classmethod

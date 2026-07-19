@@ -21,6 +21,8 @@ lshw.txt
 /openctp/
 /alphapilot_ttsapi/
 /alphapilot_tts/
+/artifacts/
+/strategies/
 
 # Broker SDKs / upstream trading dependencies
 #

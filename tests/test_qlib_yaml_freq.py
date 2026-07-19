@@ -9,6 +9,7 @@ import yaml
 
 from alphapilot.systems.backtest.qlib_yaml.generator import render_yaml_text
 from alphapilot.systems.backtest.qlib_yaml.schema import QlibYamlParams
+from alphapilot.systems.backtest.qlib_yaml.validator import run_static_validation
 
 
 # --------------------------------------------------------------------------- #
@@ -83,6 +84,50 @@ def test_combined_minute_render_nested_loader_freq() -> None:
     nested = doc["data_handler_config"]["data_loader"]["kwargs"]["dataloader_l"]
     qlib_loader = next(d for d in nested if d["class"].endswith("QlibDataLoader"))
     assert qlib_loader["kwargs"]["freq"] == "30min"
+
+
+def test_combined_defaults_load_only_generated_features_and_label() -> None:
+    params = QlibYamlParams.defaults_for("combined")
+    assert params.feature_expressions == []
+    assert QlibYamlParams(template_type="combined").feature_expressions == []
+
+    doc = yaml.safe_load(render_yaml_text(params))
+    nested = doc["data_handler_config"]["data_loader"]["kwargs"]["dataloader_l"]
+    qlib_loader = next(d for d in nested if d["class"].endswith("QlibDataLoader"))
+    static_loader = next(d for d in nested if d["class"].endswith("StaticDataLoader"))
+
+    assert "feature" not in qlib_loader["kwargs"]["config"]
+    assert qlib_loader["kwargs"]["config"]["label"]
+    assert static_loader["kwargs"]["config"] == "combined_factors_df.pkl"
+
+
+def test_combined_template_preserves_explicit_feature_override() -> None:
+    params = QlibYamlParams.merge_patch(
+        QlibYamlParams.defaults_for("combined"),
+        {"feature_expressions": ["$close / Ref($close, 1) - 1"]},
+    )
+    doc = yaml.safe_load(render_yaml_text(params))
+    nested = doc["data_handler_config"]["data_loader"]["kwargs"]["dataloader_l"]
+    qlib_loader = next(d for d in nested if d["class"].endswith("QlibDataLoader"))
+
+    assert qlib_loader["kwargs"]["config"]["feature"] == [
+        "$close / Ref($close, 1) - 1"
+    ]
+
+
+def test_static_validator_accepts_generated_features_without_fixed_expressions(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "combined.yaml"
+    config_path.write_text(
+        render_yaml_text(QlibYamlParams.defaults_for("combined")), encoding="utf-8"
+    )
+
+    report = run_static_validation(config_path, workspace=tmp_path)
+    feature_check = next(check for check in report.checks if check.name == "feature_non_empty")
+
+    assert feature_check.ok
+    assert "StaticDataLoader" in feature_check.message
 
 
 # --------------------------------------------------------------------------- #

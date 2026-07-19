@@ -16,9 +16,8 @@ data_handler_config: &data_handler_config
                 - class: qlib.contrib.data.loader.QlibDataLoader
                   kwargs:
                     config:
-                        feature: ["($close - $open) / $open", "$close / Ref($close, 1) - 1", "$volume / Mean($volume, 20)", "($high - $low) / Ref($close, 1)"]
-                        # ["($close-$open)/$open", "$volume/Mean($volume, 20)", "($high-$low)/Ref($close, 1)", "$close/Ref($close, 1)-1"]
-                        # "($close - $open) / $open", "$close / Ref($close, 1) - 1", "$volume / Mean($volume, 20)", "($high - $low) / Ref($close, 1)"
+                        # 固定的 4 个价量特征已禁用，仅使用 StaticDataLoader 中的 LLM 挖掘因子：
+                        # feature: ["($close - $open) / $open", "$close / Ref($close, 1) - 1", "$volume / Mean($volume, 20)", "($high - $low) / Ref($close, 1)"]
                         label: 
                             - ["Ref($close, -2)/Ref($close, -1) - 1"]
                             - ["LABEL0"]

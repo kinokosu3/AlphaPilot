@@ -98,6 +98,23 @@ def _is_combined_config(conf: dict[str, Any], raw_text: str) -> bool:
     return any(marker in blob or marker in raw_text for marker in _COMBINED_MARKERS)
 
 
+def _has_static_feature_loader(conf: dict[str, Any]) -> bool:
+    """Return whether a nested data loader supplies generated factor columns."""
+
+    handler = conf.get("data_handler_config")
+    if not isinstance(handler, dict):
+        return False
+    loader = handler.get("data_loader")
+    if not isinstance(loader, dict) or loader.get("class") != "NestedDataLoader":
+        return False
+    nested = loader.get("kwargs", {}).get("dataloader_l", []) or []
+    return any(
+        isinstance(item, dict)
+        and str(item.get("class", "")).endswith("StaticDataLoader")
+        for item in nested
+    )
+
+
 def _validate_expression(expr: str, checks: list[ValidationCheck], prefix: str) -> None:
     if not expr.strip():
         _add(checks, f"{prefix}_non_empty", False, "Expression must not be empty")
@@ -218,15 +235,23 @@ def run_static_validation(config_path: Path, workspace: Path | None = None) -> V
     else:
         _add(checks, "backtest_within_test", False, "Could not validate backtest window", level="warning")
 
+    combined_config = _is_combined_config(conf, raw_text)
     features = _extract_feature_expressions(conf)
     if features:
         _add(checks, "feature_non_empty", True, f"Found {len(features)} feature expression(s)")
         for idx, expr in enumerate(features):
             _validate_expression(expr, checks, f"feature_{idx}")
+    elif combined_config and _has_static_feature_loader(conf):
+        _add(
+            checks,
+            "feature_non_empty",
+            True,
+            "Generated feature columns are supplied by StaticDataLoader",
+        )
     else:
         _add(checks, "feature_non_empty", False, "No feature expressions found in data_loader")
 
-    if _is_combined_config(conf, raw_text):
+    if combined_config:
         _add(checks, "combined_template_detected", True, "Combined-factor template detected", level="info")
         if workspace is not None:
             pkl_path = workspace / "combined_factors_df.pkl"

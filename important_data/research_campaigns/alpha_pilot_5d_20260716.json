@@ -29,7 +29,7 @@
   },
   "frozen_template": {
     "path": "alphapilot/systems/backtest/qlib_yaml/templates/conf_cn_combined_kdd_ver.yaml.j2",
-    "sha256": "f2c83614d0368ce9c1bd8a404e5ae3cc257b89383ba45fbef06ef2c83aa88852"
+    "sha256": "94c24522eebce8a642462634d34d5feebdea20d25067f0635b9e60d2a2b7c332"
   },
   "qlib_params": {
     "template_type": "combined",
