@@ -15,7 +15,7 @@
   <img alt="Notify" src="https://img.shields.io/badge/Notify-Telegram%20%7C%20Feishu-26A5E4?logo=telegram&logoColor=white">
 </p>
 
-[快速开始](#-快速开始)&nbsp;·&nbsp;[核心功能](#核心功能)&nbsp;·&nbsp;[典型工作流](#-典型工作流)&nbsp;·&nbsp;[文档](#-更多文档)&nbsp;·&nbsp;[Docker 部署](docs/DOCKER.md)
+[快速开始](#-快速开始)&nbsp;·&nbsp;[自定义策略](#-自定义策略教程)&nbsp;·&nbsp;[核心功能](#核心功能)&nbsp;·&nbsp;[典型工作流](#-典型工作流)&nbsp;·&nbsp;[文档](#-更多文档)&nbsp;·&nbsp;[Docker 部署](docs/DOCKER.md)
 
 </div>
 
@@ -35,6 +35,7 @@ AlphaPilot 是一个面向股票的量化研究与交易平台，覆盖数据准
 | 策略复测 | `alphapilot strategy_backtest` | 复用已沉淀的策略资产与模型继续验证 |
 | 日频信号 | `alphapilot daily_signals` | 按交易日推进持仓、生成单日调仓信号 |
 | 交易会话 | `alphapilot trade_session_create` | 将策略快照为可恢复的独立日频交易账户 |
+| 自定义信号策略 | `strategies/*/strategy.toml` | 用本地 Python 策略和显式清单扩展信号逻辑，再统一预览、回放和部署 |
 | 量化择时 | `alphapilot trading_instance_create` / `trading_backtest` | 通过正式策略实例完成技术指标信号预览、统一回放和受控部署；0.2.0 已移除旧 `timing_*` 入口 |
 | 模拟盘 / 实盘 | `alphapilot live_*` | `dry_run` / `paper` / `simulation` / `live` 运行模式、统一风控与 OMS、守护进程、恢复对账和审计账本；XTP Pro / EMT 实盘与 OpenCTP TTS 柜台仿真通过可选插件接入 |
 | 统一门户 | `alphapilot portal` | 数据、因子、回测、择时、任务、通知和实盘控制集中到同一界面 |
@@ -137,8 +138,6 @@ AlphaPilot 提供统一 Web 门户作为日常研究与运行入口，将数据�
 
 <div align="center">
   <img src="docs/assets/portal/market.png" alt="市场数据：数据动作、股票池与单股管理" width="860">
-  <br><br>
-  <img src="docs/assets/portal/market.png" alt="市场数据：本地 K 线查看" width="860">
 </div>
 
 ### 通知与远程控制
@@ -256,14 +255,13 @@ alphapilot daily_signals --session demo_session
 
 ```bash
 alphapilot trading_instance_create \
-  --instance_id=ma_5_20 --strategy_id=dual_ma --universe=sh.600000 \
+  --instance_id=ma_5_20 --strategy_id=dual_ma --universe=600000.SSE \
   --params='{"short_window":5,"long_window":20}' --frequency=day \
-  --data_policy='{"feature_adjustment":"none","history_window":21,"data_version":"local-v1"}' \
+  --data_policy='{"feature_adjustment":"backward","history_window":21}' \
   --portfolio_policy='{"policy_id":"timing_fixed_exposure","params":{"target_percent":0.2}}'
 alphapilot trading_instance_validate --instance_id=ma_5_20
 alphapilot trading_backtest --instance_id=ma_5_20 \
-  --options='{"data_dir":"./data","adjust_mode":"none"}' --wait=True \
-  --output_dir=./results/ma_5_20
+  --wait=True --output_dir=./results/ma_5_20
 ```
 
 ### 7. 体验模拟盘，再接入实盘（可选）
@@ -286,18 +284,131 @@ alphapilot live_connect --mode live --broker xtp --timeout 30
 
 券商 SDK 和适配器不随核心仓库同步，请从授权的私有索引或本地 wheelhouse 安装。真实连接所需凭证只应放在本地 `.env` 或部署环境中；完整步骤见 [实盘接入文档](docs/live-xtp.md)。
 
+## 🧩 自定义策略教程
+
+AlphaPilot 中有两类容易混淆的“策略”：`strategy_create` 创建的是由因子、模型和回测配置组成的**研究策略资产**；本节创建的是向统一交易运行时提供信号的**策略定义**。下面使用接口简单、可自动适配到正式运行时的 Provider v1，完成“写代码 → 注册 → 创建实例 → 预览 → 回测”的完整流程。
+
+### 1. 创建策略目录
+
+在仓库根目录下创建一层策略目录。注册器只扫描 `strategies/<策略 ID>/strategy.toml`，不会递归导入其他 Python 文件：
+
+```text
+strategies/close_above_sma/
+├── strategy.py
+└── strategy.toml
+```
+
+将下面的代码保存为 `strategies/close_above_sma/strategy.py`：
+
+```python
+from __future__ import annotations
+
+import pandas as pd
+
+from alphapilot.systems.timing.base import TimingContext
+from alphapilot.systems.timing.strategies import RuleTimingStrategy
+
+
+class CloseAboveSMA(RuleTimingStrategy):
+    """收盘价高于均线时持有，否则空仓。"""
+
+    name = "close_above_sma"
+    defaults = {"window": 20}
+
+    def _instrument_signal(
+        self,
+        bars: pd.DataFrame,
+        context: TimingContext,
+    ) -> pd.DataFrame:
+        del context
+        close = pd.to_numeric(bars["close"], errors="coerce")
+        average = close.rolling(int(self.params["window"])).mean()
+        signal = (close > average).fillna(False).astype(int)
+        score = (close / average - 1).fillna(0.0)
+        return self._frame(bars, signal, score, "close_above_sma")
+```
+
+`RuleTimingStrategy` 会按 `instrument` 分组，并由 `_frame` 生成运行时需要的 `datetime`、`instrument`、`signal`、`target_percent`、`score` 和 `reason` 列。输入 `bars` 至少包含 `datetime`、`instrument`、`open`、`high`、`low`、`close`，使用成交量时还可读取 `volume` 和 `amount`。这里约定 `signal=1` 表示做多、`signal=0` 表示空仓；策略只生成信号，不能访问 Broker 或直接提交订单。
+
+### 2. 声明策略清单
+
+将下面的清单保存为 `strategies/close_above_sma/strategy.toml`：
+
+```toml
+[strategy]
+id = "close_above_sma"
+version = "1.0.0"
+kind = "rule"
+factory = "strategy:CloseAboveSMA"
+api_version = 1
+provider_api_version = 1
+signal_kind = "instrument_timing"
+supported_assets = ["equity", "fund"]
+supported_frequencies = ["day"]
+required_history = 21
+state_schema_version = 1
+deployable_modes = ["replay", "paper", "shadow", "live"]
+description = "Long when close is above its simple moving average."
+parameter_schema_json = '''
+{"type":"object","properties":{"window":{"type":"integer","default":20,"minimum":2}},"required":["window"],"additionalProperties":false}
+'''
+```
+
+`factory` 使用“模块文件名:类名”格式；`parameter_schema_json` 决定实例参数的默认值和校验规则。`required_history` 是默认预热长度；当参数名包含 `window` 时，系统还会根据实例的实际窗口自动提高预热长度，例如 `window=60` 会要求至少 61 根 Bar。
+
+改成自己的算法时，通常只需要做三件事：在 `_instrument_signal` 中替换指标和开平仓条件；把每个可调参数同时加入 `defaults` 与 `parameter_schema_json`；让 `required_history` 覆盖指标所需的最长历史窗口，并按实际数据频率更新 `supported_frequencies`。
+
+### 3. 检查注册结果
+
+从仓库根目录运行：
+
+```bash
+alphapilot trading_definitions
+```
+
+输出的 `definitions` 中应出现 `close_above_sma`。如果它出现在 `quarantined` 中，请按其中的 `reason` 检查 TOML、导入路径、重复 ID 或 API 版本。若策略不放在仓库的 `strategies/` 下，可设置 `ALPHAPILOT_STRATEGY_DIR=/绝对路径/strategies`；Portal 已经运行时，修改代码或清单后需要重启 Portal 才会重新发现策略。
+
+### 4. 创建实例并回测
+
+先按[快速开始](#-快速开始)准备好行情数据，然后创建一份带具体参数、股票池、数据政策和仓位政策的实例：
+
+```bash
+alphapilot trading_instance_create \
+  --instance_id=sma_20_demo \
+  --strategy_id=close_above_sma \
+  --universe=600000.SSE \
+  --params='{"window":20}' \
+  --frequency=day \
+  --data_policy='{"feature_adjustment":"backward","history_window":21}' \
+  --portfolio_policy='{"policy_id":"timing_fixed_exposure","params":{"target_percent":0.2,"cash_buffer":0.1,"max_position_weight":0.3}}'
+
+alphapilot trading_instance_validate --instance_id=sma_20_demo
+alphapilot trading_preview --instance_id=sma_20_demo \
+  --output_path=./results/sma_20_preview.json
+alphapilot trading_backtest --instance_id=sma_20_demo \
+  --wait=True --output_dir=./results/sma_20_replay
+```
+
+其中 `target_percent` 属于 PortfolioPolicy，而不是信号算法：它控制信号激活时单个标的的目标仓位。这样，同一套信号代码可以用不同的仓位、现金缓冲和持仓上限创建多个实例。回放结果会在输出目录中保存信号、目标权重、委托、成交、持仓、权益和汇总文件。
+
+迭代策略时，请同步提升清单中的 `version` 并重启长驻进程。代码、版本、参数、股票池、数据政策或仓位政策变化都会改变 `config_hash`；系统会重新绑定持久化实例并使旧证据失效，随后需要重新验证。进入实盘前还必须按 `REPLAY → PAPER → SHADOW → LIVE` 完成门禁，不能从自定义策略直接绕过风控和 OMS。
+
+仓库内还有一个带成交量确认的完整样例：[`strategies/dual_ma_volume_confirmed`](strategies/dual_ma_volume_confirmed)。需要生命周期状态、快照与恢复能力时，可继续实现 Provider v2；接口、pip entry point 和自定义 PortfolioPolicy 见[自定义策略开发文档](docs/developer/strategy-extension.md)，实例生命周期和常见错误见[策略实例指南](docs/user/strategy-instances.md)。
+
 ## 🧭 典型工作流
 
 1. 先用 `prepare_data` 准备行情和 Qlib 数据；因子 h5 cache 会由回测/挖掘任务按需自动生成。
 2. 用 `mine` 或 AlphaForge 系列命令生成候选因子。
 3. 用 `backtest` 做组合回测或 IC 快筛，并在门户中查看结果。
 4. 将有效策略沉淀到策略资产，再用 `strategy_backtest`、`daily_signals` 或可恢复的 `trade_session` 持续验证。
-5. 如需走向交易，按 `dry_run → paper → live` 顺序演练；通过预检、风控和恢复检查后，再把目标组合或择时策略接入 daemon。
+5. 如需走向交易，按 `dry_run → paper → shadow → live` 顺序演练；通过预检、风控和恢复检查后，再把目标组合或择时策略接入 daemon。
 
 ## 📚 更多文档
 
 - [中文文档中心：用户手册、开发文档与完整参考](docs/index.md)
 - [完整 CLI 命令参考](docs/alphapilot-cli.md)
+- [策略实例、预览和统一回测](docs/user/strategy-instances.md)
+- [自定义策略、PortfolioPolicy 与 artifact](docs/developer/strategy-extension.md)
 - [项目目录与架构说明](docs/alphapilot-structure.md)
 - [Docker 部署与服务化运行](docs/DOCKER.md)
 - [Docker 实际运行记录与排错](docs/DOCKER-RUN.md)
@@ -312,6 +423,7 @@ alphapilot live_connect --mode live --broker xtp --timeout 30
 ```text
 AlphaPilot/
 ├── alphapilot/          # 核心、研究系统、Live Runtime 与 Portal
+├── strategies/          # 本地自定义信号策略与显式清单
 ├── important_data/      # 因子库、策略资产、模板、股票池
 ├── docs/                # CLI、Docker、架构与实盘接入文档
 ├── scripts/             # 数据维护及实盘预检 / smoke 工具

@@ -15,7 +15,7 @@
   <img alt="Notify" src="https://img.shields.io/badge/Notify-Telegram%20%7C%20Feishu-26A5E4?logo=telegram&logoColor=white">
 </p>
 
-[Quick Start](#-quick-start)&nbsp;·&nbsp;[Core Features](#core-features)&nbsp;·&nbsp;[Typical Workflow](#-typical-workflow)&nbsp;·&nbsp;[Docs](#-more-documentation)&nbsp;·&nbsp;[Docker Deployment](docs/DOCKER.md)
+[Quick Start](#-quick-start)&nbsp;·&nbsp;[Custom Strategy](#-custom-strategy-tutorial)&nbsp;·&nbsp;[Core Features](#core-features)&nbsp;·&nbsp;[Typical Workflow](#-typical-workflow)&nbsp;·&nbsp;[Docs](#-more-documentation)&nbsp;·&nbsp;[Docker Deployment](docs/DOCKER.md)
 
 </div>
 
@@ -35,8 +35,9 @@ AlphaPilot is a stock-focused quantitative research and trading platform coverin
 | Strategy retesting | `alphapilot strategy_backtest` | Reuse saved strategy assets and models for continued validation |
 | Daily signals | `alphapilot daily_signals` | Advance positions by trading day and generate single-day rebalance signals |
 | Trade sessions | `alphapilot trade_session_create` | Snapshot a strategy into a self-contained, resumable daily-trade account |
+| Custom signal strategies | `strategies/*/strategy.toml` | Extend signal logic with a local Python strategy and explicit manifest, then preview, replay, and deploy it through the shared runtime |
 | Quant timing | `alphapilot trading_instance_create` / `trading_backtest` | Formal strategy instances, unified replay, and controlled deployment; legacy `timing_*` commands were removed in 0.2.0 |
-| Paper / live trading | `alphapilot live_*` | `dry_run` / `paper` / `live` modes, unified risk and OMS, daemon control, recovery reconciliation, and an audit ledger; XTP Pro / EMT are optional plugins |
+| Paper / live trading | `alphapilot live_*` | `dry_run` / `paper` / `simulation` / `shadow` / `live` modes, unified risk and OMS, daemon control, recovery reconciliation, and an audit ledger; XTP Pro, EMT, and OpenCTP TTS connect through optional plugins |
 | Unified portal | `alphapilot portal` | Central UI for data, factors, backtests, timing, tasks, notifications, and live controls |
 | Data preparation | `alphapilot prepare_data` | baostock / tushare to Qlib data pipeline |
 | Notifications and remote control | `alphapilot notify_commands` | Task completion notifications through Telegram / Feishu / email plus remote chat commands |
@@ -137,8 +138,6 @@ Main entry: `alphapilot prepare_data download --stock_csv important_data/stock_l
 
 <div align="center">
   <img src="docs/assets/portal/market.png" alt="Market data: data actions, stock pools, and single-stock management" width="860">
-  <br><br>
-  <img src="docs/assets/portal/market.png" alt="Market data: local K-line viewer" width="860">
 </div>
 
 ### Notifications and Remote Control
@@ -256,13 +255,13 @@ Or create and replay a formal technical-indicator timing instance:
 
 ```bash
 alphapilot trading_instance_create \
-  --instance_id=ma_5_20 --strategy_id=dual_ma --universe=sh.600000 \
+  --instance_id=ma_5_20 --strategy_id=dual_ma --universe=600000.SSE \
   --params='{"short_window":5,"long_window":20}' --frequency=day \
+  --data_policy='{"feature_adjustment":"backward","history_window":21}' \
   --portfolio_policy='{"policy_id":"timing_fixed_exposure","params":{"target_percent":0.2}}'
 alphapilot trading_instance_validate --instance_id=ma_5_20
 alphapilot trading_backtest --instance_id=ma_5_20 \
-  --options='{"data_dir":"./data","adjust_mode":"none"}' --wait=True \
-  --output_dir=./results/ma_5_20
+  --wait=True --output_dir=./results/ma_5_20
 ```
 
 ### 7. Rehearse in Paper Mode, Then Add Live Trading (Optional)
@@ -285,19 +284,132 @@ alphapilot live_connect --mode live --broker xtp --timeout 30
 
 Broker SDK bindings and adapters are not synchronized with the core repository; install them from an authorized private index or local wheelhouse. Keep real credentials only in a local `.env` or the deployment environment. See the [live setup guide](docs/live-xtp.md) for the complete procedure.
 
+## 🧩 Custom Strategy Tutorial
+
+AlphaPilot uses “strategy” for two related concepts. `strategy_create` produces a **research strategy asset** containing factors, a model, and backtest settings. This tutorial creates a **strategy definition** that supplies signals to the shared trading runtime. The Provider v1 interface below is the shortest route from Python code to a validated preview and replay; AlphaPilot automatically adapts it to the formal runtime.
+
+### 1. Create the strategy directory
+
+Create a one-level strategy directory at the repository root. Discovery scans `strategies/<strategy ID>/strategy.toml`; it does not recursively import arbitrary Python files:
+
+```text
+strategies/close_above_sma/
+├── strategy.py
+└── strategy.toml
+```
+
+Save this as `strategies/close_above_sma/strategy.py`:
+
+```python
+from __future__ import annotations
+
+import pandas as pd
+
+from alphapilot.systems.timing.base import TimingContext
+from alphapilot.systems.timing.strategies import RuleTimingStrategy
+
+
+class CloseAboveSMA(RuleTimingStrategy):
+    """Stay long while the close is above its moving average."""
+
+    name = "close_above_sma"
+    defaults = {"window": 20}
+
+    def _instrument_signal(
+        self,
+        bars: pd.DataFrame,
+        context: TimingContext,
+    ) -> pd.DataFrame:
+        del context
+        close = pd.to_numeric(bars["close"], errors="coerce")
+        average = close.rolling(int(self.params["window"])).mean()
+        signal = (close > average).fillna(False).astype(int)
+        score = (close / average - 1).fillna(0.0)
+        return self._frame(bars, signal, score, "close_above_sma")
+```
+
+`RuleTimingStrategy` groups rows by `instrument`, while `_frame` creates the runtime columns `datetime`, `instrument`, `signal`, `target_percent`, `score`, and `reason`. Input `bars` must contain at least `datetime`, `instrument`, `open`, `high`, `low`, and `close`; strategies that need trading activity can also read `volume` and `amount`. Here, `signal=1` means long and `signal=0` means flat. A strategy only generates signals—it must not access a broker or submit orders directly.
+
+### 2. Declare the strategy manifest
+
+Save this as `strategies/close_above_sma/strategy.toml`:
+
+```toml
+[strategy]
+id = "close_above_sma"
+version = "1.0.0"
+kind = "rule"
+factory = "strategy:CloseAboveSMA"
+api_version = 1
+provider_api_version = 1
+signal_kind = "instrument_timing"
+supported_assets = ["equity", "fund"]
+supported_frequencies = ["day"]
+required_history = 21
+state_schema_version = 1
+deployable_modes = ["replay", "paper", "shadow", "live"]
+description = "Long when close is above its simple moving average."
+parameter_schema_json = '''
+{"type":"object","properties":{"window":{"type":"integer","default":20,"minimum":2}},"required":["window"],"additionalProperties":false}
+'''
+```
+
+`factory` uses the `module filename:class name` format. `parameter_schema_json` supplies parameter defaults and validation rules. `required_history` is the default warm-up length; for parameter names containing `window`, the runtime also raises the requirement from the actual instance value—for example, `window=60` requires at least 61 bars.
+
+Adapting the example to your own algorithm normally takes three changes: replace the indicator and entry/exit conditions in `_instrument_signal`; add every tunable value to both `defaults` and `parameter_schema_json`; and make `required_history` cover the longest indicator lookback while updating `supported_frequencies` to match the data you consume.
+
+### 3. Verify discovery
+
+Run this from the repository root:
+
+```bash
+alphapilot trading_definitions
+```
+
+`close_above_sma` should appear under `definitions`. If it appears under `quarantined`, use its `reason` to check the TOML, import path, duplicate ID, or API version. To store strategies outside the repository, set `ALPHAPILOT_STRATEGY_DIR=/absolute/path/to/strategies`. If the Portal is already running, restart it after changing strategy code or manifests so discovery runs again.
+
+### 4. Create, preview, and replay an instance
+
+First prepare market data as described in [Quick Start](#-quick-start). Then bind the definition to concrete parameters, a universe, a data policy, and a portfolio policy:
+
+```bash
+alphapilot trading_instance_create \
+  --instance_id=sma_20_demo \
+  --strategy_id=close_above_sma \
+  --universe=600000.SSE \
+  --params='{"window":20}' \
+  --frequency=day \
+  --data_policy='{"feature_adjustment":"backward","history_window":21}' \
+  --portfolio_policy='{"policy_id":"timing_fixed_exposure","params":{"target_percent":0.2,"cash_buffer":0.1,"max_position_weight":0.3}}'
+
+alphapilot trading_instance_validate --instance_id=sma_20_demo
+alphapilot trading_preview --instance_id=sma_20_demo \
+  --output_path=./results/sma_20_preview.json
+alphapilot trading_backtest --instance_id=sma_20_demo \
+  --wait=True --output_dir=./results/sma_20_replay
+```
+
+`target_percent` belongs to the PortfolioPolicy, not the signal algorithm: it controls the target weight of each instrument while its signal is active. You can therefore reuse one signal definition across instances with different exposure, cash-buffer, and position-limit settings. The replay directory contains signals, target weights, orders, fills, positions, equity, and summary artifacts.
+
+When iterating, bump the manifest `version` and restart long-running processes. A code, version, parameter, universe, data-policy, or portfolio-policy change produces a new `config_hash`; the runtime rebinds persisted instances, invalidates old evidence, and requires validation again. Live execution additionally requires progression through `REPLAY → PAPER → SHADOW → LIVE`; custom code cannot bypass risk controls or the OMS.
+
+For a more complete local example with volume confirmation, see [`strategies/dual_ma_volume_confirmed`](strategies/dual_ma_volume_confirmed). Implement Provider v2 when you need explicit lifecycle state, snapshots, and recovery. The [strategy extension guide](docs/developer/strategy-extension.md) covers Provider v2, pip entry points, and custom PortfolioPolicy implementations; the [strategy instance guide](docs/user/strategy-instances.md) covers lifecycle and troubleshooting.
+
 ## 🧭 Typical Workflow
 
 1. Use `prepare_data` to prepare market data and Qlib data; factor h5 cache is generated automatically by backtest/mining tasks.
 2. Use `mine` or AlphaForge commands to generate candidate factors.
 3. Use `backtest` for portfolio backtests or quick IC screening, then review results in the portal.
 4. Save effective strategies as strategy assets, then continue validation with `strategy_backtest`, `daily_signals`, or a resumable `trade_session`.
-5. To move toward execution, rehearse in the order `dry_run → paper → live`; only attach a target portfolio or timing strategy to the daemon after preflight, risk, and recovery checks pass.
+5. To move toward execution, rehearse in the order `dry_run → paper → shadow → live`; only attach a target portfolio or timing strategy to the daemon after preflight, risk, and recovery checks pass.
 
 ## 📚 More Documentation
 
-- [Chinese documentation center: user guides, developer docs, and generated CLI/API references](docs/index.md)
-
 The Chinese documentation center is the canonical, code-checked manual for the current `0.2.x` line. This English README remains a project overview and is not maintained as a complete translated copy of every interface.
+
+- [Chinese documentation center: user guides, developer docs, and generated CLI/API references](docs/index.md)
+- [Strategy instances, previews, and unified replays (Chinese)](docs/user/strategy-instances.md)
+- [Custom strategies, PortfolioPolicy, and artifacts (Chinese)](docs/developer/strategy-extension.md)
 - [Docker run notes and troubleshooting](docs/DOCKER-RUN.md)
 - [XTP Pro / EMT live-trading setup](docs/live-xtp.md)
 - [Live broker/quote pip plugin guide](docs/live-plugins.md)
@@ -309,6 +421,7 @@ The Chinese documentation center is the canonical, code-checked manual for the c
 ```text
 AlphaPilot/
 ├── alphapilot/          # Core, research systems, Live Runtime, and Portal
+├── strategies/          # Local custom signal strategies and explicit manifests
 ├── important_data/      # Factor library, strategy assets, templates, and stock pools
 ├── docs/                # CLI, Docker, architecture, and live setup guides
 ├── scripts/             # Data maintenance plus live preflight / smoke tools
