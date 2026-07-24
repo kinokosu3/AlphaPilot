@@ -255,16 +255,18 @@ LIVE 重启固定进入 `PAUSED_PENDING_RECONCILE`。对账成功后仍需操作
 
 ## 操作员认证和审计
 
-Portal 默认监听 `127.0.0.1`。部署配置与生命周期接口仅允许 loopback-bound Portal，且不要求
-Bearer token 或必填原因。策略实例写操作、kill switch、Broker UAT 和人工交易仍要求 Bearer
-token；数据库只保存 token 哈希和 token ID，明文仅在生成时返回一次。
-Portal 只在当前浏览器会话内存中保存 token，不写入持久化 localStorage。
+Portal 默认监听 `127.0.0.1`，并以 `required` 模式统一保护全部 `/api/live` 与 `/api/trading`
+写操作，包括部署配置和生命周期。数据库只保存 token 哈希和 token ID，明文仅在生成时返回
+一次；Portal 只在当前浏览器会话内存中保存 token，不写入持久化 localStorage。
 
-为 UAT 和人工恢复保留的旧 `/api/live/*` 写接口也经过同一 Bearer token 边界并写入审计，
-不能通过旧入口绕过正式部署授权；只读状态、行情查询和 preflight 探测不要求令牌。
+本机 `portal_operator_auth` CLI 可把模式切换为高风险 `optional`。此时无令牌请求使用
+`portal-unauthenticated` 上下文，主动提供的 token 仍严格校验。非 loopback 部署与 automated
+LIVE 不再被 Portal 阻断，通配 CORS 也保留，因此 `0.0.0.0 + optional` 会把交易写能力暴露给
+所有可达客户端和跨站网页。只读状态、行情查询和 preflight 探测始终不要求令牌。
 
-所有受保护动作记录操作员、原因、请求 ID、实例、配置哈希、账户、Broker 和结果。CLI 的本地
-生命周期操作仍可写审计事件，但不再要求令牌或原因。
+每次交易写请求记录 requested/outcome transport 审计，并保留现有领域审计。事件记录操作员、
+原因、请求 ID、路径、方法、结果、客户端地址、Origin、User-Agent，以及适用的实例、配置哈希、
+账户和 Broker；不记录凭据或请求载荷。CLI 的本地生命周期操作仍使用 `local-cli` 审计。
 
 ## 正式 API 和 CLI
 

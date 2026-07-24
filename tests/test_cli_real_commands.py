@@ -84,6 +84,7 @@ EXPECTED_COMMANDS = {
     "modules",
     "notify_commands",
     "portal",
+    "portal_operator_auth",
     "portal_restart",
     "pool_add",
     "pool_create",
@@ -457,6 +458,7 @@ def test_real_cli_command_smoke(cli_ctx: CliContext) -> None:
     _run_ok(ctx, "clean_logs")
 
     _run_ok(ctx, "timezone")
+    _run_ok(ctx, "portal_operator_auth")
     _run_expected_failure(
         ctx,
         "portal_restart",

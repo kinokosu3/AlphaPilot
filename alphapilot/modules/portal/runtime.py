@@ -24,7 +24,14 @@ def current_restart_argv() -> list[str]:
     return [sys.executable, *sys.argv]
 
 
-def write_runtime(*, host: str, port: int, argv: list[str] | None = None, mode: str = "portal") -> Path:
+def write_runtime(
+    *,
+    host: str,
+    port: int,
+    argv: list[str] | None = None,
+    mode: str = "portal",
+    operator_auth_required: bool | None = None,
+) -> Path:
     path = runtime_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -35,6 +42,8 @@ def write_runtime(*, host: str, port: int, argv: list[str] | None = None, mode: 
         "argv": argv or current_restart_argv(),
         "started_at": datetime.now().isoformat(timespec="seconds"),
     }
+    if operator_auth_required is not None:
+        payload["operator_auth_required"] = bool(operator_auth_required)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
 

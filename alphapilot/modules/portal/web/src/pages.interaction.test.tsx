@@ -302,6 +302,13 @@ describe("AdvancedPage destructive action separation", () => {
         config_path: "/isolated/portal.json", host_options: [{ value: "127.0.0.1", label: "local" }],
         timezone_options: ["Asia/Shanghai"], restart_required: false,
       });
+      if (path === "/api/portal/security") return Response.json({
+        operator_auth_required: false, operator_auth_mode: "optional", source: "settings",
+        pending_required: false, pending_mode: "optional", pending_source: "settings",
+        restart_required: false, bind_host: "0.0.0.0", bind_port: 19901,
+        bind_address: "0.0.0.0:19901", network_exposed: true,
+        automated_live_enabled: true, cors_policy: "wildcard", warning: "high risk",
+      });
       if (path === "/api/portal/env") return Response.json({
         fields: [{ key: "OPENAI_API_KEY", label: "LLM key", group: "LLM", kind: "password", secret: true, requires_restart: true }],
         values: { OPENAI_API_KEY: "********" }, current: { OPENAI_API_KEY: "********" },
@@ -316,6 +323,8 @@ describe("AdvancedPage destructive action separation", () => {
     const user = userEvent.setup();
     renderPage(<AdvancedPage />);
 
+    expect(await screen.findByRole("heading", { name: "操作员鉴权状态" })).toBeInTheDocument();
+    expect(screen.getByText(/Portal 操作员鉴权为 optional/)).toBeInTheDocument();
     const section = (await screen.findByRole("heading", { name: "日志清理" })).closest("section") as HTMLElement;
     expect(screen.getByPlaceholderText("已配置 - 留空表示保持不变")).toHaveValue("");
     await user.click(screen.getByRole("button", { name: "保存环境设置" }));

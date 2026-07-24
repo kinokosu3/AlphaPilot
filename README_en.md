@@ -117,6 +117,7 @@ AlphaPilot provides a unified Web portal for daily research and runtime operatio
 - Supports background tasks, scheduled tasks, and result review
 - Built-in backtest visualizations: cumulative returns, excess returns, account composition, turnover charts, date-range filters, daily details, factor leaderboards, and benchmark comparisons
 - The Live page separates paper, broker-simulation, SHADOW, and LIVE workspaces and exposes preflight, daemon, deployment, diagnostics, risk, and audit controls
+- Portal trading writes require an operator token by default; a local CLI can select a high-risk optional mode, while the Portal exposes security status as read-only
 - Suitable for both local research environments and server deployments
 
 Main entry: `alphapilot portal`
@@ -436,7 +437,36 @@ alphapilot trading_diagnostics --instance_id=sma_20_demo
 
 A LIVE start remains paused pending reconciliation. Run `trading_reconcile`, then explicitly call `trading_resume`. Removing promotion gates does not remove order safety: LIVE still checks the environment switch, account/Provider binding, single writer, market/contract metadata, reconciliation, heartbeat, Kill Switch, and per-order RiskGate. PAPER/SHADOW sessions and `trading_decision_compare` are diagnostics only and never grant deployment authority.
 
-Deployment configuration and lifecycle HTTP endpoints are available only on a loopback-bound Portal and do not require an Operator Bearer or mandatory reason. Generate an operator token locally with `alphapilot trading_operator_token --operator_id=...`; its plaintext is returned once and is now needed only for protected Kill Switch, Broker UAT, strategy-write, and manual-trading operations.
+Every `/api/live` and `/api/trading` write uses one Portal operator-auth policy. The default is `required`, including strategy instances, deployment configuration and lifecycle, Kill Switch, daemon operations, and manual trading. Generate a token locally; its plaintext is returned once:
+
+```bash
+alphapilot trading_operator_token \
+  --operator_id=alice --label=portal --expires_in_days=1
+```
+
+Only the local CLI can select token-optional operation. The value is saved in `~/.alphapilot/portal/settings.json` and takes effect after restart:
+
+```bash
+# Inspect saved/running values and whether a restart is pending
+alphapilot portal_operator_auth
+
+# HIGH RISK: allow tokenless writes and request an immediate restart
+alphapilot portal_operator_auth \
+  --required=false \
+  --operator_id=alice \
+  --reason="trusted lab network" \
+  --acknowledge_network_risk=true \
+  --restart=true
+
+# Restore the default security mode
+alphapilot portal_operator_auth \
+  --required=true \
+  --operator_id=alice \
+  --reason="restore required authentication" \
+  --restart=true
+```
+
+`ALPHAPILOT_OPERATOR_AUTH_REQUIRED` remains a higher-priority environment override; the CLI refuses a conflicting change. In `optional` mode, tokenless writes run as `portal-unauthenticated`; a supplied token is still validated and preserves the real operator identity, while an invalid token still returns 401. AlphaPilot deliberately allows `0.0.0.0 + optional + ALPHAPILOT_AUTOMATED_LIVE_ENABLED=true` and retains wildcard CORS. Consequently, any reachable LAN client or cross-origin webpage may issue tokenless real-trading requests. Persistent warnings, request/outcome audit, account binding, reconciliation, Kill Switch, and RiskGate remain active, but none replaces network authentication.
 
 When iterating, bump the manifest `version` and restart long-running processes. Code, version, or any instance binding change produces a new `config_hash` and requires validation plus deployment rebinding, while retaining the old deployment record and diagnostics.
 

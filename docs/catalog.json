@@ -37,7 +37,7 @@
     {"route": "/live", "title": "模拟与实盘", "features": "runtime、daemon、手工交易、部署、证据、对账和 kill switch", "cli": "live_*、trading_*", "api": "/api/live、/api/trading", "equivalence": "CLI/API 等价；Portal 强化确认与观察", "user_doc": "user/live-trading.md", "screenshot": "assets/portal/live.png"},
     {"route": "/scheduler", "title": "调度", "features": "计划任务 CRUD、立即运行和调度 daemon", "cli": "scheduler（仅 daemon）", "api": "/api/schedules", "equivalence": "计划 CRUD 为 Portal/API-only", "user_doc": "user/scheduling-notifications-and-operations.md", "screenshot": "assets/portal/scheduler.png"},
     {"route": "/notifications", "title": "通知", "features": "渠道配置、测试、命令接收、配对和事件", "cli": "notify_commands（仅接收器）", "api": "/api/notify", "equivalence": "配置/测试/配对为 Portal/API-only", "user_doc": "user/scheduling-notifications-and-operations.md", "screenshot": "assets/portal/notifications.png"},
-    {"route": "/advanced", "title": "高级设置", "features": "Portal/环境配置、日志清理和模块调用", "cli": "timezone、clean_logs、modules、portal_restart", "api": "/api/portal、/api/logs、/api/modules", "equivalence": "可组合 CLI 等价；表单为 Portal 展示", "user_doc": "user/scheduling-notifications-and-operations.md", "screenshot": "assets/portal/advanced.png"}
+    {"route": "/advanced", "title": "高级设置", "features": "Portal/环境配置、操作员鉴权只读状态、日志清理和模块调用", "cli": "timezone、clean_logs、modules、portal_restart、portal_operator_auth", "api": "/api/portal、/api/portal/security、/api/logs、/api/modules", "equivalence": "操作员鉴权仅可由本机 CLI 修改；其余可组合 CLI 等价", "user_doc": "user/scheduling-notifications-and-operations.md", "screenshot": "assets/portal/advanced.png"}
   ],
   "cli_status": {
     "deprecated": ["ui", "backtest_ui"],

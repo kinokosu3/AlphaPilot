@@ -53,6 +53,20 @@ alphapilot notify_commands --channel=telegram
 alphapilot portal_restart
 ```
 
+Portal 操作员鉴权只能从本机 CLI 修改，页面和 `GET /api/portal/security` 只读：
+
+```bash
+alphapilot portal_operator_auth
+alphapilot portal_operator_auth \
+  --required=false \
+  --operator_id=alice \
+  --reason="trusted lab network" \
+  --acknowledge_network_risk=true \
+  --restart=true
+```
+
+默认保持 `required`。`optional` 会让全部 Portal 交易写接口接受无令牌请求；在 `0.0.0.0` 和通配 CORS 下，局域网客户端与跨站网页都可触发这些操作。每次修改都会以 `local-cli` 身份记录旧值、新值、原因、风险确认、绑定地址和重启结果。
+
 ## 日志和模块
 
 ```bash

@@ -22,7 +22,7 @@
 | `report_factor` | 0 | [打开](../user/factor-mining-and-library.md) | [打开](../developer/modules/report-factor.md) |
 | `platform` | 9 | [打开](../user/scheduling-notifications-and-operations.md) | [打开](../developer/modules/platform.md) |
 | `data_viz` | 1 | [打开](../user/data-and-pools.md) | [打开](../developer/modules/data-viz.md) |
-| `portal` | 5 | [打开](../user/portal-overview.md) | [打开](../developer/modules/portal.md) |
+| `portal` | 6 | [打开](../user/portal-overview.md) | [打开](../developer/modules/portal.md) |
 | `backtest_viz` | 1 | [打开](../user/strategy-assets-and-backtests.md) | [打开](../developer/modules/backtest-viz.md) |
 | `qlib_yaml` | 2 | [打开](../user/strategy-assets-and-backtests.md) | [打开](../developer/modules/qlib-yaml.md) |
 | `daily_trade` | 8 | [打开](../user/daily-trade.md) | [打开](../developer/modules/daily-trade.md) |

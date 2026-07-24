@@ -58,6 +58,22 @@ alphapilot live_daemon_order \
 
 `live_submit_target`/`live_daemon_submit_target` 可以只生成计划或显式路由。涨停卖、跌停买是否被接受由合约涨跌停、价格步长、行情新鲜度和 RiskGate 决定，不受 Broker UAT 工具的 ±1% 挂单场景限制。
 
+## Portal 操作员鉴权
+
+Portal 默认在所有 `/api/live` 和 `/api/trading` 写操作上要求操作员令牌；命令行交易本身继续使用 `local-cli` 审计，不受这个 Portal HTTP 开关影响。查看或切换模式：
+
+```bash
+alphapilot portal_operator_auth
+alphapilot portal_operator_auth \
+  --required=false \
+  --operator_id=alice \
+  --reason="trusted lab network" \
+  --acknowledge_network_risk=true
+alphapilot portal_restart
+```
+
+`optional` 模式不会关闭确认、账户绑定、对账、单账户 writer lock、Kill Switch、RiskGate 或 automated LIVE 环境开关，但它会允许无令牌客户端调用策略、部署、daemon、Kill Switch 和手工订单接口。若 Portal 监听 `0.0.0.0`，通配 CORS 还允许跨站网页发起请求。启动日志、实盘/策略页面和 `/api/portal/security` 会持续显示警告；通用审计记录 request ID、路径、方法、结果、客户端地址、Origin 与 User-Agent，不记录凭据或请求载荷。
+
 ## 自动策略部署
 
 正式部署只接受持久化 `instance_id`：
@@ -106,3 +122,4 @@ Broker 断线、账户未同步、行情过期、合约缺失、停牌、状态�
 - 订单被拒：查看 RiskGate 原因、合约价格边界、交易单位、现金和交易时段。
 - 重启后不能恢复：这是预期的 fail-closed 行为，应先 reconcile 再人工 resume。
 - SHADOW 有计划但无委托：SHADOW 永久 `can_route=False`，不是故障。
+- optional 模式仍返回 401：请求主动携带了无效或过期令牌；清除该令牌，或换成有效令牌以保留真实操作员身份。

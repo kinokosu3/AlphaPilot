@@ -36,9 +36,29 @@ def _listen_local() -> socket.socket:
 def test_live_mutations_require_operator_token(engine) -> None:
     client = TestClient(create_app(engine=engine))
 
-    denied = client.post("/api/live/paper/connect", json={"cash": 100_000})
-    assert denied.status_code == 401
-    assert "Bearer operator token" in denied.json()["detail"]
+    protected = (
+        ("POST", "/api/live/paper/connect", {"cash": 100_000}),
+        ("POST", "/api/live/daemon/halt", {"reason": "test"}),
+        (
+            "POST",
+            "/api/trading/strategy-instances",
+            {"instance_id": "unauthorized", "strategy_id": "sma_filter"},
+        ),
+        (
+            "PUT",
+            "/api/trading/deployments/missing",
+            {"run_mode": "paper"},
+        ),
+        (
+            "POST",
+            "/api/trading/kill-switches/global/all/engage",
+            {"reason": "test"},
+        ),
+    )
+    for method, path, payload in protected:
+        denied = client.request(method, path, json=payload)
+        assert denied.status_code == 401, path
+        assert "Bearer operator token" in denied.json()["detail"]
 
     # Read-only GETs and POST probes remain available without a token.
     assert client.get("/api/live/status").status_code == 200

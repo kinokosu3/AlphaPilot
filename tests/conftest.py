@@ -108,6 +108,7 @@ EXPECTED_CLI_COMMANDS: frozenset[str] = frozenset(
         "pool_set_description",
         "pool_show",
         "portal",
+        "portal_operator_auth",
         "portal_restart",
         "prepare_data",
         "qlib_yaml_generate",

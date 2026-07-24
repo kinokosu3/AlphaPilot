@@ -2,7 +2,7 @@
 
 > 本文件由 `scripts/generate_docs_reference.py` 生成，请勿手工编辑。
 
-当前内置公共命令共 **117** 个。第三方模块命令不计入此清单。
+当前内置公共命令共 **118** 个。第三方模块命令不计入此清单。
 
 通用帮助：`alphapilot <command> -- --help`。参数由 Python Fire 解析，布尔值建议显式写成 `--flag=True|False`。
 
@@ -41,6 +41,7 @@
 |---|---|---|---|---|---|---|---|
 | `notify_commands` | Run the inbound notification command receiver. | `(channel: 'str' = 'telegram', poll_interval: 'float \| None' = None) -> 'None'` | `None` | 长运行进程 | 正式 | 通知 | `/api/notify` |
 | `portal` | Launch the React/FastAPI unified web portal. | `(port: 'int \| None' = None, host: 'str \| None' = None, reload: 'bool' = False) -> 'None'` | `None` | 长运行进程 | 正式 | 首页/高级设置 | `/api/portal、/api/modules、/api/logs` |
+| `portal_operator_auth` | Show or change Portal operator authentication. | `(required: 'bool \| None' = None, operator_id: 'str' = '', reason: 'str' = '', acknowledge_network_risk: 'bool' = False, restart: 'bool' = False) -> 'dict[str, Any]'` | `dict[str, Any]` | 配置或进程控制 | 正式 | 首页/高级设置 | `GET /api/portal/security（只读）` |
 | `portal_restart` | Restart a running `alphapilot portal` process. | `() -> 'dict[str, Any]'` | `dict[str, Any]` | 配置或进程控制 | 正式 | 首页/高级设置 | `/api/portal、/api/modules、/api/logs` |
 | `scheduler` | Run the daily task scheduler daemon (auto-fires saved data/mine/backtest schedules). | `(interval: 'int' = 30) -> 'None'` | `None` | 长运行进程 | 正式 | 调度 | `/api/schedules` |
 | `timezone` | Show or set the AlphaPilot timezone (default Asia/Shanghai). | `(tz: 'str \| None' = None) -> 'dict[str, Any]'` | `dict[str, Any]` | 配置或进程控制 | 正式 | 首页/高级设置 | `/api/portal、/api/modules、/api/logs` |
@@ -193,7 +194,7 @@
 
 ## 已弃用命令附录
 
-这些命令仍计入 117 个公共命令，但只输出迁移提示，不应由新脚本继续采用。
+这些命令仍计入 118 个公共命令，但只输出迁移提示，不应由新脚本继续采用。
 
 | 命令 | 用途 | 参数签名 | 返回 | 影响 | 状态 | Portal | HTTP |
 |---|---|---|---|---|---|---|---|

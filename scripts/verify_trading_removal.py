@@ -102,7 +102,7 @@ def _wheel_smoke() -> dict[str, Any]:
                     "engine = build_engine(discover=True); "
                     "assert len(engine.systems) == 7, engine.systems; "
                     "assert len(engine.modules) == 15, engine.modules; "
-                    "assert len(engine.collect_commands()) == 117; engine.shutdown()",
+                    "assert len(engine.collect_commands()) == 118; engine.shutdown()",
                 ],
                 cwd=root,
                 env=env,

@@ -49,7 +49,7 @@ flowchart LR
 | 查询比较结果 | `trading_decision_comparisons` | `GET /api/trading/decision-comparisons/{comparison_id}` |
 | 生命周期 | `trading_{start,pause,reconcile,resume,stop,status}` | `/api/trading/deployments/{instance_id}/{action}` |
 
-部署配置与生命周期 HTTP 接口不要求 Operator Bearer 或必填原因，但只允许 Portal 绑定在 loopback 地址时使用。Kill Switch、Broker UAT、策略写操作和低层手工交易仍保留操作员鉴权与审计。
+所有 `/api/live` 与 `/api/trading` 写接口统一遵循 Portal operator-auth 模式。默认 `required` 必须提供 Operator Bearer；本机 `portal_operator_auth` CLI 可显式切换到高风险 `optional`，无令牌请求按 `portal-unauthenticated` 审计。部署接口不再限制 loopback，Broker UAT HTTP 仍保持只读。
 
 ## schema v10 切换
 

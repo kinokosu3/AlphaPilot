@@ -1,6 +1,6 @@
 # AlphaPilot CLI 使用与参考
 
-AlphaPilot 当前有 117 个第一方公共 CLI 命令。完整参数表由运行时代码生成，请查看 [CLI 完整参考](reference/cli.md)；本页保留原公开链接，并说明最常用的使用方式。
+AlphaPilot 当前有 118 个第一方公共 CLI 命令。完整参数表由运行时代码生成，请查看 [CLI 完整参考](reference/cli.md)；本页保留原公开链接，并说明最常用的使用方式。
 
 ```mermaid
 flowchart LR

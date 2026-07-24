@@ -20,4 +20,4 @@ flowchart LR
 
 旧 promote/authorize-live/qualification/parity/execution-binding 命令和手工 stage 写入均已删除。新增命令不得重新暴露这些门禁或 Store 写接口。
 
-测试覆盖全部命令 help、JSON 解析、文件输出、操作员审计、生命周期和 UAT 金额/确认；CLI 数量由 contract test 固定为 117 个全局命令。
+测试覆盖全部命令 help、JSON 解析、文件输出、操作员审计、生命周期和 UAT 金额/确认；CLI 数量由 contract test 固定为 118 个全局命令。

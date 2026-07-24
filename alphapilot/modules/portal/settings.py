@@ -11,6 +11,8 @@ from typing import Any
 DEFAULT_PORTAL_HOST = "127.0.0.1"
 DEFAULT_PORTAL_PORT = 19901
 DEFAULT_TIMEZONE = "Asia/Shanghai"
+DEFAULT_OPERATOR_AUTH_REQUIRED = True
+OPERATOR_AUTH_ENV = "ALPHAPILOT_OPERATOR_AUTH_REQUIRED"
 
 _HOST_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
 
@@ -67,24 +69,44 @@ def _coerce_timezone(value: Any) -> str:
     return tz
 
 
+def coerce_bool(value: Any, *, name: str = "value") -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean")
+
+
+def _read_settings_payload() -> dict[str, Any]:
+    path = settings_path()
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - bad config should not block startup
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
 def normalize_portal_settings(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "host": _coerce_host(payload.get("host", DEFAULT_PORTAL_HOST)),
         "port": _coerce_port(payload.get("port", DEFAULT_PORTAL_PORT)),
         "timezone": _coerce_timezone(payload.get("timezone", DEFAULT_TIMEZONE)),
+        "operator_auth_required": coerce_bool(
+            payload.get("operator_auth_required", DEFAULT_OPERATOR_AUTH_REQUIRED),
+            name="operator_auth_required",
+        ),
     }
 
 
 def load_file_portal_settings() -> dict[str, Any]:
-    path = settings_path()
-    if not path.exists():
-        return normalize_portal_settings({})
+    raw = _read_settings_payload()
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001 - bad config should not block startup
-        raw = {}
-    try:
-        return normalize_portal_settings(raw if isinstance(raw, dict) else {})
+        return normalize_portal_settings(raw)
     except ValueError:
         return normalize_portal_settings({})
 
@@ -104,6 +126,9 @@ def load_portal_settings(*, include_env: bool = True) -> dict[str, Any]:
                 settings["timezone"] = _coerce_timezone(env_tz)
             except ValueError:
                 pass
+        env_auth = operator_auth_environment_override()
+        if env_auth is not None:
+            settings["operator_auth_required"] = env_auth
     return settings
 
 
@@ -140,3 +165,46 @@ def apply_timezone() -> str:
 def set_timezone(timezone: str) -> Path:
     """Validate and persist the timezone (keeps host/port). Returns the settings path."""
     return save_portal_settings({"timezone": _coerce_timezone(timezone)})
+
+
+def operator_auth_environment_override() -> bool | None:
+    raw = os.getenv(OPERATOR_AUTH_ENV)
+    if raw is None:
+        return None
+    return coerce_bool(raw, name=OPERATOR_AUTH_ENV)
+
+
+def resolve_operator_auth() -> dict[str, Any]:
+    """Resolve the effective Portal operator-auth mode and its source."""
+
+    saved = load_file_portal_settings()["operator_auth_required"]
+    override = operator_auth_environment_override()
+    raw = _read_settings_payload()
+    if override is not None:
+        required = override
+        source = "environment"
+    elif "operator_auth_required" in raw:
+        required = saved
+        source = "settings"
+    else:
+        required = DEFAULT_OPERATOR_AUTH_REQUIRED
+        source = "default"
+    return {
+        "required": bool(required),
+        "mode": "required" if required else "optional",
+        "source": source,
+        "saved_required": bool(saved),
+        "environment_override": override,
+        "settings_path": str(settings_path()),
+    }
+
+
+def set_operator_auth_required(required: bool) -> Path:
+    """Persist the CLI-managed operator-auth setting."""
+
+    return save_portal_settings({
+        "operator_auth_required": coerce_bool(
+            required,
+            name="operator_auth_required",
+        ),
+    })

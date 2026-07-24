@@ -1,5 +1,22 @@
 export type ApiError = { detail?: string };
 
+export type PortalSecurityStatus = {
+  operator_auth_required: boolean;
+  operator_auth_mode: "required" | "optional";
+  source: "default" | "settings" | "environment" | string;
+  pending_required: boolean;
+  pending_mode: "required" | "optional";
+  pending_source: "default" | "settings" | "environment" | string;
+  restart_required: boolean;
+  bind_host: string;
+  bind_port: number;
+  bind_address: string;
+  network_exposed: boolean;
+  automated_live_enabled: boolean;
+  cors_policy: "wildcard" | string;
+  warning: string;
+};
+
 let operatorToken = "";
 
 export function setOperatorToken(token: string): void {

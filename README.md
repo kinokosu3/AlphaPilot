@@ -117,6 +117,7 @@ AlphaPilot 提供统一 Web 门户作为日常研究与运行入口，将数据�
 - 支持后台任务、定时任务和结果查看
 - 「回测」页内置完整可视化：累计收益 / 超额 / 账户 / 换手率图表、日期范围筛选、每日明细、因子排行榜与对比基准
 - 「实盘交易」页区分实盘 / 柜台仿真 / 本地 Paper 工作区，并提供预检、daemon、策略、风险与审计控制面
+- Portal 交易写接口默认要求操作员令牌；可由本机 CLI 切换为高风险的 optional 模式，页面只读展示当前安全状态
 - 适合本地研究环境和服务器部署场景
 
 关键入口：`alphapilot portal`
@@ -436,7 +437,36 @@ alphapilot trading_diagnostics --instance_id=sma_20_demo
 
 LIVE 启动后先停在待对账状态；运行 `trading_reconcile` 成功后，再显式运行 `trading_resume`。即使不再有晋级门禁，LIVE 仍会逐单检查环境开关、账户与 Provider 绑定、单账户单写者、合约/行情、心跳、对账、Kill Switch 和 RiskGate。PAPER/SHADOW 会话与 `trading_decision_compare` 只提供诊断，不改变部署权限。
 
-Portal 的部署配置与生命周期接口仅允许本机监听，不要求 Operator Bearer 或必填原因。操作员令牌可用 `alphapilot trading_operator_token --operator_id=...` 在本机生成，明文只返回一次；它只用于仍受保护的 Kill Switch、Broker UAT、策略写操作和手工交易。
+Portal 对所有 `/api/live`、`/api/trading` 写操作统一使用操作员鉴权，默认模式是 `required`，包括策略实例、部署配置与生命周期、Kill Switch、daemon 和手工交易。先在本机生成令牌，明文只返回一次：
+
+```bash
+alphapilot trading_operator_token \
+  --operator_id=alice --label=portal --expires_in_days=1
+```
+
+如确需在受信任实验网络中免令牌操作，只能从本机 CLI 修改，配置保存到 `~/.alphapilot/portal/settings.json`，重启后生效：
+
+```bash
+# 查看保存值、当前运行值和是否需要重启
+alphapilot portal_operator_auth
+
+# 高风险：关闭强制鉴权并立即请求重启
+alphapilot portal_operator_auth \
+  --required=false \
+  --operator_id=alice \
+  --reason="trusted lab network" \
+  --acknowledge_network_risk=true \
+  --restart=true
+
+# 恢复默认安全模式
+alphapilot portal_operator_auth \
+  --required=true \
+  --operator_id=alice \
+  --reason="restore required authentication" \
+  --restart=true
+```
+
+`ALPHAPILOT_OPERATOR_AUTH_REQUIRED` 仍可作为环境覆盖且优先级更高；与 CLI 目标冲突时，CLI 会拒绝写入。`optional` 会允许所有可达客户端在无令牌时以 `portal-unauthenticated` 执行交易写操作；主动提供的令牌仍会校验并记录真实操作员，无效令牌仍返回 401。系统允许 `0.0.0.0 + optional + ALPHAPILOT_AUTOMATED_LIVE_ENABLED=true`，并保留通配 CORS——这意味着局域网客户端和跨站网页都可能无令牌发起真实交易请求。Portal 警告、请求/结果审计、账户绑定、对账、Kill Switch、RiskGate 等交易安全检查会保留，但不能替代网络认证。
 
 迭代策略时，请同步提升清单中的 `version` 并重启长驻进程。代码、版本或任何实例绑定变化都会产生新的 `config_hash` 并要求重新验证和重新绑定部署，但不会删除原部署配置或运行诊断。
 

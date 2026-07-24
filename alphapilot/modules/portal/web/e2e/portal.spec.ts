@@ -60,6 +60,42 @@ test.describe("Portal interaction contract", () => {
     expect(externalRequests).toEqual([]);
   });
 
+  test("live account metrics stay visible without overlap at desktop widths", async ({ page }) => {
+    await page.setViewportSize({ width: 1366, height: 900 });
+    await page.goto("/live");
+
+    const strip = page.locator(".live-account-strip");
+    await expect(strip).toBeVisible();
+    await expect(strip.locator(":scope > span")).toHaveCount(7);
+
+    const layout = await strip.evaluate((element) => {
+      const container = element.getBoundingClientRect();
+      const items = Array.from(element.children).map((child) => child.getBoundingClientRect());
+      const outside = items.some((item) => (
+        item.left < container.left - 0.5 || item.right > container.right + 0.5
+      ));
+      const overlaps = items.some((item, index) => items.slice(index + 1).some((other) => (
+        item.left < other.right - 0.5
+        && item.right > other.left + 0.5
+        && item.top < other.bottom - 0.5
+        && item.bottom > other.top + 0.5
+      )));
+      return {
+        display: getComputedStyle(element).display,
+        horizontalOverflow: element.scrollWidth > element.clientWidth + 1,
+        outside,
+        overlaps,
+      };
+    });
+
+    expect(layout).toEqual({
+      display: "grid",
+      horizontalOverflow: false,
+      outside: false,
+      overlaps: false,
+    });
+  });
+
   test("@mobile live safety controls and business tabs stay visible", async ({ page }) => {
     await page.goto("/live");
     await expect(page.locator(".live-workspace-status")).toBeVisible();

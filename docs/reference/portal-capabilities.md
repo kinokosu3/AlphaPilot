@@ -14,11 +14,13 @@
 | 模拟与实盘 | `/live` | runtime、daemon、手工交易、部署、证据、对账和 kill switch | `live_*、trading_*` | `/api/live、/api/trading` | CLI/API 等价；Portal 强化确认与观察 | [打开](../user/live-trading.md) | [查看](../assets/portal/live.png) |
 | 调度 | `/scheduler` | 计划任务 CRUD、立即运行和调度 daemon | `scheduler（仅 daemon）` | `/api/schedules` | 计划 CRUD 为 Portal/API-only | [打开](../user/scheduling-notifications-and-operations.md) | [查看](../assets/portal/scheduler.png) |
 | 通知 | `/notifications` | 渠道配置、测试、命令接收、配对和事件 | `notify_commands（仅接收器）` | `/api/notify` | 配置/测试/配对为 Portal/API-only | [打开](../user/scheduling-notifications-and-operations.md) | [查看](../assets/portal/notifications.png) |
-| 高级设置 | `/advanced` | Portal/环境配置、日志清理和模块调用 | `timezone、clean_logs、modules、portal_restart` | `/api/portal、/api/logs、/api/modules` | 可组合 CLI 等价；表单为 Portal 展示 | [打开](../user/scheduling-notifications-and-operations.md) | [查看](../assets/portal/advanced.png) |
+| 高级设置 | `/advanced` | Portal/环境配置、操作员鉴权只读状态、日志清理和模块调用 | `timezone、clean_logs、modules、portal_restart、portal_operator_auth` | `/api/portal、/api/portal/security、/api/logs、/api/modules` | 操作员鉴权仅可由本机 CLI 修改；其余可组合 CLI 等价 | [打开](../user/scheduling-notifications-and-operations.md) | [查看](../assets/portal/advanced.png) |
 
 ## 接口边界
 
 - Portal 是现有系统和模块的操作界面，不另外实现交易或研究逻辑。
 - `/api/trading` 承担正式策略实例与部署控制；`/api/live` 承担运行时和人工运维。
+- 两个交易前缀的写操作统一遵循 `required | optional` operator-auth；安全状态 HTTP 只读，只能由本机 CLI 修改。
+- `optional + 0.0.0.0 + wildcard CORS` 会允许可达客户端无令牌写入，Portal 必须持续显示高风险警告。
 - UAT 只能由本地 CLI 发起，Portal 仅展示 UAT 结果。
 - 高级设置中的 `/api/modules/run` 是本机运维入口，不应暴露到不可信网络。

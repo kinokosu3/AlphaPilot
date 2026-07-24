@@ -2,9 +2,9 @@
 
 > 本文件由 `scripts/generate_docs_reference.py` 从 FastAPI OpenAPI 生成，请勿手工编辑。
 
-当前共有 **133** 条路径、**150** 个操作。运行 Portal 后可访问 `/docs` 查看请求和响应 Schema。
+当前共有 **134** 条路径、**151** 个操作。运行 Portal 后可访问 `/docs` 查看请求和响应 Schema。
 
-Portal 默认只监听 `127.0.0.1`。下表中的“本机 Portal”不等于互联网级认证边界。
+Portal 默认只监听 `127.0.0.1`。交易写操作由启动时冻结的 `required | optional` 模式决定；`optional + 0.0.0.0 + wildcard CORS` 允许可达客户端无令牌写入，不等于互联网级认证边界。
 
 ## `backtests`
 
@@ -71,34 +71,34 @@ Portal 默认只监听 `127.0.0.1`。下表中的“本机 Portal”不等于互
 
 | 方法 | 路径 | 用途 | 认证/边界 |
 |---|---|---|---|
-| `GET` | `/api/live/brokers` | Live Brokers | 本机 Portal |
-| `POST` | `/api/live/daemon/cancel` | Live Daemon Cancel | 本机运维边界 |
-| `POST` | `/api/live/daemon/halt` | Live Daemon Halt | 本机运维边界 |
-| `POST` | `/api/live/daemon/order` | Live Daemon Order | 本机运维边界 |
-| `POST` | `/api/live/daemon/reconnect` | Live Daemon Reconnect | 本机运维边界 |
-| `POST` | `/api/live/daemon/refresh` | Live Daemon Refresh | 本机运维边界 |
-| `POST` | `/api/live/daemon/resume` | Live Daemon Resume | 本机运维边界 |
-| `POST` | `/api/live/daemon/start` | Live Daemon Start | 本机运维边界 |
-| `GET` | `/api/live/daemon/status` | Live Daemon Status | 本机 Portal |
-| `POST` | `/api/live/daemon/stop` | Live Daemon Stop | 本机运维边界 |
-| `POST` | `/api/live/daemon/submit-target` | Live Daemon Submit Target | 本机运维边界 |
-| `GET` | `/api/live/ledger/events` | Live Ledger Events | 本机 Portal |
-| `GET` | `/api/live/market/bars` | Live Market Bars | 本机 Portal |
-| `GET` | `/api/live/market/snapshot` | Live Market Snapshot | 本机 Portal |
-| `POST` | `/api/live/paper/connect` | Live Paper Connect | 本机运维边界 |
-| `POST` | `/api/live/paper/halt` | Live Paper Halt | 本机运维边界 |
-| `POST` | `/api/live/paper/order` | Live Paper Order | 本机运维边界 |
-| `POST` | `/api/live/paper/reset` | Live Paper Reset | 本机运维边界 |
-| `POST` | `/api/live/paper/resume` | Live Paper Resume | 本机运维边界 |
-| `GET` | `/api/live/paper/state` | Live Paper State | 本机 Portal |
-| `POST` | `/api/live/paper/submit-target` | Live Paper Submit Target | 本机运维边界 |
-| `GET` | `/api/live/plugins` | Live Plugins | 本机 Portal |
-| `GET` | `/api/live/quote-providers` | Live Quote Providers | 本机 Portal |
-| `GET` | `/api/live/risk/status` | Live Risk Status | 本机 Portal |
-| `POST` | `/api/live/runtime/connect` | Live Runtime Connect | 本机运维边界 |
-| `POST` | `/api/live/runtime/preflight` | Live Runtime Preflight | 本机运维边界 |
-| `GET` | `/api/live/runtime/state` | Live Runtime State | 本机 Portal |
-| `GET` | `/api/live/status` | Live Status | 本机 Portal |
+| `GET` | `/api/live/brokers` | Live Brokers | 免 Operator token |
+| `POST` | `/api/live/daemon/cancel` | Live Daemon Cancel | Portal operator auth（required / optional） |
+| `POST` | `/api/live/daemon/halt` | Live Daemon Halt | Portal operator auth（required / optional） |
+| `POST` | `/api/live/daemon/order` | Live Daemon Order | Portal operator auth（required / optional） |
+| `POST` | `/api/live/daemon/reconnect` | Live Daemon Reconnect | Portal operator auth（required / optional） |
+| `POST` | `/api/live/daemon/refresh` | Live Daemon Refresh | Portal operator auth（required / optional） |
+| `POST` | `/api/live/daemon/resume` | Live Daemon Resume | Portal operator auth（required / optional） |
+| `POST` | `/api/live/daemon/start` | Live Daemon Start | Portal operator auth（required / optional） |
+| `GET` | `/api/live/daemon/status` | Live Daemon Status | 免 Operator token |
+| `POST` | `/api/live/daemon/stop` | Live Daemon Stop | Portal operator auth（required / optional） |
+| `POST` | `/api/live/daemon/submit-target` | Live Daemon Submit Target | Portal operator auth（required / optional） |
+| `GET` | `/api/live/ledger/events` | Live Ledger Events | 免 Operator token |
+| `GET` | `/api/live/market/bars` | Live Market Bars | 免 Operator token |
+| `GET` | `/api/live/market/snapshot` | Live Market Snapshot | 免 Operator token |
+| `POST` | `/api/live/paper/connect` | Live Paper Connect | Portal operator auth（required / optional） |
+| `POST` | `/api/live/paper/halt` | Live Paper Halt | Portal operator auth（required / optional） |
+| `POST` | `/api/live/paper/order` | Live Paper Order | Portal operator auth（required / optional） |
+| `POST` | `/api/live/paper/reset` | Live Paper Reset | Portal operator auth（required / optional） |
+| `POST` | `/api/live/paper/resume` | Live Paper Resume | Portal operator auth（required / optional） |
+| `GET` | `/api/live/paper/state` | Live Paper State | 免 Operator token |
+| `POST` | `/api/live/paper/submit-target` | Live Paper Submit Target | Portal operator auth（required / optional） |
+| `GET` | `/api/live/plugins` | Live Plugins | 免 Operator token |
+| `GET` | `/api/live/quote-providers` | Live Quote Providers | 免 Operator token |
+| `GET` | `/api/live/risk/status` | Live Risk Status | 免 Operator token |
+| `POST` | `/api/live/runtime/connect` | Live Runtime Connect | Portal operator auth（required / optional） |
+| `POST` | `/api/live/runtime/preflight` | Live Runtime Preflight | 免 Operator token（只读探测） |
+| `GET` | `/api/live/runtime/state` | Live Runtime State | 免 Operator token |
+| `GET` | `/api/live/status` | Live Status | 免 Operator token |
 
 ## `logs`
 
@@ -154,6 +154,7 @@ Portal 默认只监听 `127.0.0.1`。下表中的“本机 Portal”不等于互
 | `GET` | `/api/portal/env` | Get Portal Env | 本机 Portal |
 | `PATCH` | `/api/portal/env` | Update Portal Env | 本机 Portal |
 | `POST` | `/api/portal/restart` | Restart Portal | 本机 Portal |
+| `GET` | `/api/portal/security` | Get Portal Security | 只读、免 Operator token |
 | `GET` | `/api/portal/settings` | Get Portal Settings | 本机 Portal |
 | `PATCH` | `/api/portal/settings` | Update Portal Settings | 本机 Portal |
 
@@ -219,34 +220,34 @@ Portal 默认只监听 `127.0.0.1`。下表中的“本机 Portal”不等于互
 
 | 方法 | 路径 | 用途 | 认证/边界 |
 |---|---|---|---|
-| `GET` | `/api/trading/audit-events` | Trading Audit Events | 本机 Portal |
-| `GET` | `/api/trading/backtest-runs/{run_id}` | Trading Backtest Run Get | 本机 Portal |
-| `POST` | `/api/trading/backtest-runs/{run_id}/cancel` | Trading Backtest Run Cancel | Operator Bearer |
-| `GET` | `/api/trading/backtest-runs/{run_id}/detail` | Trading Backtest Run Detail | 本机 Portal |
-| `GET` | `/api/trading/broker-uat-runs` | Trading Broker Uat Runs | 本机 Portal |
-| `GET` | `/api/trading/broker-uat-runs/{run_id}` | Trading Broker Uat Run | 本机 Portal |
-| `GET` | `/api/trading/compatibility` | Trading Compatibility | 本机 Portal |
-| `GET` | `/api/trading/decision-comparisons/{comparison_id}` | Trading Decision Comparison | 本机 Portal |
-| `GET` | `/api/trading/deployments` | Trading Deployments | 本机 Portal |
-| `GET` | `/api/trading/deployments/{instance_id}` | Trading Deployment | 本机 Portal |
-| `PUT` | `/api/trading/deployments/{instance_id}` | Trading Deployment Update | 本机 Portal |
-| `GET` | `/api/trading/deployments/{instance_id}/decision-comparisons` | Trading Decision Comparisons | 本机 Portal |
-| `POST` | `/api/trading/deployments/{instance_id}/decision-comparisons` | Trading Decision Comparison Create | 本机 Portal |
-| `GET` | `/api/trading/deployments/{instance_id}/diagnostics` | Trading Deployment Diagnostics | 本机 Portal |
-| `POST` | `/api/trading/deployments/{instance_id}/pause` | Trading Deployment Pause | 本机 Portal |
-| `POST` | `/api/trading/deployments/{instance_id}/reconcile` | Trading Deployment Reconcile | 本机 Portal |
-| `POST` | `/api/trading/deployments/{instance_id}/resume` | Trading Deployment Resume | 本机 Portal |
-| `POST` | `/api/trading/deployments/{instance_id}/start` | Trading Deployment Start | 本机 Portal |
-| `GET` | `/api/trading/deployments/{instance_id}/status` | Trading Deployment Status | 本机 Portal |
-| `POST` | `/api/trading/deployments/{instance_id}/stop` | Trading Deployment Stop | 本机 Portal |
-| `GET` | `/api/trading/kill-switches` | Trading Kill Switches | 本机 Portal |
-| `POST` | `/api/trading/kill-switches/{scope_type}/{scope_id}/{action}` | Trading Kill Switch | Operator Bearer |
-| `GET` | `/api/trading/portfolio-policy-definitions` | Trading Portfolio Policy Definitions | 本机 Portal |
-| `GET` | `/api/trading/strategy-definitions` | Trading Strategy Definitions | 本机 Portal |
-| `GET` | `/api/trading/strategy-instances` | Trading Strategy Instances | 本机 Portal |
-| `POST` | `/api/trading/strategy-instances` | Trading Strategy Instance Create | Operator Bearer |
-| `POST` | `/api/trading/strategy-instances/from-research-asset` | Trading Strategy Instance From Research | Operator Bearer |
-| `PATCH` | `/api/trading/strategy-instances/{instance_id}` | Trading Strategy Instance Update | Operator Bearer |
-| `POST` | `/api/trading/strategy-instances/{instance_id}/backtest-runs` | Trading Backtest Run Create | Operator Bearer |
-| `POST` | `/api/trading/strategy-instances/{instance_id}/preview` | Trading Strategy Instance Preview | Operator Bearer |
-| `POST` | `/api/trading/strategy-instances/{instance_id}/validate` | Trading Strategy Instance Validate | Operator Bearer |
+| `GET` | `/api/trading/audit-events` | Trading Audit Events | 免 Operator token |
+| `GET` | `/api/trading/backtest-runs/{run_id}` | Trading Backtest Run Get | 免 Operator token |
+| `POST` | `/api/trading/backtest-runs/{run_id}/cancel` | Trading Backtest Run Cancel | Portal operator auth（required / optional） |
+| `GET` | `/api/trading/backtest-runs/{run_id}/detail` | Trading Backtest Run Detail | 免 Operator token |
+| `GET` | `/api/trading/broker-uat-runs` | Trading Broker Uat Runs | 免 Operator token |
+| `GET` | `/api/trading/broker-uat-runs/{run_id}` | Trading Broker Uat Run | 免 Operator token |
+| `GET` | `/api/trading/compatibility` | Trading Compatibility | 免 Operator token |
+| `GET` | `/api/trading/decision-comparisons/{comparison_id}` | Trading Decision Comparison | 免 Operator token |
+| `GET` | `/api/trading/deployments` | Trading Deployments | 免 Operator token |
+| `GET` | `/api/trading/deployments/{instance_id}` | Trading Deployment | 免 Operator token |
+| `PUT` | `/api/trading/deployments/{instance_id}` | Trading Deployment Update | Portal operator auth（required / optional） |
+| `GET` | `/api/trading/deployments/{instance_id}/decision-comparisons` | Trading Decision Comparisons | 免 Operator token |
+| `POST` | `/api/trading/deployments/{instance_id}/decision-comparisons` | Trading Decision Comparison Create | Portal operator auth（required / optional） |
+| `GET` | `/api/trading/deployments/{instance_id}/diagnostics` | Trading Deployment Diagnostics | 免 Operator token |
+| `POST` | `/api/trading/deployments/{instance_id}/pause` | Trading Deployment Pause | Portal operator auth（required / optional） |
+| `POST` | `/api/trading/deployments/{instance_id}/reconcile` | Trading Deployment Reconcile | Portal operator auth（required / optional） |
+| `POST` | `/api/trading/deployments/{instance_id}/resume` | Trading Deployment Resume | Portal operator auth（required / optional） |
+| `POST` | `/api/trading/deployments/{instance_id}/start` | Trading Deployment Start | Portal operator auth（required / optional） |
+| `GET` | `/api/trading/deployments/{instance_id}/status` | Trading Deployment Status | 免 Operator token |
+| `POST` | `/api/trading/deployments/{instance_id}/stop` | Trading Deployment Stop | Portal operator auth（required / optional） |
+| `GET` | `/api/trading/kill-switches` | Trading Kill Switches | 免 Operator token |
+| `POST` | `/api/trading/kill-switches/{scope_type}/{scope_id}/{action}` | Trading Kill Switch | Portal operator auth（required / optional） |
+| `GET` | `/api/trading/portfolio-policy-definitions` | Trading Portfolio Policy Definitions | 免 Operator token |
+| `GET` | `/api/trading/strategy-definitions` | Trading Strategy Definitions | 免 Operator token |
+| `GET` | `/api/trading/strategy-instances` | Trading Strategy Instances | 免 Operator token |
+| `POST` | `/api/trading/strategy-instances` | Trading Strategy Instance Create | Portal operator auth（required / optional） |
+| `POST` | `/api/trading/strategy-instances/from-research-asset` | Trading Strategy Instance From Research | Portal operator auth（required / optional） |
+| `PATCH` | `/api/trading/strategy-instances/{instance_id}` | Trading Strategy Instance Update | Portal operator auth（required / optional） |
+| `POST` | `/api/trading/strategy-instances/{instance_id}/backtest-runs` | Trading Backtest Run Create | Portal operator auth（required / optional） |
+| `POST` | `/api/trading/strategy-instances/{instance_id}/preview` | Trading Strategy Instance Preview | Portal operator auth（required / optional） |
+| `POST` | `/api/trading/strategy-instances/{instance_id}/validate` | Trading Strategy Instance Validate | Portal operator auth（required / optional） |

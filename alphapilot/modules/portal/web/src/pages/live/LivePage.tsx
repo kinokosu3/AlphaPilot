@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, getOperatorToken, qs, setOperatorToken } from "../../api";
+import { api, getOperatorToken, qs, setOperatorToken, type PortalSecurityStatus } from "../../api";
 import { Alert, PageTitle, useConfirm } from "../../components";
 import { useAsync, useJsonInput, useSerialPolling } from "../../hooks";
 import { useI18n } from "../../i18n";
@@ -98,6 +98,10 @@ export function LivePage() {
   const confirm = useConfirm();
   const { run } = useAction();
   const configStatus = useAsync(() => api.get<LiveStatus>("/api/live/status"), []);
+  const portalSecurity = useAsync(
+    () => api.get<PortalSecurityStatus>("/api/portal/security"),
+    [],
+  );
   const brokerCatalog = useAsync(() => api.get<LiveBrokerSpec[]>("/api/live/brokers"), []);
   const quoteProviderCatalog = useAsync(() => api.get<LiveQuoteProviderSpec[]>("/api/live/quote-providers"), []);
   const pluginDiagnostics = useAsync(() => api.get<LivePluginDiagnostics>("/api/live/plugins"), []);
@@ -459,18 +463,39 @@ export function LivePage() {
   const daemon = daemonStatus.data;
   const canStartDaemon = providerReady && (workspace === "paper" || Boolean(selectedBrokerSpec?.gateway_importable && selectedQuoteProviderSpec?.gateway_importable));
   const bindingLocked = Boolean(deploymentEvidence.data?.runtime?.runtime_id);
+  // Security status failures deliberately fail closed in the UI. The backend
+  // remains authoritative for every request.
+  const operatorAuthRequired = portalSecurity.data?.operator_auth_required !== false;
 
   return (
     <div className="stack live-workspace-page">
       <PageTitle title={t("navLive")} subtitle={t("liveWorkspaceIntro")} />
-      <section className="panel inset">
-        <label className="field"><span>{t("liveOperatorTokenScope")}</span>
-          <input type="password" value={operatorToken} onChange={(event) => {
-            setOperatorTokenValue(event.target.value);
-            setOperatorToken(event.target.value);
-          }} placeholder="apop_…" autoComplete="off" />
-        </label>
-      </section>
+      {operatorAuthRequired ? (
+        <section className="panel inset">
+          <label className="field"><span>{t("liveOperatorTokenScope")}</span>
+            <input type="password" value={operatorToken} onChange={(event) => {
+              setOperatorTokenValue(event.target.value);
+              setOperatorToken(event.target.value);
+            }} placeholder="apop_…" autoComplete="off" />
+          </label>
+        </section>
+      ) : (
+        <Alert tone="error">
+          <strong>{t("portalOperatorAuthOptionalTitle")}</strong>
+          <br />
+          {t("portalOperatorAuthOptionalWarning")} {t("portalOperatorAuthBind")}: <code>{portalSecurity.data?.bind_address || portalSecurity.data?.bind_host || "—"}</code>.
+          {portalSecurity.data?.restart_required ? ` ${t("portalOperatorAuthRestartPending")}` : ""}
+          {operatorToken ? (
+            <div className="row-actions left">
+              <span>{t("portalOperatorAuthSuppliedToken")}</span>
+              <button type="button" className="button small" onClick={() => {
+                setOperatorTokenValue("");
+                setOperatorToken("");
+              }}>{t("portalOperatorAuthClearToken")}</button>
+            </div>
+          ) : null}
+        </Alert>
+      )}
       <div className="live-environment-tabs" role="tablist" aria-label={t("liveEnvironment")}>
         <button type="button" role="tab" aria-selected={workspace === "live"} className={workspace === "live" ? "active live" : ""} onClick={() => switchWorkspace("live")}>{t("liveEnvironmentLive")}</button>
         <button type="button" role="tab" aria-selected={workspace === "shadow"} className={workspace === "shadow" ? "active shadow" : ""} onClick={() => switchWorkspace("shadow")}>SHADOW</button>

@@ -10,9 +10,9 @@ from fastapi.testclient import TestClient
 from alphapilot.modules.portal.api import create_app
 
 
-EXPECTED_OPERATION_COUNT = 150
-EXPECTED_PATH_COUNT = 133
-EXPECTED_CONTRACT_SHA256 = "5d9edd824f1856c695c0c05cac13bee901f50ad20283052932b0dc5d2193706a"
+EXPECTED_OPERATION_COUNT = 151
+EXPECTED_PATH_COUNT = 134
+EXPECTED_CONTRACT_SHA256 = "8614cd83a427b68a1e9e19907eaca25ca79ccba5ad5f0a7a3e6decae13945187"
 HTTP_METHODS = {"get", "post", "put", "patch", "delete"}
 LEGACY_HTTP_OPERATIONS = {
     ("get", "/api/timing/strategies"),

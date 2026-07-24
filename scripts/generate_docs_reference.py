@@ -91,6 +91,8 @@ def _md_cell(value: Any) -> str:
 
 
 def _command_destination(name: str) -> tuple[str, str]:
+    if name == "portal_operator_auth":
+        return "首页/高级设置", "GET /api/portal/security（只读）"
     if name.startswith(("factor_", "category_")):
         return "因子与策略库", "/api/factors"
     if name.startswith("pool_"):
@@ -109,7 +111,10 @@ def _command_destination(name: str) -> tuple[str, str]:
         return "策略实例/模拟与实盘", "/api/trading"
     if name in {"prepare_data", "list_stocks", "delete_stock", "trim_stock", "refresh_stock", "data_viz"}:
         return "行情数据", "/api/data、/api/market"
-    if name in {"portal", "portal_restart", "timezone", "modules", "clean_logs", "ui", "backtest_ui"}:
+    if name in {
+        "portal", "portal_operator_auth", "portal_restart", "timezone",
+        "modules", "clean_logs", "ui", "backtest_ui",
+    }:
         return "首页/高级设置", "/api/portal、/api/modules、/api/logs"
     if name in {"scheduler"}:
         return "调度", "/api/schedules"
@@ -165,7 +170,7 @@ def _command_effect(name: str) -> str:
         return "计算并写入产物"
     if name in {"prepare_data", "refresh_stock"}:
         return "数据下载/转换写操作"
-    if name in {"portal_restart", "timezone"}:
+    if name in {"portal_operator_auth", "portal_restart", "timezone"}:
         return "配置或进程控制"
     if name == "strategy_create":
         return "研究资产写操作"
@@ -224,7 +229,7 @@ def _cli_reference(engine: Any, catalog: dict[str, Any]) -> str:
     lines.extend([
         "## 已弃用命令附录",
         "",
-        "这些命令仍计入 117 个公共命令，但只输出迁移提示，不应由新脚本继续采用。",
+        f"这些命令仍计入 {len(all_commands)} 个公共命令，但只输出迁移提示，不应由新脚本继续采用。",
         "",
         "| 命令 | 用途 | 参数签名 | 返回 | 影响 | 状态 | Portal | HTTP |",
         "|---|---|---|---|---|---|---|---|",
@@ -249,12 +254,14 @@ def _api_domain(path: str) -> str:
 
 
 def _api_auth(method: str, path: str) -> str:
-    if path.startswith("/api/trading/deployments"):
-        return "本机 Portal"
-    if method != "GET" and path.startswith("/api/trading/"):
-        return "Operator Bearer"
-    if path.startswith("/api/live/") and method != "GET":
-        return "本机运维边界"
+    if path == "/api/live/runtime/preflight":
+        return "免 Operator token（只读探测）"
+    if method != "GET" and path.startswith(("/api/live/", "/api/trading/")):
+        return "Portal operator auth（required / optional）"
+    if method == "GET" and path.startswith(("/api/live/", "/api/trading/")):
+        return "免 Operator token"
+    if path == "/api/portal/security":
+        return "只读、免 Operator token"
     if path == "/api/notify/feishu/events":
         return "飞书回调校验"
     return "本机 Portal"
@@ -276,7 +283,9 @@ def _http_reference(spec: dict[str, Any]) -> str:
         "",
         f"当前共有 **{len(spec['paths'])}** 条路径、**{count}** 个操作。运行 Portal 后可访问 `/docs` 查看请求和响应 Schema。",
         "",
-        "Portal 默认只监听 `127.0.0.1`。下表中的“本机 Portal”不等于互联网级认证边界。",
+        "Portal 默认只监听 `127.0.0.1`。交易写操作由启动时冻结的 "
+        "`required | optional` 模式决定；`optional + 0.0.0.0 + wildcard CORS` "
+        "允许可达客户端无令牌写入，不等于互联网级认证边界。",
         "",
     ]
     for domain in sorted(grouped):
@@ -309,6 +318,8 @@ def _portal_reference(catalog: dict[str, Any]) -> str:
         "",
         "- Portal 是现有系统和模块的操作界面，不另外实现交易或研究逻辑。",
         "- `/api/trading` 承担正式策略实例与部署控制；`/api/live` 承担运行时和人工运维。",
+        "- 两个交易前缀的写操作统一遵循 `required | optional` operator-auth；安全状态 HTTP 只读，只能由本机 CLI 修改。",
+        "- `optional + 0.0.0.0 + wildcard CORS` 会允许可达客户端无令牌写入，Portal 必须持续显示高风险警告。",
         "- UAT 只能由本地 CLI 发起，Portal 仅展示 UAT 结果。",
         "- 高级设置中的 `/api/modules/run` 是本机运维入口，不应暴露到不可信网络。",
         "",

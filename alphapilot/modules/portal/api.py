@@ -27,6 +27,7 @@ from alphapilot.modules.portal.settings import (
     COMMON_TIMEZONES,
     apply_timezone,
     load_file_portal_settings,
+    resolve_operator_auth,
     resolve_timezone,
     save_portal_settings,
     settings_path,
@@ -82,48 +83,56 @@ def _trading_operator(
     *,
     reason: str = "",
 ) -> Any:
+    from alphapilot.systems.trading.contracts import OperatorContext
+
+    cached = getattr(request.state, "trading_operator", None)
+    if cached is not None:
+        return OperatorContext(
+            operator_id=cached.operator_id,
+            request_id=cached.request_id,
+            reason=str(reason or cached.reason),
+            auth_source=cached.auth_source,
+        )
+
     trading = _engine(app).get_system("trading")
     request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
-    if _truthy_env("ALPHAPILOT_OPERATOR_AUTH_REQUIRED", "true"):
+    raw_authorization = str(authorization or "").strip()
+    if bool(getattr(app.state, "operator_auth_required", True)) or raw_authorization:
         return trading.operator_auth.authenticate(
-            authorization or "",
+            raw_authorization,
             request_id=request_id,
             reason=reason,
         )
-    from alphapilot.systems.trading.contracts import OperatorContext
 
     return OperatorContext(
-        operator_id="local-compat",
+        operator_id="portal-unauthenticated",
         request_id=request_id,
         reason=reason,
-        auth_source="local-compatibility",
+        auth_source="portal-config:operator-auth-optional",
     )
 
 
-def _require_local_portal_boundary(app: FastAPI) -> None:
-    """Keep unauthenticated deployment control on a loopback-bound Portal.
-
-    Deployment configuration and lifecycle operations deliberately do not use
-    operator bearer tokens.  Their security boundary is therefore the Portal
-    listener itself, not a caller-controlled Host header.
-    """
-
-    host = str(getattr(app.state, "portal_host", None) or "127.0.0.1").strip().lower()
-    if host not in {"127.0.0.1", "localhost", "::1"}:
-        raise PermissionError(
-            "deployment configuration and lifecycle APIs require a loopback-bound Portal"
-        )
-
-
-def _legacy_live_mutation(path: str, method: str) -> bool:
-    """Identify legacy live writes that must not bypass operator auth."""
+def _trading_mutation(path: str, method: str) -> bool:
+    """Identify Portal trading writes governed by operator-auth mode."""
 
     if method.upper() not in {"POST", "PATCH", "PUT", "DELETE"}:
         return False
-    if not path.startswith("/api/live/"):
+    if not (path.startswith("/api/live/") or path.startswith("/api/trading/")):
         return False
     # This POST endpoint is a read-only probe.
     return path != "/api/live/runtime/preflight"
+
+
+def _request_audit_details(request: Request, **extra: Any) -> dict[str, Any]:
+    client = request.client.host if request.client is not None else ""
+    return {
+        "path": request.url.path,
+        "method": request.method,
+        "client_address": str(client)[:255],
+        "origin": str(request.headers.get("origin") or "")[:512],
+        "user_agent": str(request.headers.get("user-agent") or "")[:512],
+        **extra,
+    }
 
 
 def _removed_strategy_route(path: str) -> bool:
@@ -528,17 +537,22 @@ def create_app(
     app = FastAPI(title="AlphaPilot Portal API")
     if engine is not None:
         app.state.engine = engine
-    configured_host = portal_host or os.getenv("ALPHAPILOT_PORTAL_BIND_HOST")
+    operator_auth = resolve_operator_auth()
+    app.state.operator_auth_required = bool(operator_auth["required"])
+    app.state.operator_auth_source = str(operator_auth["source"])
+    saved_portal_settings = load_file_portal_settings()
+    configured_host = (
+        portal_host
+        or os.getenv("ALPHAPILOT_PORTAL_BIND_HOST")
+        or saved_portal_settings["host"]
+    )
+    configured_port = (
+        int(portal_port)
+        if portal_port is not None
+        else int(saved_portal_settings["port"])
+    )
     app.state.portal_host = configured_host
-    app.state.portal_port = portal_port
-    selected_host = str(configured_host or "127.0.0.1")
-    if (
-        selected_host not in {"127.0.0.1", "localhost", "::1"}
-        and _truthy_env("ALPHAPILOT_AUTOMATED_LIVE_ENABLED")
-    ):
-        raise RuntimeError(
-            "automated LIVE requires the Portal to bind to a loopback address"
-        )
+    app.state.portal_port = configured_port
 
     app.add_middleware(
         CORSMiddleware,
@@ -559,18 +573,12 @@ def create_app(
         return await call_next(request)
 
     @app.middleware("http")
-    async def authenticate_legacy_live_writes(request: Request, call_next):  # noqa: ANN001
-        """Protect retained live APIs with the same local operator boundary.
+    async def authenticate_trading_writes(request: Request, call_next):  # noqa: ANN001
+        """Apply one operator-auth policy and transport audit to trading writes."""
 
-        The explicit ``/api/trading`` endpoints authenticate and audit inside
-        their handlers because they carry richer instance/account context.
-        Older ``/api/live`` writes are intentionally retained for UAT and
-        recovery, but must not remain an unauthenticated route around that
-        boundary.
-        """
-
-        if not _legacy_live_mutation(request.url.path, request.method):
+        if not _trading_mutation(request.url.path, request.method):
             return await call_next(request)
+        trading = _engine(app).get_system("trading")
         try:
             operator = _trading_operator(
                 app,
@@ -578,33 +586,69 @@ def create_app(
                 request.headers.get("authorization"),
                 reason=(
                     request.headers.get("x-operator-reason")
-                    or f"legacy live API {request.url.path}"
+                    or f"Portal trading API {request.url.path}"
                 ),
             )
-            trading = _engine(app).get_system("trading")
-            # Persist the request before allowing the mutation.  A second
-            # event records the HTTP outcome; if that write later fails, the
-            # immutable requested event still preserves the operator trail.
+            request.state.trading_operator = operator
             trading.operator_auth.audit(
                 operator,
-                action=f"legacy_live:{request.url.path}",
+                action=f"portal_write:{request.url.path}",
                 result="requested",
-                details={"method": request.method},
+                details=_request_audit_details(request),
             )
         except Exception as exc:  # noqa: BLE001 - fail closed at the API boundary
+            try:
+                from alphapilot.systems.trading.contracts import OperatorContext
+
+                trading.operator_auth.audit(
+                    OperatorContext(
+                        operator_id="portal-auth-rejected",
+                        request_id=request.headers.get("x-request-id") or uuid.uuid4().hex,
+                        reason=f"Portal trading API {request.url.path}",
+                        auth_source="portal-auth-rejected",
+                    ),
+                    action=f"portal_write:{request.url.path}",
+                    result="rejected",
+                    details=_request_audit_details(
+                        request,
+                        status_code=401,
+                        error=f"{type(exc).__name__}: {exc}",
+                    ),
+                )
+            except Exception:  # noqa: BLE001 - return the original auth failure
+                pass
             error = _api_error(exc)
             return JSONResponse(
                 status_code=error.status_code,
                 content={"detail": error.detail},
             )
 
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            try:
+                trading.operator_auth.audit(
+                    operator,
+                    action=f"portal_write:{request.url.path}",
+                    result="failed",
+                    details=_request_audit_details(
+                        request,
+                        status_code=500,
+                        error_type=type(exc).__name__,
+                    ),
+                )
+            except Exception:  # noqa: BLE001 - preserve the request failure
+                pass
+            raise
         try:
             trading.operator_auth.audit(
                 operator,
-                action=f"legacy_live:{request.url.path}",
+                action=f"portal_write:{request.url.path}",
                 result="ok" if response.status_code < 400 else "failed",
-                details={"method": request.method, "status_code": response.status_code},
+                details=_request_audit_details(
+                    request,
+                    status_code=response.status_code,
+                ),
             )
         except Exception:  # noqa: BLE001 - the pre-action audit is already durable
             pass
@@ -676,6 +720,44 @@ def create_app(
                 },
             }
         )
+
+    @app.get("/api/portal/security")
+    def get_portal_security(request: Request) -> dict[str, Any]:
+        pending = resolve_operator_auth()
+        current_required = bool(app.state.operator_auth_required)
+        bind_host = str(
+            getattr(app.state, "portal_host", None)
+            or "127.0.0.1"
+        )
+        bind_port = int(
+            getattr(app.state, "portal_port", None)
+            or request.url.port
+            or 19901
+        )
+        network_exposed = bind_host.strip().lower() not in {
+            "127.0.0.1", "localhost", "::1",
+        }
+        return _jsonable({
+            "operator_auth_required": current_required,
+            "operator_auth_mode": "required" if current_required else "optional",
+            "source": str(app.state.operator_auth_source),
+            "pending_required": bool(pending["required"]),
+            "pending_mode": str(pending["mode"]),
+            "pending_source": str(pending["source"]),
+            "restart_required": current_required != bool(pending["required"]),
+            "bind_host": bind_host,
+            "bind_port": bind_port,
+            "bind_address": f"{bind_host}:{bind_port}",
+            "network_exposed": network_exposed,
+            "automated_live_enabled": _truthy_env("ALPHAPILOT_AUTOMATED_LIVE_ENABLED"),
+            "cors_policy": "wildcard",
+            "warning": (
+                "Operator authentication is optional. Unauthenticated trading "
+                "writes are accepted from every reachable client and wildcard "
+                "CORS is enabled."
+                if not current_required else ""
+            ),
+        })
 
     @app.patch("/api/portal/settings")
     def update_portal_settings(payload: PortalSettingsUpdate, request: Request) -> dict[str, Any]:
@@ -1322,7 +1404,6 @@ def create_app(
     @app.get("/api/trading/deployments/{instance_id}")
     def trading_deployment(instance_id: str, request: Request) -> dict[str, Any]:
         try:
-            _require_local_portal_boundary(app)
             return _jsonable(public_account_state(
                 _engine(app).get_system("trading").deployment(instance_id)
             ))
@@ -1332,7 +1413,6 @@ def create_app(
     @app.get("/api/trading/deployments")
     def trading_deployments(request: Request) -> dict[str, Any]:
         try:
-            _require_local_portal_boundary(app)
             return _jsonable(public_account_state({
                 "deployments": _engine(app).get_system("trading").list_deployments()
             }))
@@ -1346,19 +1426,41 @@ def create_app(
         request: Request,
     ) -> dict[str, Any]:
         try:
-            _require_local_portal_boundary(app)
-            return _jsonable(public_account_state(
-                _engine(app).get_system("trading").configure_deployment(
-                    instance_id, _model_data(payload),
-                )
-            ))
+            data = _model_data(payload)
+            operator = _trading_operator(
+                app,
+                request,
+                request.headers.get("authorization"),
+                reason=str(data.get("reason") or "configure deployment"),
+            )
+            trading = _engine(app).get_system("trading")
+            result = trading.configure_deployment(instance_id, data)
+            configuration = result.get("configuration") or {}
+            instance = result.get("instance") or {}
+            trading.operator_auth.audit(
+                operator,
+                action="configure_deployment",
+                result="ok",
+                instance_id=instance_id,
+                config_hash=str(
+                    instance.get("config_hash")
+                    or configuration.get("config_hash")
+                    or ""
+                ),
+                broker=str(configuration.get("trade_provider") or ""),
+                details={
+                    "run_mode": configuration.get("run_mode"),
+                    "quote_provider": configuration.get("quote_provider"),
+                    "binding_hash": configuration.get("binding_hash"),
+                },
+            )
+            return _jsonable(public_account_state(result))
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
     @app.get("/api/trading/deployments/{instance_id}/diagnostics")
     def trading_deployment_diagnostics(instance_id: str, request: Request) -> dict[str, Any]:
         try:
-            _require_local_portal_boundary(app)
             return _jsonable(
                 _engine(app).get_system("trading").deployment_diagnostics(instance_id)
             )
@@ -1372,19 +1474,34 @@ def create_app(
         request: Request,
     ) -> dict[str, Any]:
         try:
-            _require_local_portal_boundary(app)
-            return _jsonable(
-                _engine(app).get_system("trading").compare_decisions(
-                    instance_id, _model_data(payload),
-                )
+            operator = _trading_operator(
+                app,
+                request,
+                request.headers.get("authorization"),
+                reason="create decision comparison",
             )
+            trading = _engine(app).get_system("trading")
+            result = trading.compare_decisions(instance_id, _model_data(payload))
+            current = trading.store.get_instance(instance_id)
+            trading.operator_auth.audit(
+                operator,
+                action="create_decision_comparison",
+                result="ok",
+                instance_id=instance_id,
+                config_hash=str(current["config_hash"]),
+                details={
+                    "comparison_id": result.get("comparison_id"),
+                    "left_mode": result.get("left_mode"),
+                    "right_mode": result.get("right_mode"),
+                },
+            )
+            return _jsonable(result)
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
     @app.get("/api/trading/deployments/{instance_id}/decision-comparisons")
     def trading_decision_comparisons(instance_id: str, request: Request) -> dict[str, Any]:
         try:
-            _require_local_portal_boundary(app)
             return _jsonable({
                 "comparisons": _engine(app).get_system(
                     "trading"
@@ -1396,7 +1513,6 @@ def create_app(
     @app.get("/api/trading/decision-comparisons/{comparison_id}")
     def trading_decision_comparison(comparison_id: str, request: Request) -> dict[str, Any]:
         try:
-            _require_local_portal_boundary(app)
             return _jsonable(
                 _engine(app).get_system("trading").get_decision_comparison(comparison_id)
             )
@@ -1406,9 +1522,34 @@ def create_app(
     def _deployment_command(
         instance_id: str,
         action: str,
+        operator: Any,
     ) -> dict[str, Any]:
         trading = _engine(app).get_system("trading")
         result = trading.lifecycle_action(instance_id, action)
+        instance = result.get("instance") or {}
+        runtime = result.get("runtime") or {}
+        configuration = result.get("configuration") or {}
+        trading.operator_auth.audit(
+            operator,
+            action=f"deployment_{action}",
+            result="ok" if result.get("ok", True) else "failed",
+            instance_id=instance_id,
+            config_hash=str(
+                instance.get("config_hash")
+                or configuration.get("config_hash")
+                or ""
+            ),
+            broker=str(
+                runtime.get("trade_provider")
+                or configuration.get("trade_provider")
+                or ""
+            ),
+            details={
+                "desired_state": runtime.get("desired_state"),
+                "observed_state": runtime.get("observed_state"),
+                "runtime_id": runtime.get("runtime_id"),
+            },
+        )
         return _jsonable(public_account_state(result))
 
     for _action in ("start", "pause", "reconcile", "resume", "stop"):
@@ -1419,8 +1560,13 @@ def create_app(
                 payload: dict[str, Any] | None = None,
             ) -> dict[str, Any]:
                 try:
-                    _require_local_portal_boundary(app)
-                    return _deployment_command(instance_id, action_name)
+                    operator = _trading_operator(
+                        app,
+                        request,
+                        request.headers.get("authorization"),
+                        reason=str((payload or {}).get("reason") or f"deployment {action_name}"),
+                    )
+                    return _deployment_command(instance_id, action_name, operator)
                 except Exception as exc:  # noqa: BLE001
                     raise _api_error(exc) from exc
             return endpoint
@@ -1435,7 +1581,6 @@ def create_app(
     @app.get("/api/trading/deployments/{instance_id}/status")
     def trading_deployment_status(instance_id: str, request: Request) -> dict[str, Any]:
         try:
-            _require_local_portal_boundary(app)
             return _jsonable(public_account_state(
                 _engine(app).get_system("trading").lifecycle_action(instance_id, "status")
             ))

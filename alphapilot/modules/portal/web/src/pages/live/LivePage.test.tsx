@@ -14,7 +14,13 @@ function renderLivePage() {
   );
 }
 
-function mockLiveFetch(options: { alive?: boolean; accountMetrics?: boolean; daemonMode?: "paper" | "live"; noStrategies?: boolean } = {}) {
+function mockLiveFetch(options: {
+  alive?: boolean;
+  accountMetrics?: boolean;
+  daemonMode?: "paper" | "live";
+  noStrategies?: boolean;
+  optionalAuth?: boolean;
+} = {}) {
   const alive = options.alive ?? true;
   const daemonState = {
     engine: {
@@ -69,6 +75,25 @@ function mockLiveFetch(options: { alive?: boolean; accountMetrics?: boolean; dae
   };
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
+    if (path === "/api/portal/security") {
+      const required = !options.optionalAuth;
+      return Response.json({
+        operator_auth_required: required,
+        operator_auth_mode: required ? "required" : "optional",
+        source: "settings",
+        pending_required: required,
+        pending_mode: required ? "required" : "optional",
+        pending_source: "settings",
+        restart_required: false,
+        bind_host: "0.0.0.0",
+        bind_port: 19901,
+        bind_address: "0.0.0.0:19901",
+        network_exposed: true,
+        automated_live_enabled: true,
+        cors_policy: "wildcard",
+        warning: required ? "" : "high risk",
+      });
+    }
     if (path === "/api/live/status") {
       return Response.json({
         config: {
@@ -395,6 +420,15 @@ afterEach(() => {
 });
 
 describe("LivePage", () => {
+  it("hides the token field and keeps a network-risk warning visible in optional mode", async () => {
+    mockLiveFetch({ optionalAuth: true });
+    renderLivePage();
+
+    expect(await screen.findByText(/Portal 操作员鉴权为 optional/)).toBeInTheDocument();
+    expect(screen.getByText(/0\.0\.0\.0:19901/)).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("apop_…")).not.toBeInTheDocument();
+  });
+
   it("defaults to Paper, renders one business tab at a time and opens an accessible diagnostics drawer", async () => {
     const fetchMock = mockLiveFetch();
     vi.spyOn(window, "confirm").mockReturnValue(true);

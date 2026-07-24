@@ -52,9 +52,10 @@ def _operator_headers(engine) -> dict[str, str]:  # noqa: ANN001
     return {"Authorization": f"Bearer {token}", "X-Request-ID": uuid4().hex}
 
 
-def test_tts_deployment_api_is_local_unauthenticated_and_provider_filtered(engine) -> None:
+def test_tts_deployment_api_requires_operator_and_filters_providers(engine) -> None:
     trading = engine.get_system("trading")
     client = TestClient(create_app(engine=engine))
+    headers = _operator_headers(engine)
     instance_id = f"tts-binding-{uuid4().hex}"
     trading.create_instance({
         "instance_id": instance_id,
@@ -85,6 +86,7 @@ def test_tts_deployment_api_is_local_unauthenticated_and_provider_filtered(engin
     updated = client.put(
         f"/api/trading/deployments/{instance_id}",
         json=payload,
+        headers=headers,
     )
     assert updated.status_code == 200
     configuration = updated.json()["configuration"]
@@ -95,6 +97,7 @@ def test_tts_deployment_api_is_local_unauthenticated_and_provider_filtered(engin
     assert client.put(
         f"/api/trading/deployments/{instance_id}",
         json={**payload, "account_profile": ""},
+        headers=headers,
     ).status_code == 400
 
     simulation_brokers = client.get(
@@ -150,6 +153,7 @@ def test_trading_definition_and_instance_api(engine) -> None:
 def test_deployment_configuration_requires_explicit_instance_validation(engine) -> None:
     trading = engine.get_system("trading")
     client = TestClient(create_app(engine=engine))
+    headers = _operator_headers(engine)
     instance_id = f"unvalidated-deployment-{uuid4().hex}"
     created = trading.create_instance({
         "instance_id": instance_id,
@@ -162,6 +166,7 @@ def test_deployment_configuration_requires_explicit_instance_validation(engine) 
 
     rejected = client.put(
         f"/api/trading/deployments/{instance_id}", json={"run_mode": "paper"},
+        headers=headers,
     )
     assert rejected.status_code == 400
     assert "must be validated" in rejected.json()["detail"]
@@ -214,10 +219,13 @@ def test_indirect_timing_job_and_module_dispatch_are_removed(engine) -> None:  #
 
 def test_broker_uat_http_surface_is_strictly_read_only(engine) -> None:
     client = TestClient(create_app(engine=engine))
+    headers = _operator_headers(engine)
     listed = client.get("/api/trading/broker-uat-runs")
     assert listed.status_code == 200
     assert isinstance(listed.json()["runs"], list)
-    assert client.post("/api/trading/broker-uat-runs", json={}).status_code == 405
+    assert client.post(
+        "/api/trading/broker-uat-runs", json={}, headers=headers,
+    ).status_code == 405
     operations = client.get("/openapi.json").json()["paths"][
         "/api/trading/broker-uat-runs"
     ]
@@ -254,6 +262,7 @@ def test_decision_comparison_is_local_diagnostic_and_old_gate_routes_are_absent(
     invalid = client.post(
         f"/api/trading/deployments/{instance_id}/decision-comparisons",
         json={"left_mode": "replay", "right_mode": "shadow"},
+        headers=headers,
     )
     assert invalid.status_code == 422
     validation_errors = invalid.json()["detail"]
@@ -265,7 +274,9 @@ def test_decision_comparison_is_local_diagnostic_and_old_gate_routes_are_absent(
         f"/api/trading/deployments/{instance_id}/qualification"
     ).status_code == 404
     assert client.post(
-        f"/api/trading/deployments/{instance_id}/parity-runs", json={}
+        f"/api/trading/deployments/{instance_id}/parity-runs",
+        json={},
+        headers=headers,
     ).status_code == 404
 
 
@@ -396,6 +407,7 @@ def test_formal_deployment_and_operator_routes_cover_success_and_validation(
     configured = client.put(
         f"/api/trading/deployments/{instance_id}",
         json={"run_mode": "paper"},
+        headers=headers,
     )
     assert configured.status_code == 200
     assert configured.json()["configuration"]["run_mode"] == "paper"
@@ -413,15 +425,19 @@ def test_formal_deployment_and_operator_routes_cover_success_and_validation(
     started = client.post(
         f"/api/trading/deployments/{instance_id}/start",
         json={},
+        headers=headers,
     )
     assert started.status_code == 200
     assert started.json()["observed_state"] == "start"
     assert client.post(
-        f"/api/trading/deployments/{instance_id}/promote", json={"to": "paper"}
+        f"/api/trading/deployments/{instance_id}/promote",
+        json={"to": "paper"},
+        headers=headers,
     ).status_code == 404
     assert client.post(
         f"/api/trading/deployments/{instance_id}/authorize-live",
         json={"account_id": "sim"},
+        headers=headers,
     ).status_code == 404
     assert client.get("/api/trading/audit-events?limit=7").json()["events"][0]["limit"] == 7
     assert client.post(
@@ -524,6 +540,7 @@ def test_trading_decision_comparison_and_read_only_uat_detail_routes(
         trading, "list_decision_comparisons", lambda _instance_id: [comparison],
     )
     client = TestClient(create_app(engine=engine))
+    headers = _operator_headers(engine)
 
     started = client.post(
         f"/api/trading/deployments/{instance_id}/decision-comparisons",
@@ -531,6 +548,7 @@ def test_trading_decision_comparison_and_read_only_uat_detail_routes(
             "left_mode": "replay", "left_run_id": "replay",
             "right_mode": "shadow", "right_run_id": "shadow",
         },
+        headers=headers,
     )
     assert started.status_code == 200
     assert client.get(
@@ -566,18 +584,27 @@ def test_new_read_only_trading_routes_convert_internal_failures_to_http_errors(
         monkeypatch.setattr(trading, method, original)
 
 
-def test_deployment_routes_require_a_loopback_portal_boundary(
+def test_deployment_routes_allow_network_bound_portal_with_normal_auth(
     engine, monkeypatch,
 ) -> None:
+    monkeypatch.setenv("ALPHAPILOT_AUTOMATED_LIVE_ENABLED", "true")
     client = TestClient(create_app(engine=engine, portal_host="0.0.0.0"))
-    assert client.get("/api/trading/deployments").status_code == 401
-    assert client.get(
+    assert client.get("/api/trading/deployments").status_code == 200
+    missing = client.get(
         "/api/trading/deployments/missing/diagnostics"
+    )
+    assert missing.status_code != 401
+    security = client.get("/api/portal/security").json()
+    assert security["bind_host"] == "0.0.0.0"
+    assert security["network_exposed"] is True
+    assert security["automated_live_enabled"] is True
+    assert client.put(
+        "/api/trading/deployments/missing", json={"run_mode": "paper"},
     ).status_code == 401
 
     monkeypatch.setenv("ALPHAPILOT_PORTAL_BIND_HOST", "0.0.0.0")
     reload_client = TestClient(create_app(engine=engine))
-    assert reload_client.get("/api/trading/deployments").status_code == 401
+    assert reload_client.get("/api/trading/deployments").status_code == 200
 
 
 def test_portal_startup_does_not_execute_removed_timing_job_importer(

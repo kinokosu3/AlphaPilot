@@ -1,4 +1,4 @@
-import { api, Factor, getOperatorToken, Job, JobProgress, qs, Schedule, setOperatorToken } from "./api";
+import { api, Factor, getOperatorToken, Job, JobProgress, qs, Schedule, setOperatorToken, type PortalSecurityStatus } from "./api";
 import { Alert, AsyncButton, DataTable, DynamicForm, HybridJsonEditor, InfoDot, JobsPanel, JsonTextArea, PageTitle, PanelHelp, ProgressBar, RefreshButton, Spinner, StatusPill, Tabs, Tooltip, useConfirm } from "./components";
 import { BacktestDetail, BacktestDetailData, LeaderboardPanel } from "./backtestDetail";
 import { useAsync, useJsonInput, useLatestRequest, useParamForm } from "./hooks";
@@ -435,6 +435,10 @@ export function BacktestPage() {
 
 export function TimingPage() {
   const { t } = useI18n();
+  const portalSecurity = useAsync(
+    () => api.get<PortalSecurityStatus>("/api/portal/security"),
+    [],
+  );
   const strategies = useAsync(async () => {
     const payload = await api.get<{ definitions: Array<Record<string, unknown>> }>("/api/trading/strategy-definitions");
     const rows = payload.definitions
@@ -490,6 +494,8 @@ export function TimingPage() {
   const [researchInstanceId, setResearchInstanceId] = useState("");
   const [researchAsset, setResearchAsset] = useState("");
   const [researchUniverse, setResearchUniverse] = useState("");
+  // If status cannot be loaded, keep showing the token field (fail closed).
+  const operatorAuthRequired = portalSecurity.data?.operator_auth_required !== false;
 
   const selectedStrategy = useMemo(() => {
     const name = String(form.values.strategy_name || "boll_mean_reversion");
@@ -659,14 +665,32 @@ export function TimingPage() {
   return (
     <>
       <PageTitle title={t("timing")} subtitle={t("timingSubtitle")} />
-      <section className="panel inset">
-        <label className="field"><span>操作员令牌（仅保存在当前页面会话内存）</span>
-          <input type="password" value={operatorToken} onChange={(event) => {
-            setOperatorTokenValue(event.target.value);
-            setOperatorToken(event.target.value);
-          }} placeholder="apop_…" autoComplete="off" />
-        </label>
-      </section>
+      {operatorAuthRequired ? (
+        <section className="panel inset">
+          <label className="field"><span>{t("timingOperatorTokenScope")}</span>
+            <input type="password" value={operatorToken} onChange={(event) => {
+              setOperatorTokenValue(event.target.value);
+              setOperatorToken(event.target.value);
+            }} placeholder="apop_…" autoComplete="off" />
+          </label>
+        </section>
+      ) : (
+        <Alert tone="error">
+          <strong>{t("portalOperatorAuthOptionalTitle")}</strong>
+          <br />
+          {t("portalOperatorAuthOptionalWarning")} {t("portalOperatorAuthBind")}: <code>{portalSecurity.data?.bind_address || portalSecurity.data?.bind_host || "—"}</code>.
+          {portalSecurity.data?.restart_required ? ` ${t("portalOperatorAuthRestartPending")}` : ""}
+          {operatorToken ? (
+            <div className="row-actions left">
+              <span>{t("portalOperatorAuthSuppliedToken")}</span>
+              <button type="button" className="button small" onClick={() => {
+                setOperatorTokenValue("");
+                setOperatorToken("");
+              }}>{t("portalOperatorAuthClearToken")}</button>
+            </div>
+          ) : null}
+        </Alert>
+      )}
       <div className="grid side">
         <section className="panel">
           <div className="panel-head compact">
@@ -2961,6 +2985,10 @@ export function AdvancedPage() {
   const { t } = useI18n();
   const confirm = useConfirm();
   const portalSettings = useAsync(() => api.get<PortalSettings>("/api/portal/settings"), []);
+  const portalSecurity = useAsync(
+    () => api.get<PortalSecurityStatus>("/api/portal/security"),
+    [],
+  );
   const envSettings = useAsync(() => api.get<PortalEnvSettings>("/api/portal/env"), []);
   const [portalHost, setPortalHost] = useState("127.0.0.1");
   const [portalPort, setPortalPort] = useState("19901");
@@ -3133,6 +3161,29 @@ export function AdvancedPage() {
           <Alert>{t("portalSettingsRestartRequired")}</Alert>
         ) : null}
         {restartMessage ? <Alert tone="success">{restartMessage}</Alert> : null}
+        <section className="panel inset" aria-label={t("portalSecurityTitle")}>
+          <div className="panel-head compact">
+            <div>
+              <h3>{t("portalSecurityTitle")}</h3>
+              <p className="muted no-margin">{t("portalSecurityReadOnly")}</p>
+            </div>
+          </div>
+          {portalSecurity.data?.operator_auth_required === false ? (
+            <Alert tone="error">
+              <strong>{t("portalOperatorAuthOptionalTitle")}</strong>
+              <br />
+              {t("portalOperatorAuthOptionalWarning")}
+            </Alert>
+          ) : null}
+          <div className="settings-summary">
+            <span>{t("portalSecurityMode")}: <strong>{portalSecurity.data?.operator_auth_mode || "required"}</strong></span>
+            <span>{t("portalSecuritySource")}: {portalSecurity.data?.source || t("portalSecurityFailClosed")}</span>
+            <span>{t("portalOperatorAuthBind")}: {portalSecurity.data?.bind_address || "—"}</span>
+            <span>{t("portalSecurityAutomatedLive")}: {portalSecurity.data?.automated_live_enabled ? t("liveYes") : t("liveNo")}</span>
+          </div>
+          {portalSecurity.data?.restart_required ? <Alert>{t("portalOperatorAuthRestartPending")}</Alert> : null}
+          <p className="muted no-margin">{t("portalSecurityCliHint")} <code>alphapilot portal_operator_auth</code></p>
+        </section>
         <div className="dynamic-form cols-2">
           <label>
             {t("bindHostLabel")}

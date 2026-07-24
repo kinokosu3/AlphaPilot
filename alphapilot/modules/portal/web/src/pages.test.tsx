@@ -125,9 +125,27 @@ function mockPortalFetch({
   return fetchMock;
 }
 
-function mockTimingFetch() {
+function mockTimingFetch(optionalAuth = false) {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
+    if (path === "/api/portal/security") {
+      return Response.json({
+        operator_auth_required: !optionalAuth,
+        operator_auth_mode: optionalAuth ? "optional" : "required",
+        source: "settings",
+        pending_required: !optionalAuth,
+        pending_mode: optionalAuth ? "optional" : "required",
+        pending_source: "settings",
+        restart_required: false,
+        bind_host: "0.0.0.0",
+        bind_port: 19901,
+        bind_address: "0.0.0.0:19901",
+        network_exposed: true,
+        automated_live_enabled: true,
+        cors_policy: "wildcard",
+        warning: optionalAuth ? "high risk" : "",
+      });
+    }
     if (path === "/api/trading/strategy-definitions") {
       return Response.json({
         definitions: [
@@ -349,6 +367,15 @@ describe("LibraryPage delete confirmations", () => {
 });
 
 describe("TimingPage", () => {
+  it("hides the token field and warns on optional operator authentication", async () => {
+    mockTimingFetch(true);
+    renderTimingPage();
+
+    expect(await screen.findByText(/Portal 操作员鉴权为 optional/)).toBeInTheDocument();
+    expect(screen.getByText(/0\.0\.0\.0:19901/)).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("apop_…")).not.toBeInTheDocument();
+  });
+
   it("previews signals and starts a timing backtest job", async () => {
     const fetchMock = mockTimingFetch();
     renderTimingPage();
