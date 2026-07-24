@@ -22,7 +22,7 @@ class AccountBoundaryGuard:
         *,
         universe: Sequence[str],
         expected_account_id: str = "",
-        baseline_positions: Mapping[str, float] | None = None,
+        expected_positions: Mapping[str, float] | None = None,
         allow_position_changes: bool = True,
     ) -> AccountBoundaryResult:
         issues: list[dict[str, object]] = []
@@ -51,20 +51,20 @@ class AccountBoundaryGuard:
                 "reason": "account contains activity not owned by this strategy instance",
                 "references": list(snapshot.external_orders),
             })
-        if baseline_positions is not None and not allow_position_changes:
+        if expected_positions is not None and not allow_position_changes:
             actual = {
                 canonical_instrument(key): float(value)
                 for key, value in snapshot.positions.items() if float(value)
             }
-            baseline = {
+            expected = {
                 canonical_instrument(key): float(value)
-                for key, value in baseline_positions.items() if float(value)
+                for key, value in expected_positions.items() if float(value)
             }
-            if actual != baseline:
+            if actual != expected:
                 issues.append({
-                    "rule": "baseline_positions",
-                    "reason": "account holdings changed outside the confirmed baseline",
-                    "expected": baseline,
+                    "rule": "position_reconciliation",
+                    "reason": "account holdings differ from the last execution target",
+                    "expected": expected,
                     "actual": actual,
                 })
         return AccountBoundaryResult(ok=not issues, issues=tuple(issues))

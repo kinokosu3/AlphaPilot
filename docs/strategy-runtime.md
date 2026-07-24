@@ -29,6 +29,7 @@ factory = "strategy:MyStrategy"
 required_history = 21
 supported_assets = ["equity", "fund"]
 supported_frequencies = ["day", "min"]
+supported_run_modes = ["paper", "simulation", "shadow", "live"]
 parameter_schema_json = '''
 {"type":"object","properties":{"window":{"type":"integer","minimum":2,"default":20}},"additionalProperties":false}
 '''
@@ -57,12 +58,13 @@ class MyStrategy:
 
 ## 生命周期与部署
 
-实例状态为 `CREATED → VALIDATED → WARMING_UP → READY`，运行时进入
-`RUNNING/PAUSED/HALTED/ERROR/STOPPED`。部署必须按 `REPLAY → PAPER → SHADOW → LIVE`
-逐级晋升，每一级都需要由运行流程写入通过证据。
+实例只保存配置和 `CREATED | VALIDATED` 校验状态。运行时状态
+`READY/RUNNING/PAUSED/HALTED/ERROR/STOPPED` 属于独立部署。REPLAY 是回测操作；验证后的实例
+可以直接 PUT 为 `paper | simulation | shadow | live`，模式切换统一要求 daemon 已停止。
 
-LIVE 授权绑定账户、Broker、实例 ID 和配置哈希。参数、模型、代码或标的池变化会使旧授权
-失效；同一个账户只允许一个 LIVE 目标写入者。重启后的 LIVE runner 固定进入
+LIVE 路由绑定账户、Provider、实例 ID、配置哈希、运行模式和 binding hash。参数、模型、因子、
+代码或标的池变化会让原部署标记 `stale`；重新验证并重新 PUT 前无法启动。同一个外部账户只
+允许一个目标写入者。重启后的 LIVE runner 固定进入
 `PAUSED_PENDING_RECONCILE`。对账成功只会转为 `PAUSED`，仍需操作员显式 `resume`；
 Broker 外部订单、账本缺失订单、活动订单或刷新失败都会保持阻断。
 
@@ -76,7 +78,7 @@ observed state，以及 runtime ID、runner heartbeat、最后命令、错误和
 自动子订单必须在发送前通过 `AutomatedRouteAuthorizer`，并同时匹配：
 
 - `instance_id`、`config_hash` 和稳定子订单引用；
-- `account_id`、Broker、deployment level 和 runtime ID；
+- `account_id`、Provider、run mode、binding hash 和 runtime ID；
 - desired/observed lifecycle 均为 `RUNNING`；
 - runner heartbeat 未过期且不需要恢复对账；
 - 实例、账户和全局 kill switch 均未启用。
@@ -98,34 +100,19 @@ observed state，以及 runtime ID、runner heartbeat、最后命令、错误和
 - `POST /api/trading/kill-switches/{global|account|instance}/{id}/engage`
 - `POST /api/trading/kill-switches/{global|account|instance}/{id}/release`
 
-## PAPER/SHADOW 证据、一致性与数据库迁移
+## 运行诊断、决策比较与数据库
 
-PAPER/SHADOW 启动时创建绑定当前 `config_hash` 的 stage run。runner 按真实会话日期记录交易日，
-并累计决策、执行计划、拒单、重复引用、仓位越界、未处理错误和恢复差异。停止后 stage run
-才会完成；PAPER 默认至少 20 个交易日，SHADOW 默认至少 5 个交易日。调用方声明的天数不会
-替代运行时实际记录的会话日期；同一配置多次重启或多段运行中的同一交易日只计一次。
+每次正式运行都保存当前 `config_hash`、run mode、binding hash、真实会话日期和异常计数。
+`GET /api/trading/deployments/{instance_id}/diagnostics` 返回这些中性诊断。任意两次 REPLAY 或
+部署运行可以通过 decision-comparison HTTP/CLI 比较输入、状态与输出哈希；`match`、`mismatch`
+和 `not_comparable` 都只写诊断，不改变部署权限。研究 campaign 可以读取诊断并执行自己的
+20/5/一致性/UAT 阈值。
 
-stage run 只能由 runtime 自动开始、记录和结束。0.2.0 已删除手工 start/finish/evaluate
-HTTP 与 CLI；调用方不能填写交易日数量或直接写入通过状态。底层 Store 方法只供
-DeploymentCoordinator、runtime 和内部恢复测试使用。
-
-正式只读接口为：
-
-- `GET /api/trading/deployments/{instance_id}/stage-runs`
-- `POST /api/trading/deployments/{instance_id}/parity-runs`
-- `GET /api/trading/parity-runs/{run_id}`
-- `GET /api/trading/deployments/{instance_id}/qualification`
-
-REPLAY、PAPER、SHADOW 和 LIVE-plan 保存带输入、状态和输出哈希的决策观测。SHADOW 每个计入
-交易日都必须与 REPLAY 比较为 `PASS`；`MISMATCH`、`NOT_COMPARABLE` 或缺失观测都不具备晋升
-资格。账户、原始报价和合约哈希一致时才继续比较目标股数和执行计划。
-
-策略运行 SQLite 当前使用顺序 schema migration（schema v8）和 WAL。v6 增加确定性历史、
-checkpoint/provenance、详细兼容调用、决策观测与 parity；v7 增加 Broker UAT、qualification 投影、
-旧 job 导入和多环境零调用证据；v8 增加 UAT v2 场景、核心代码/native SDK 指纹、累计请求/成交
-金额与逐次 Broker callback 状态。旧库先生成 SQLite 在线备份，再在一个 `BEGIN IMMEDIATE`
-事务内迁移；存在活动 runtime 时涉及配置重哈希的迁移会拒绝执行。迁移失败保留原数据库并
-阻止自动路由，不会删除或静默重建。LIVE 单账户单写者由部分唯一索引在数据库层保证。
+策略运行 SQLite 使用 schema v10 和 WAL。实例、部署配置、runtime、运行会话/事件、决策比较
+分别持久化；不存在 promotion event、stage evidence、qualification projection、LIVE approval
+或人工账户 baseline。v1-v9 文件在任何写入前被只读拒绝；升级时应配置新的
+`ALPHAPILOT_STRATEGY_RUNTIME_STORE` 路径，旧文件不会自动迁移或修改。外部账户单写者由部分
+唯一索引在数据库层保证。
 
 ## 选股与择时（各自已贯通，组合仅预留）
 
@@ -134,8 +121,8 @@ checkpoint/provenance、详细兼容调用、决策观测与 parity；v7 增加 
 `PortfolioInputs` 和 `PortfolioPolicy` Protocol。这一层没有 `live` 依赖，也没有预设相乘、
 过滤、再归一化或牛熊切换算法。
 
-规则择时实例与 `qlib_selection` 选股实例目前可以各自创建、预览、统一回放和按门禁晋升，
-但当前不会注册 composite 策略，也不能创建、回测或晋升组合实例；现有 `SignalRecord` 和
+规则择时实例与 `qlib_selection` 选股实例目前可以各自创建、预览、统一回放和独立部署，
+但当前不会注册 composite 策略，也不能创建、回测或部署组合实例；现有 `SignalRecord` 和
 `OrderIntent` 继续作为兼容契约。组合政策要等选股与择时算法研究完成后单独实现和验证。
 
 主要接口：
@@ -146,15 +133,18 @@ checkpoint/provenance、详细兼容调用、决策观测与 parity；v7 增加 
 - `POST /api/trading/strategy-instances/{id}/validate`
 - `POST /api/trading/strategy-instances/{id}/preview`
 - `POST /api/trading/strategy-instances/{id}/backtest-runs`
-- `GET /api/trading/deployments/{id}`
-- `POST /api/trading/deployments/{id}/promote`
+- `GET /api/trading/deployments`
+- `GET|PUT /api/trading/deployments/{id}`
+- `GET /api/trading/deployments/{id}/diagnostics`
+- `GET|POST /api/trading/deployments/{id}/decision-comparisons`
 - `POST /api/trading/deployments/{id}/{start|pause|reconcile|resume|stop}`
 - `GET /api/trading/deployments/{id}/status`
 
 0.2.0 已移除旧 `/api/timing/*`、`timing_*` CLI、公开 daemon strategy-name 控制和匿名 PAPER
 runner。调用方必须先创建并验证持久化实例，再通过正式 preview、异步 backtest 和 deployment
 接口运行；daemon 子进程只接受内部 `strategy_instance_id` 协议。正式实例禁止跨部署状态目录
-运行，LIVE 自动策略只接受已经晋升且通过 qualification 的 `instance_id`。
+运行，LIVE 自动策略只接受已验证、部署绑定新鲜且 runtime/账户/心跳/对账检查通过的
+`instance_id`。
 
 完整的多环境迁移、XTP/EMT UAT 和 0.2.0 删除门禁见
 [《0.2.0 策略链路迁移、券商 UAT 与旧入口删除手册》](strategy-trading-migration-0.2.md)。

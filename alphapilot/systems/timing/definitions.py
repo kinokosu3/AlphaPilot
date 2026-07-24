@@ -27,7 +27,7 @@ def strategy_definitions() -> list[StrategyDefinition]:
             api_version=1,
             provider_api_version=1,
             signal_kind=SignalKind.INSTRUMENT_TIMING,
-            deployable_modes=("replay", "paper", "shadow", "live"),
+            supported_run_modes=("paper", "simulation", "shadow", "live"),
         )
         for cls in _STRATEGY_CLASSES
     ]

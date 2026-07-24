@@ -1,4 +1,4 @@
-"""Local operator authentication, one-shot LIVE approvals and audit helpers."""
+"""Local operator authentication and audit helpers."""
 
 from __future__ import annotations
 
@@ -65,66 +65,6 @@ class OperatorAuthService:
             request_id=str(request_id or uuid.uuid4().hex),
             reason=str(reason),
             auth_source=f"local-token:{record['token_id']}",
-        )
-
-    def issue_live_approval(
-        self,
-        operator: OperatorContext,
-        *,
-        instance_id: str,
-        config_hash: str,
-        account_id: str,
-        broker: str,
-        reason: str,
-        ttl_seconds: int = 300,
-    ) -> dict[str, Any]:
-        ttl = int(ttl_seconds)
-        if ttl < 30 or ttl > 3600:
-            raise ValueError("LIVE approval ttl_seconds must be between 30 and 3600")
-        if not reason.strip():
-            raise ValueError("LIVE approval requires an operator reason")
-        approval_id = uuid.uuid4().hex
-        plaintext = f"apla_{approval_id[:16]}_{secrets.token_urlsafe(32)}"
-        record = self.store.create_live_approval(
-            approval_id,
-            _digest(plaintext),
-            operator_id=operator.operator_id,
-            instance_id=instance_id,
-            config_hash=config_hash,
-            account_id=account_id,
-            broker=broker,
-            reason=reason,
-            expires_at=_iso(_now() + timedelta(seconds=ttl)),
-        )
-        self.audit(
-            operator,
-            action="authorize_live",
-            result="issued",
-            instance_id=instance_id,
-            config_hash=config_hash,
-            account_id=account_id,
-            broker=broker,
-            details={"approval_id": approval_id, "expires_at": record["expires_at"]},
-        )
-        return {**record, "approval": plaintext}
-
-    def consume_live_approval(
-        self,
-        plaintext: str,
-        *,
-        instance_id: str,
-        config_hash: str,
-        account_id: str,
-        broker: str,
-    ) -> dict[str, Any]:
-        if not str(plaintext).startswith("apla_"):
-            raise ValueError("a one-time LIVE approval is required")
-        return self.store.consume_live_approval(
-            _digest(str(plaintext)),
-            instance_id=instance_id,
-            config_hash=config_hash,
-            account_id=account_id,
-            broker=broker,
         )
 
     def audit(

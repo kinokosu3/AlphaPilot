@@ -150,8 +150,8 @@ function mockTimingFetch() {
     }
     if (path === "/api/trading/strategy-instances") {
       return Response.json({ instances: [{
-        instance_id: "boll_demo", strategy_id: "boll_mean_reversion", lifecycle: "validated",
-        deployment_level: "replay", config_hash: "abc1234567890",
+        instance_id: "boll_demo", strategy_id: "boll_mean_reversion",
+        validation_state: "validated", config_hash: "abc1234567890",
       }] });
     }
     if (path === "/api/trading/strategy-instances/boll_demo/preview" && init?.method === "POST") {

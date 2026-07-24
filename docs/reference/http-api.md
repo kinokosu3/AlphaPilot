@@ -2,7 +2,7 @@
 
 > 本文件由 `scripts/generate_docs_reference.py` 从 FastAPI OpenAPI 生成，请勿手工编辑。
 
-当前共有 **136** 条路径、**152** 个操作。运行 Portal 后可访问 `/docs` 查看请求和响应 Schema。
+当前共有 **133** 条路径、**150** 个操作。运行 Portal 后可访问 `/docs` 查看请求和响应 Schema。
 
 Portal 默认只监听 `127.0.0.1`。下表中的“本机 Portal”不等于互联网级认证边界。
 
@@ -226,23 +226,21 @@ Portal 默认只监听 `127.0.0.1`。下表中的“本机 Portal”不等于互
 | `GET` | `/api/trading/broker-uat-runs` | Trading Broker Uat Runs | 本机 Portal |
 | `GET` | `/api/trading/broker-uat-runs/{run_id}` | Trading Broker Uat Run | 本机 Portal |
 | `GET` | `/api/trading/compatibility` | Trading Compatibility | 本机 Portal |
+| `GET` | `/api/trading/decision-comparisons/{comparison_id}` | Trading Decision Comparison | 本机 Portal |
+| `GET` | `/api/trading/deployments` | Trading Deployments | 本机 Portal |
 | `GET` | `/api/trading/deployments/{instance_id}` | Trading Deployment | 本机 Portal |
-| `POST` | `/api/trading/deployments/{instance_id}/authorize-live` | Trading Deployment Authorize Live | Operator Bearer |
-| `GET` | `/api/trading/deployments/{instance_id}/execution-binding` | Trading Execution Binding | 本机 Portal |
-| `PUT` | `/api/trading/deployments/{instance_id}/execution-binding` | Trading Execution Binding Update | Operator Bearer |
-| `POST` | `/api/trading/deployments/{instance_id}/parity-runs` | Trading Deployment Parity Run | Operator Bearer |
-| `POST` | `/api/trading/deployments/{instance_id}/pause` | Trading Deployment Pause | Operator Bearer |
-| `POST` | `/api/trading/deployments/{instance_id}/promote` | Trading Deployment Promote | Operator Bearer |
-| `GET` | `/api/trading/deployments/{instance_id}/qualification` | Trading Deployment Qualification | 本机 Portal |
-| `POST` | `/api/trading/deployments/{instance_id}/reconcile` | Trading Deployment Reconcile | Operator Bearer |
-| `POST` | `/api/trading/deployments/{instance_id}/resume` | Trading Deployment Resume | Operator Bearer |
-| `GET` | `/api/trading/deployments/{instance_id}/stage-runs` | Trading Deployment Stage Runs | 本机 Portal |
-| `POST` | `/api/trading/deployments/{instance_id}/start` | Trading Deployment Start | Operator Bearer |
+| `PUT` | `/api/trading/deployments/{instance_id}` | Trading Deployment Update | 本机 Portal |
+| `GET` | `/api/trading/deployments/{instance_id}/decision-comparisons` | Trading Decision Comparisons | 本机 Portal |
+| `POST` | `/api/trading/deployments/{instance_id}/decision-comparisons` | Trading Decision Comparison Create | 本机 Portal |
+| `GET` | `/api/trading/deployments/{instance_id}/diagnostics` | Trading Deployment Diagnostics | 本机 Portal |
+| `POST` | `/api/trading/deployments/{instance_id}/pause` | Trading Deployment Pause | 本机 Portal |
+| `POST` | `/api/trading/deployments/{instance_id}/reconcile` | Trading Deployment Reconcile | 本机 Portal |
+| `POST` | `/api/trading/deployments/{instance_id}/resume` | Trading Deployment Resume | 本机 Portal |
+| `POST` | `/api/trading/deployments/{instance_id}/start` | Trading Deployment Start | 本机 Portal |
 | `GET` | `/api/trading/deployments/{instance_id}/status` | Trading Deployment Status | 本机 Portal |
-| `POST` | `/api/trading/deployments/{instance_id}/stop` | Trading Deployment Stop | Operator Bearer |
+| `POST` | `/api/trading/deployments/{instance_id}/stop` | Trading Deployment Stop | 本机 Portal |
 | `GET` | `/api/trading/kill-switches` | Trading Kill Switches | 本机 Portal |
 | `POST` | `/api/trading/kill-switches/{scope_type}/{scope_id}/{action}` | Trading Kill Switch | Operator Bearer |
-| `GET` | `/api/trading/parity-runs/{run_id}` | Trading Parity Run | 本机 Portal |
 | `GET` | `/api/trading/portfolio-policy-definitions` | Trading Portfolio Policy Definitions | 本机 Portal |
 | `GET` | `/api/trading/strategy-definitions` | Trading Strategy Definitions | 本机 Portal |
 | `GET` | `/api/trading/strategy-instances` | Trading Strategy Instances | 本机 Portal |

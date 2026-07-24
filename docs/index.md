@@ -6,10 +6,10 @@
 flowchart LR
     D[行情与股票池] --> F[因子挖掘与因子库]
     F --> R[研究回测与策略资产]
-    R --> I[策略实例]
-    I --> P[REPLAY / PAPER / SHADOW]
-    P --> L[受控 LIVE]
-    L --> O[OMS / Risk / Broker]
+    R --> I[策略实例与校验]
+    I --> B[REPLAY 回测]
+    I --> P[独立部署 PAPER / SIMULATION / SHADOW / LIVE]
+    P --> O[OMS / Risk / Broker]
 ```
 
 ## 用户手册

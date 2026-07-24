@@ -13,7 +13,7 @@ from alphapilot.systems.live.config import LiveConfig, RunMode
 from alphapilot.systems.live.runtime import LiveRuntime, require_live_confirmation
 from alphapilot.systems.live.journal import InMemoryExecutionJournal
 from alphapilot.systems.live.targets import TargetPortfolio
-from alphapilot.systems.trading.domain import StrategyInstanceConfig
+from alphapilot.systems.trading.domain import DeploymentSpec, StrategyInstanceConfig
 from alphapilot.systems.trading.ports import RouteContext, RouteOrigin
 from alphapilot.systems.trading.store import StrategyRuntimeStore
 
@@ -324,15 +324,23 @@ def test_broker_uat_route_is_bound_to_durable_run_account_broker_and_limits(
         strategy_id="sma_filter",
         strategy_version="1.0.0",
         universe=("600000.SSE",),
-        deployment_level="live",
     )
     store.create_instance(writer)
+    store.set_validation_state(writer.instance_id, "validated")
+    store.configure_deployment(DeploymentSpec(
+        instance_id=writer.instance_id,
+        config_hash=writer.config_hash,
+        run_mode="live",
+        execution_environment="live",
+        trade_provider="xtp",
+        quote_provider="xtp",
+        account_id="uat-account",
+        quote_data_kind="realtime",
+    ))
     store.transition_runtime(
         writer.instance_id,
         lifecycle="running",
-        deployment_level="live",
         account_id="uat-account",
-        broker="xtp",
         desired_state="running",
         observed_state="running",
         binding_active=True,

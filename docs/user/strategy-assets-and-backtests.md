@@ -61,7 +61,7 @@ alphapilot qlib_yaml_validate --config=/tmp/qlib.yaml
 | 对象 | 因子文件或策略资产 | 不可变实例配置 |
 | 目的 | 模型和组合研究 | 验证部署同一决策/执行语义 |
 | 执行语义 | Qlib workflow | D 日决策、D+1 sizing、OMS/Risk/撮合 |
-| 部署证据 | 不产生 | 可形成 REPLAY 观察，但不能伪造 stage 日数 |
+| 运行诊断 | 不产生 | 可形成 REPLAY 决策观察；只用于诊断和比较，不改变部署权限 |
 
 `alphapilot backtest_viz` 是独立 Streamlit 回退工具，Portal 正常时无需使用。
 

@@ -20,7 +20,7 @@ import { fmtMoney } from "./utils";
 type Props = {
   open: boolean;
   onClose: () => void;
-  workspace: "live" | "simulation" | "paper";
+  workspace: "live" | "shadow" | "simulation" | "paper";
   runtimeBroker: string;
   setRuntimeBroker: Dispatch<SetStateAction<string>>;
   runtimeQuoteProvider: string;

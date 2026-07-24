@@ -202,7 +202,7 @@
       "minimum_history": 51
     },
     "paper_smoke_sessions": 5,
-    "future_live_requires_full_promotion": true
+    "future_live_requires_campaign_acceptance": true
   },
   "risk_policy": {
     "max_order_value": 10000,
@@ -223,7 +223,7 @@
     "max_median_implementation_shortfall_bp": 20,
     "max_p95_implementation_shortfall_bp": 50
   },
-  "promotion": {
+  "acceptance": {
     "minimum_sessions": {
       "paper": 20,
       "shadow": 5,

@@ -58,7 +58,10 @@ def test_first_party_component_and_cli_documentation_surface(isolated_env) -> No
         assert not hasattr(trading, "start_stage_run")
         assert not hasattr(trading, "finish_stage_run")
         assert not hasattr(trading, "evaluate_stage")
-        assert hasattr(trading.store, "start_stage_run")
+        assert not hasattr(trading.store, "start_stage_run")
+        assert hasattr(trading.store, "configure_deployment")
+        assert hasattr(trading.store, "runtime_diagnostics")
+        assert hasattr(trading.store, "create_decision_comparison")
     finally:
         engine.shutdown()
 
@@ -116,11 +119,18 @@ def test_catalog_covers_portal_routes_and_openapi(isolated_env) -> None:  # noqa
         for method in item
         if method in methods
     }
-    assert len(spec["paths"]) == 136
-    assert len(operations) == 152
+    assert len(spec["paths"]) == 133
+    assert len(operations) == 150
     assert not any(path.startswith("/api/timing/") for path in spec["paths"])
     assert not any(path.startswith("/api/live/daemon/strategy/") for path in spec["paths"])
-    assert not any("stage-runs" in path and method != "GET" for method, path in operations)
+    removed_fragments = {
+        "stage-runs", "parity-runs", "qualification", "authorize-live",
+        "execution-binding", "/promote",
+    }
+    assert not any(
+        any(fragment in path for fragment in removed_fragments)
+        for _method, path in operations
+    )
     reference = (DOCS / "reference/http-api.md").read_text(encoding="utf-8")
     for method, path in operations:
         assert f"`{method}`" in reference

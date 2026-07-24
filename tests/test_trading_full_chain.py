@@ -29,10 +29,13 @@ from alphapilot.systems.trading.contracts import (
 )
 from alphapilot.systems.trading.application import DecisionPipeline
 from alphapilot.systems.trading.data_adapters import SequenceCalendar
-from alphapilot.systems.trading.domain import StrategyDefinition, StrategyInstanceConfig
+from alphapilot.systems.trading.domain import (
+    DeploymentSpec,
+    StrategyDefinition,
+    StrategyInstanceConfig,
+)
 from alphapilot.systems.trading.execution import ExecutionCoordinator
 from alphapilot.systems.trading.planning import ExecutionPlanner
-from alphapilot.systems.trading.parity import DecisionParityService
 from alphapilot.systems.trading.portfolio import AccountSizer
 from alphapilot.systems.trading.policy_registry import PortfolioPolicyRegistry
 from alphapilot.systems.trading.registry import StrategyRegistry
@@ -1102,6 +1105,12 @@ def test_running_or_paused_instance_cannot_be_reconfigured(engine) -> None:
         "params": {"window": 2},
         "universe": ["SH600000"],
     })
+    trading.store.set_validation_state(created["instance_id"], "validated")
+    trading.store.configure_deployment(DeploymentSpec(
+        instance_id=created["instance_id"],
+        config_hash=created["config_hash"],
+        run_mode="paper",
+    ))
     trading.store.transition_runtime(
         created["instance_id"],
         lifecycle="running",
@@ -1110,7 +1119,7 @@ def test_running_or_paused_instance_cannot_be_reconfigured(engine) -> None:
         runtime_id="runtime-active",
     )
 
-    with pytest.raises(ValueError, match="formally stopped"):
+    with pytest.raises(ValueError, match="stop the strategy daemon"):
         trading.update_instance(created["instance_id"], {"params": {"window": 3}})
 
     trading.store.transition_runtime(
@@ -1119,7 +1128,7 @@ def test_running_or_paused_instance_cannot_be_reconfigured(engine) -> None:
         desired_state="paused",
         observed_state="paused",
     )
-    with pytest.raises(ValueError, match="formally stopped"):
+    with pytest.raises(ValueError, match="stop the strategy daemon"):
         trading.update_instance(created["instance_id"], {"params": {"window": 3}})
 
     trading.store.transition_runtime(
@@ -1127,12 +1136,14 @@ def test_running_or_paused_instance_cannot_be_reconfigured(engine) -> None:
         lifecycle="stopped",
         desired_state="stopped",
         observed_state="stopped",
+        runtime_id="",
         binding_active=False,
     )
     updated = trading.update_instance(
         created["instance_id"], {"params": {"window": 3}},
     )
-    assert updated["deployment_level"] == "replay"
+    assert updated["validation_state"] == "created"
+    assert trading.store.get_deployment_spec(created["instance_id"])["stale"] is True
     assert updated["config_hash"] != created["config_hash"]
 
 
@@ -1373,6 +1384,7 @@ def test_decision_pipeline_requires_complete_universe_warmup_and_latest_watermar
     pipeline.close("test_complete")
 
 
+@pytest.mark.skip(reason="schema v10 intentionally removed LIVE approvals and manual baselines")
 def test_live_approval_binds_confirmed_baseline_and_is_consumed_once(engine) -> None:
     trading = engine.get_system("trading")
     row = trading.create_instance({

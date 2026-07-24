@@ -35,7 +35,7 @@ class RouteContext:
     config_hash: str = ""
     account_id: str = ""
     broker: str = ""
-    deployment_level: str = ""
+    run_mode: str = ""
     runtime_id: str = ""
     execution_environment: str = ""
     trade_provider: str = ""

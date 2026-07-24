@@ -100,6 +100,21 @@ def _trading_operator(
     )
 
 
+def _require_local_portal_boundary(app: FastAPI) -> None:
+    """Keep unauthenticated deployment control on a loopback-bound Portal.
+
+    Deployment configuration and lifecycle operations deliberately do not use
+    operator bearer tokens.  Their security boundary is therefore the Portal
+    listener itself, not a caller-controlled Host header.
+    """
+
+    host = str(getattr(app.state, "portal_host", None) or "127.0.0.1").strip().lower()
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        raise PermissionError(
+            "deployment configuration and lifecycle APIs require a loopback-bound Portal"
+        )
+
+
 def _legacy_live_mutation(path: str, method: str) -> bool:
     """Identify legacy live writes that must not bypass operator auth."""
 
@@ -109,6 +124,32 @@ def _legacy_live_mutation(path: str, method: str) -> bool:
         return False
     # This POST endpoint is a read-only probe.
     return path != "/api/live/runtime/preflight"
+
+
+def _removed_strategy_route(path: str) -> bool:
+    """Reject removed strategy APIs before the SPA fallback can claim them."""
+
+    parts = path.strip("/").split("/")
+    if parts[:2] == ["api", "timing"]:
+        return True
+    if parts[:4] == ["api", "live", "daemon", "strategy"]:
+        return True
+    if parts[:3] == ["api", "trading", "stage-runs"]:
+        return True
+    if parts[:3] == ["api", "trading", "parity-runs"]:
+        return True
+    return (
+        parts[:3] == ["api", "trading", "deployments"]
+        and len(parts) >= 5
+        and parts[4] in {
+            "promote",
+            "authorize-live",
+            "qualification",
+            "parity-runs",
+            "execution-binding",
+            "stage-runs",
+        }
+    )
 
 
 def _count_unique_symbols(symbols_by_mode: Any) -> int:
@@ -395,6 +436,22 @@ class ModuleRun(BaseModel):
     kwargs: dict[str, Any] = Field(default_factory=dict)
 
 
+class TradingDeploymentUpdate(BaseModel):
+    run_mode: Literal["paper", "simulation", "shadow", "live"]
+    trade_provider: str = ""
+    quote_provider: str = ""
+    account_profile: str = ""
+    account_id: str = ""
+    reason: str | None = None
+
+
+class TradingDecisionComparisonCreate(BaseModel):
+    left_mode: Literal["replay", "paper", "simulation", "shadow", "live"]
+    left_run_id: str
+    right_mode: Literal["replay", "paper", "simulation", "shadow", "live"]
+    right_run_id: str
+
+
 # The generic Advanced-page dispatcher must never bypass the dedicated job,
 # filesystem, or live-trading API guards. CLI commands remain unchanged.
 PORTAL_MODULE_RUN_ALLOWLIST: dict[str, set[str]] = {
@@ -471,9 +528,10 @@ def create_app(
     app = FastAPI(title="AlphaPilot Portal API")
     if engine is not None:
         app.state.engine = engine
-    app.state.portal_host = portal_host
+    configured_host = portal_host or os.getenv("ALPHAPILOT_PORTAL_BIND_HOST")
+    app.state.portal_host = configured_host
     app.state.portal_port = portal_port
-    selected_host = str(portal_host or "127.0.0.1")
+    selected_host = str(configured_host or "127.0.0.1")
     if (
         selected_host not in {"127.0.0.1", "localhost", "::1"}
         and _truthy_env("ALPHAPILOT_AUTOMATED_LIVE_ENABLED")
@@ -493,7 +551,7 @@ def create_app(
     @app.middleware("http")
     async def reject_removed_strategy_entrypoints(request: Request, call_next):  # noqa: ANN001
         path = request.url.path
-        if path.startswith(("/api/timing/", "/api/live/daemon/strategy/")):
+        if _removed_strategy_route(path):
             return JSONResponse(
                 status_code=404,
                 content={"detail": "This compatibility entrypoint was removed in 0.2.0"},
@@ -1262,158 +1320,95 @@ def create_app(
             raise _api_error(exc) from exc
 
     @app.get("/api/trading/deployments/{instance_id}")
-    def trading_deployment(instance_id: str) -> dict[str, Any]:
+    def trading_deployment(instance_id: str, request: Request) -> dict[str, Any]:
         try:
+            _require_local_portal_boundary(app)
             return _jsonable(public_account_state(
                 _engine(app).get_system("trading").deployment(instance_id)
             ))
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
-    @app.get("/api/trading/deployments/{instance_id}/execution-binding")
-    def trading_execution_binding(instance_id: str) -> dict[str, Any]:
+    @app.get("/api/trading/deployments")
+    def trading_deployments(request: Request) -> dict[str, Any]:
         try:
-            return _jsonable(
-                _engine(app).get_system("trading").execution_binding(instance_id)
-            )
+            _require_local_portal_boundary(app)
+            return _jsonable(public_account_state({
+                "deployments": _engine(app).get_system("trading").list_deployments()
+            }))
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
-    @app.put("/api/trading/deployments/{instance_id}/execution-binding")
-    def trading_execution_binding_update(
+    @app.put("/api/trading/deployments/{instance_id}")
+    def trading_deployment_update(
         instance_id: str,
-        payload: dict[str, Any],
+        payload: TradingDeploymentUpdate,
         request: Request,
-        authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         try:
-            reason = str(payload.get("reason") or "").strip()
-            if not reason:
-                raise ValueError("execution binding changes require an operator reason")
-            operator = _trading_operator(app, request, authorization, reason=reason)
-            trading = _engine(app).get_system("trading")
-            result = trading.bind_execution(instance_id, payload)
-            current = trading.store.get_instance(instance_id)
-            trading.operator_auth.audit(
-                operator,
-                action="bind_execution",
-                result="ok",
-                instance_id=instance_id,
-                config_hash=current["config_hash"],
-                broker=result["trade_provider"],
-                details={
-                    "execution_environment": result["execution_environment"],
-                    "trade_provider": result["trade_provider"],
-                    "quote_provider": result["quote_provider"],
-                    "binding_hash": result["binding_hash"],
-                },
-            )
-            return _jsonable(result)
-        except Exception as exc:  # noqa: BLE001
-            raise _api_error(exc) from exc
-
-    @app.post("/api/trading/deployments/{instance_id}/promote")
-    def trading_deployment_promote(
-        instance_id: str,
-        payload: dict[str, Any],
-        request: Request,
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        try:
-            reason = str(payload.get("reason") or "").strip()
-            if not reason:
-                raise ValueError("deployment promotion requires an operator reason")
-            operator = _trading_operator(app, request, authorization, reason=reason)
-            trading = _engine(app).get_system("trading")
-            result = trading.promote(instance_id, payload)
-            trading.operator_auth.audit(
-                operator, action="promote_deployment", result="ok",
-                instance_id=instance_id, config_hash=result["config_hash"],
-                account_id=str(payload.get("account_id") or ""), broker=str(payload.get("broker") or ""),
-                details={"to": payload.get("to")},
-            )
-            return _jsonable(result)
-        except Exception as exc:  # noqa: BLE001
-            raise _api_error(exc) from exc
-
-    @app.post("/api/trading/deployments/{instance_id}/authorize-live")
-    def trading_deployment_authorize_live(
-        instance_id: str,
-        payload: dict[str, Any],
-        request: Request,
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        try:
-            operator = _trading_operator(app, request, authorization, reason=str(payload.get("reason") or ""))
+            _require_local_portal_boundary(app)
             return _jsonable(public_account_state(
-                _engine(app).get_system("trading").authorize_live(instance_id, payload, operator)
+                _engine(app).get_system("trading").configure_deployment(
+                    instance_id, _model_data(payload),
+                )
             ))
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
-    @app.post("/api/trading/deployments/{instance_id}/parity-runs")
-    def trading_deployment_parity_run(
+    @app.get("/api/trading/deployments/{instance_id}/diagnostics")
+    def trading_deployment_diagnostics(instance_id: str, request: Request) -> dict[str, Any]:
+        try:
+            _require_local_portal_boundary(app)
+            return _jsonable(
+                _engine(app).get_system("trading").deployment_diagnostics(instance_id)
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/trading/deployments/{instance_id}/decision-comparisons")
+    def trading_decision_comparison_create(
         instance_id: str,
-        payload: dict[str, Any],
+        payload: TradingDecisionComparisonCreate,
         request: Request,
-        authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         try:
-            operator = _trading_operator(
-                app,
-                request,
-                authorization,
-                reason=str(payload.get("reason") or "compare REPLAY and SHADOW decisions"),
+            _require_local_portal_boundary(app)
+            return _jsonable(
+                _engine(app).get_system("trading").compare_decisions(
+                    instance_id, _model_data(payload),
+                )
             )
-            trading = _engine(app).get_system("trading")
-            result = trading.start_parity_run(instance_id, payload)
-            current = trading.store.get_instance(instance_id)
-            trading.operator_auth.audit(
-                operator,
-                action="run_decision_parity",
-                result=result["status"],
-                instance_id=instance_id,
-                config_hash=current["config_hash"],
-                details={"parity_run_id": result["parity_run_id"]},
-            )
-            return _jsonable(result)
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
-    @app.get("/api/trading/parity-runs/{run_id}")
-    def trading_parity_run(run_id: str) -> dict[str, Any]:
+    @app.get("/api/trading/deployments/{instance_id}/decision-comparisons")
+    def trading_decision_comparisons(instance_id: str, request: Request) -> dict[str, Any]:
         try:
-            return _jsonable(_engine(app).get_system("trading").get_parity_run(run_id))
+            _require_local_portal_boundary(app)
+            return _jsonable({
+                "comparisons": _engine(app).get_system(
+                    "trading"
+                ).list_decision_comparisons(instance_id)
+            })
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
-    @app.get("/api/trading/deployments/{instance_id}/qualification")
-    def trading_deployment_qualification(instance_id: str) -> dict[str, Any]:
+    @app.get("/api/trading/decision-comparisons/{comparison_id}")
+    def trading_decision_comparison(comparison_id: str, request: Request) -> dict[str, Any]:
         try:
-            return _jsonable(_engine(app).get_system("trading").qualification(instance_id))
+            _require_local_portal_boundary(app)
+            return _jsonable(
+                _engine(app).get_system("trading").get_decision_comparison(comparison_id)
+            )
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
     def _deployment_command(
         instance_id: str,
         action: str,
-        payload: dict[str, Any],
-        request: Request,
-        authorization: str | None,
     ) -> dict[str, Any]:
-        reason = str(payload.get("reason") or "").strip()
-        if not reason:
-            raise ValueError(f"deployment {action} requires an operator reason")
-        operator = _trading_operator(app, request, authorization, reason=reason)
         trading = _engine(app).get_system("trading")
         result = trading.lifecycle_action(instance_id, action)
-        current = trading.store.get_instance(instance_id)
-        runtime = trading.store.get_runtime_state(instance_id)
-        trading.operator_auth.audit(
-            operator, action=f"deployment_{action}", result="ok" if result.get("ok", True) else "failed",
-            instance_id=instance_id, config_hash=current["config_hash"],
-            account_id=runtime["account_id"], broker=runtime["broker"], details=result,
-        )
         return _jsonable(public_account_state(result))
 
     for _action in ("start", "pause", "reconcile", "resume", "stop"):
@@ -1422,12 +1417,10 @@ def create_app(
                 instance_id: str,
                 request: Request,
                 payload: dict[str, Any] | None = None,
-                authorization: str | None = Header(default=None),
             ) -> dict[str, Any]:
                 try:
-                    return _deployment_command(
-                        instance_id, action_name, payload or {}, request, authorization,
-                    )
+                    _require_local_portal_boundary(app)
+                    return _deployment_command(instance_id, action_name)
                 except Exception as exc:  # noqa: BLE001
                     raise _api_error(exc) from exc
             return endpoint
@@ -1440,20 +1433,12 @@ def create_app(
         )
 
     @app.get("/api/trading/deployments/{instance_id}/status")
-    def trading_deployment_status(instance_id: str) -> dict[str, Any]:
+    def trading_deployment_status(instance_id: str, request: Request) -> dict[str, Any]:
         try:
+            _require_local_portal_boundary(app)
             return _jsonable(public_account_state(
                 _engine(app).get_system("trading").lifecycle_action(instance_id, "status")
             ))
-        except Exception as exc:  # noqa: BLE001
-            raise _api_error(exc) from exc
-
-    @app.get("/api/trading/deployments/{instance_id}/stage-runs")
-    def trading_deployment_stage_runs(instance_id: str) -> dict[str, Any]:
-        try:
-            return _jsonable({
-                "stage_runs": _engine(app).get_system("trading").store.list_stage_runs(instance_id)
-            })
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
@@ -2600,7 +2585,9 @@ def create_app(
         # The SPA fallback is an implementation detail, not a public API. Keep
         # OpenAPI stable whether the optional frontend build output is present.
         @app.get("/{full_path:path}", include_in_schema=False)
-        def spa(full_path: str) -> FileResponse:  # noqa: ARG001
+        def spa(full_path: str) -> FileResponse:
+            if full_path.startswith("api/"):
+                raise HTTPException(status_code=404, detail="API endpoint not found")
             index_path = static_path / "index.html"
             if not index_path.exists():
                 raise HTTPException(status_code=404, detail="Portal frontend build not found")

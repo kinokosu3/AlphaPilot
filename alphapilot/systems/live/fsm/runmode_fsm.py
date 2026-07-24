@@ -1,10 +1,9 @@
-"""Run-mode FSM + global kill-switch.
+"""Run-mode state + global kill-switch.
 
 Two orthogonal pieces of safety state:
 
-* **mode ladder** ``DRY_RUN <-> PAPER <-> SIMULATION/SHADOW <-> LIVE`` — you cannot jump
-  straight from ``DRY_RUN`` to ``LIVE``; this is enforced so a
-  fat-fingered mode change can't put real money at risk in one step.
+* **mode** — low-level runtimes may select any mode directly. Formal strategy
+  deployment changes are guarded separately by stop + PUT deployment.
 * **halted** — the kill-switch. Any component may ``halt(reason)``; while halted,
   :meth:`can_submit_orders` is ``False`` regardless of mode. ``resume`` clears it.
 
@@ -16,18 +15,14 @@ from __future__ import annotations
 from alphapilot.systems.live.config import RunMode, allows_order_routing
 from alphapilot.systems.live.fsm.base import check_transition
 
-# Adjacent modes on the ladder (self included for idempotence).
-ALLOWED: dict[str, set[str]] = {
-    RunMode.DRY_RUN: {RunMode.DRY_RUN, RunMode.PAPER},
-    # PAPER <-> LIVE remains accepted for the legacy operational mode switch.
-    # Deployment promotion is separately gated REPLAY -> PAPER -> SHADOW -> LIVE.
-    RunMode.PAPER: {
-        RunMode.PAPER, RunMode.DRY_RUN, RunMode.SIMULATION, RunMode.SHADOW, RunMode.LIVE,
-    },
-    RunMode.SIMULATION: {RunMode.SIMULATION, RunMode.PAPER, RunMode.SHADOW},
-    RunMode.SHADOW: {RunMode.SHADOW, RunMode.PAPER, RunMode.SIMULATION, RunMode.LIVE},
-    RunMode.LIVE: {RunMode.LIVE, RunMode.SHADOW, RunMode.PAPER},
+_MODES = {
+    RunMode.DRY_RUN,
+    RunMode.PAPER,
+    RunMode.SIMULATION,
+    RunMode.SHADOW,
+    RunMode.LIVE,
 }
+ALLOWED: dict[str, set[str]] = {mode: set(_MODES) for mode in _MODES}
 
 
 class RunModeMachine:

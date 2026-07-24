@@ -137,13 +137,14 @@ def test_connection_rejects_skipping_states() -> None:
 # --------------------------------------------------------------------------- #
 # runmode_fsm
 # --------------------------------------------------------------------------- #
-def test_runmode_ladder_and_direct_live_rejected() -> None:
+def test_runmode_can_switch_directly_between_all_low_level_modes() -> None:
     m = RunModeMachine(RunMode.DRY_RUN)
-    with pytest.raises(IllegalTransition):
-        m.set_mode(RunMode.LIVE)             # must pass through PAPER
-    m.set_mode(RunMode.PAPER)
     m.set_mode(RunMode.LIVE)
     assert m.mode == RunMode.LIVE
+    m.set_mode(RunMode.SIMULATION)
+    m.set_mode(RunMode.SHADOW)
+    m.set_mode(RunMode.PAPER)
+    assert m.mode == RunMode.PAPER
 
 
 def test_runmode_killswitch_blocks_submission() -> None:

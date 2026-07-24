@@ -44,14 +44,14 @@ alphapilot portal --host=127.0.0.1 --port=19901
 
 ## 操作员令牌
 
-`/api/trading` 写操作需要操作员 Bearer token。先在本机 CLI 生成，明文只显示一次：
+策略实例写操作、Kill Switch、Broker UAT 和低层手工交易需要操作员 Bearer token。部署配置与生命周期 HTTP 接口不需要 token 或必填原因，但只在 Portal 绑定 loopback 地址时开放。先在本机 CLI 生成 token，明文只显示一次：
 
 ```bash
 alphapilot trading_operator_token \
   --operator_id=alice --label=portal --expires_in_days=1
 ```
 
-在“策略实例”或“模拟与实盘”页输入 token。前端只保存在当前内存会话，不写入 `localStorage`；刷新页面后需要重新输入。
+在“策略实例”或“模拟与实盘”页输入 token。它不会赋予或改变部署模式，也不能替代 LIVE 环境开关、账户绑定、对账、心跳、Kill Switch 或 RiskGate。
 
 ## 后台任务
 

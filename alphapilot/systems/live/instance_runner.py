@@ -145,10 +145,13 @@ class StrategyInstanceRunner:
             max_order_equity_pct=self.engine.config.risk.max_order_equity_pct,
         )
         runtime_state = self.store.get_runtime_state(instance.instance_id)
+        deployment = self.store.get_deployment_spec(instance.instance_id)
+        if deployment.get("stale"):
+            raise ValueError("deployment is stale; configure it for the current instance")
         automated_router = runtime.automated_order_router(
             instance_id=instance.instance_id,
             config_hash=instance.config_hash,
-            deployment_level=instance.deployment_level,
+            run_mode=deployment["run_mode"],
             execution_environment=str(runtime_state.get("execution_environment") or ""),
             trade_provider=str(runtime_state.get("trade_provider") or ""),
             quote_provider=str(runtime_state.get("quote_provider") or ""),
@@ -162,10 +165,7 @@ class StrategyInstanceRunner:
         }
         can_route = (
             mode == "paper"
-            or (
-                mode == "simulation"
-                and runtime_state.get("quote_data_kind") == "realtime"
-            )
+            or mode == "simulation"
             or (mode == "live" and live_enabled)
         )
         self.execution = ExecutionCoordinator(
@@ -181,9 +181,9 @@ class StrategyInstanceRunner:
         self.history: deque[CompletedBar] = deque(maxlen=20_000)
         self._pending_session: dict[str, CompletedBar] = {}
         self._started = False
-        self._paused = mode in {"simulation", "live"}
+        self._paused = mode in {"simulation", "shadow", "live"}
         self._stopped = False
-        self._reconcile_required = mode in {"simulation", "live"}
+        self._reconcile_required = mode in {"simulation", "shadow", "live"}
         self._last_error: dict[str, Any] = {}
         self._last_decision_id = ""
         self._last_execution_plan = ""
@@ -263,35 +263,19 @@ class StrategyInstanceRunner:
         snapshot = self.account_port.account_snapshot()
         runtime_state = self.store.get_runtime_state(self.instance.instance_id)
         expected_positions: dict[str, float] | None = None
-        baseline = (
-            self.store.get_account_baseline(
-                self.instance.instance_id, self.instance.config_hash,
-            )
-            if self.mode == "live" else None
-        )
         latest_target = self.store.latest_execution_target(
             self.instance.instance_id, self.instance.config_hash,
         )
-        target_is_newer = latest_target is not None and (
-            baseline is None
-            or str(latest_target.get("_execution_updated_at") or "")
-            > str(baseline.get("confirmed_at") or "")
-        )
-        if target_is_newer and latest_target is not None:
+        if latest_target is not None:
             expected_positions = {
                 str(key): float(value)
                 for key, value in (latest_target.get("holdings") or {}).items()
             }
-        elif self.mode == "live":
-            if baseline is None:
-                warnings.append({"rule": "missing_account_baseline"})
-            else:
-                expected_positions = dict(baseline["positions"])
         boundary = AccountBoundaryGuard().validate(
             snapshot,
             universe=self.instance.universe,
             expected_account_id=runtime_state["account_id"],
-            baseline_positions=expected_positions,
+            expected_positions=expected_positions,
             allow_position_changes=expected_positions is None,
         )
         warnings.extend(boundary.issues)
@@ -376,7 +360,7 @@ class StrategyInstanceRunner:
             decision = PortfolioDecision.from_dict(row["decision"])
             if decision.valid_until and _timestamp_after(observed_at, decision.valid_until):
                 self.store.update_decision_status(decision.decision_id, "expired")
-                self._stage_event(
+                self._runtime_event(
                     "expired_targets",
                     details={
                         "decision_id": decision.decision_id,
@@ -413,7 +397,7 @@ class StrategyInstanceRunner:
                 advanced = self.execution.advance(state["plan_id"])
                 if advanced["phase"] == "paused":
                     self.store.update_decision_status(advanced["decision_id"], "blocked")
-                    self._stage_event("unresolved_errors", details=advanced["last_error"])
+                    self._runtime_event("unresolved_errors", details=advanced["last_error"])
                     self._halt(
                         "execution plan paused and requires reconciliation: "
                         f"{advanced['plan_id']}"
@@ -589,10 +573,10 @@ class StrategyInstanceRunner:
         self._pending_session.clear()
         try:
             snapshot = self.account_port.account_snapshot()
-            active_stage = (
-                self.store.get_active_stage_run(
+            active_run = (
+                self.store.get_active_runtime_run(
                     self.instance.instance_id,
-                    stage="paper" if self.mode == "simulation" else self.mode,
+                    run_mode=self.mode,
                 )
                 if self.mode in {"paper", "simulation", "shadow", "live"}
                 else None
@@ -602,23 +586,19 @@ class StrategyInstanceRunner:
                 tuple(self.history),
                 account=snapshot,
                 persist=True,
-                mode=(
-                    "live_plan" if self.mode == "live"
-                    else "paper" if self.mode == "simulation"
-                    else self.mode
-                ),
+                mode=self.mode,
                 run_id=(
-                    str(active_stage["run_id"])
-                    if active_stage is not None
+                    str(active_run["run_id"])
+                    if active_run is not None
                     else str(self.runtime.runtime_id)
                 ),
             )
             self._last_decision_id = result.decision.decision_id
             if self.mode in {"paper", "simulation", "shadow", "live"}:
-                self.store.record_stage_session(
+                self.store.record_runtime_session(
                     self.instance.instance_id,
                     config_hash=self.instance.config_hash,
-                    stage="paper" if self.mode == "simulation" else self.mode,
+                    run_mode=self.mode,
                     session=result.decision.as_of[:10],
                 )
         except WarmupRequired:
@@ -642,23 +622,16 @@ class StrategyInstanceRunner:
                     str(key): float(value)
                     for key, value in (latest_target.get("holdings") or {}).items()
                 }
-            else:
-                baseline = self.store.get_account_baseline(
-                    self.instance.instance_id,
-                    self.instance.config_hash,
-                )
-                if baseline is not None:
-                    expected_positions = dict(baseline["positions"])
         boundary = AccountBoundaryGuard().validate(
             snapshot,
             universe=self.instance.universe,
             expected_account_id=self.store.get_runtime_state(self.instance.instance_id)["account_id"],
-            baseline_positions=expected_positions,
+            expected_positions=expected_positions,
             allow_position_changes=expected_positions is None,
         )
         if not boundary.ok:
             self._reconcile_required = True
-            self._stage_event("reconciliation_warnings", details=list(boundary.issues))
+            self._runtime_event("reconciliation_warnings", details=list(boundary.issues))
             self._halt(str(list(boundary.issues)))
             return
         target = self.pipeline.size(
@@ -676,7 +649,7 @@ class StrategyInstanceRunner:
             ),
         )
         plan = self.planner.plan(target, snapshot, quotes=quotes, instruments=metadata)
-        observation_mode = "live_plan" if self.mode == "live" else self.mode
+        observation_mode = self.mode
         observations = [
             item for item in self.store.list_decision_observations(
                 self.instance.instance_id,
@@ -723,7 +696,7 @@ class StrategyInstanceRunner:
         self._reconcile_required = True
         self._last_error = {"reason": reason}
         self.engine.halt(reason)
-        self._stage_event("unresolved_errors", details=self._last_error)
+        self._runtime_event("unresolved_errors", details=self._last_error)
         self.store.transition_runtime(
             self.instance.instance_id,
             lifecycle=LifecycleState.ERROR.value,
@@ -752,13 +725,11 @@ class StrategyInstanceRunner:
             self._last_error = {"reason": reason}
             self.engine.halt(reason)
 
-    def _stage_event(self, event_type: str, *, details: Any = None) -> None:
-        if self.mode not in {"paper", "shadow"}:
-            return
-        self.store.record_stage_event(
+    def _runtime_event(self, event_type: str, *, details: Any = None) -> None:
+        self.store.record_runtime_event(
             self.instance.instance_id,
             config_hash=self.instance.config_hash,
-            stage=self.mode,
+            run_mode=self.mode,
             event_type=event_type,
             details=details,
         )

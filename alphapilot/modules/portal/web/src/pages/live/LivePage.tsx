@@ -7,6 +7,7 @@ import { useAction } from "../../toast";
 import { LiveActivityTabs } from "./LiveActivityTabs";
 import { LiveDiagnosticsDrawer } from "./LiveDiagnosticsDrawer";
 import { LiveOrderCard } from "./LiveOrderCard";
+import { LiveProviderCard } from "./LiveProviderCard";
 import { LiveStatusBar } from "./LiveStatusBar";
 import { LiveStrategyCard } from "./LiveStrategyCard";
 import type {
@@ -25,40 +26,41 @@ import type {
   LiveStatus,
 } from "./types";
 
-type Workspace = "live" | "simulation" | "paper";
+type Workspace = "live" | "shadow" | "simulation" | "paper";
 type SimulationMode = "paper" | "dry_run";
 type Ticket = "order" | "target";
 
 type DeploymentPackage = {
-  instance?: { instance_id?: string; lifecycle?: string; deployment_level?: string; config_hash?: string };
+  instance?: { instance_id?: string; validation_state?: string; config_hash?: string };
+  configuration?: DeploymentSpec;
   runtime?: {
-    desired_state?: string; observed_state?: string; account_id_hash?: string; broker?: string;
+    desired_state?: string; observed_state?: string; account_id_hash?: string; run_mode?: string;
     runtime_id?: string; runner_heartbeat_at?: string; reconcile_required?: boolean; last_error?: Record<string, unknown>;
     execution_environment?: string; trade_provider?: string; quote_provider?: string;
     quote_data_kind?: string; binding_hash?: string; reconciled?: boolean;
   };
-  execution_binding?: ExecutionBinding;
-  stage_runs?: Array<{
-    run_id: string; stage: string; status: string; trading_sessions: number;
+  runs?: Array<{
+    run_id: string; run_mode: string; status: string; trading_sessions: number;
     config_hash: string; metrics?: Record<string, unknown>;
   }>;
   route_blocks?: Array<{ scope_type: string; scope_id: string; active: boolean; reason?: string }>;
 };
 
-type ExecutionBinding = {
+type DeploymentSpec = {
   instance_id: string; execution_environment: "local_paper" | "broker_simulation" | "live";
+  config_hash: string; run_mode: Workspace;
   trade_provider: string; quote_provider: string; account_profile: string;
+  account_id_hash?: string;
   quote_data_kind: "realtime" | "replay" | "synthetic"; binding_hash: string; version: number;
+  stale?: boolean;
 };
 
-type QualificationPackage = {
-  eligible_for_live_authorization: boolean;
-  paper?: { passed: boolean; trading_sessions: number; minimum_sessions: number };
-  shadow?: { passed: boolean; trading_sessions: number; minimum_sessions: number };
-  parity?: { passed: boolean; passed_sessions: string[]; missing_sessions: string[] };
-  broker_uat?: { required: boolean; passed: boolean; broker: string; expires_at?: string };
-  reconcile?: { passed: boolean };
-  configuration?: { passed: boolean; config_hash?: string };
+type RuntimeDiagnostics = {
+  config_hash?: string;
+  modes?: Record<string, {
+    run_count?: number; completed_runs?: number; trading_sessions?: number;
+    failures?: Record<string, number>;
+  }>;
 };
 
 type BrokerUATRun = {
@@ -72,7 +74,7 @@ const WORKSPACE_STORAGE_KEY = "portal_live_workspace";
 function initialWorkspace(): Workspace {
   try {
     const stored = window.localStorage.getItem(WORKSPACE_STORAGE_KEY);
-    return stored === "live" || stored === "simulation" ? stored : "paper";
+    return stored === "live" || stored === "shadow" || stored === "simulation" ? stored : "paper";
   } catch {
     return "paper";
   }
@@ -100,7 +102,7 @@ export function LivePage() {
   const quoteProviderCatalog = useAsync(() => api.get<LiveQuoteProviderSpec[]>("/api/live/quote-providers"), []);
   const pluginDiagnostics = useAsync(() => api.get<LivePluginDiagnostics>("/api/live/plugins"), []);
   const strategyInstances = useAsync(
-    () => api.get<{ instances: Array<{ instance_id: string; deployment_level: string; lifecycle: string; config?: { frequency?: string; universe?: string[] } }> }>("/api/trading/strategy-instances"),
+    () => api.get<{ instances: Array<{ instance_id: string; validation_state: string; config?: { frequency?: string; universe?: string[] } }> }>("/api/trading/strategy-instances"),
     [],
   );
 
@@ -112,7 +114,7 @@ export function LivePage() {
   const [preflight, setPreflight] = useState<LivePreflight | null>(null);
   const [preflightNetwork, setPreflightNetwork] = useState(false);
 
-  const runtimeMode = workspace === "live" ? "live" : workspace === "simulation" ? "simulation" : simulationMode;
+  const runtimeMode = workspace === "paper" ? simulationMode : workspace;
   const selectedRuntimeBroker = workspace === "paper" ? "paper" : runtimeBroker.trim();
   const selectedRuntimeQuoteProvider = workspace === "paper" ? "paper" : (runtimeQuoteProvider.trim() || selectedRuntimeBroker);
   const liveBrokerOptions = useMemo(
@@ -125,7 +127,7 @@ export function LivePage() {
   );
   const quoteProviderOptions = useMemo(
     () => (quoteProviderCatalog.data || []).filter((item) => (
-      workspace === "live" ? (item.data_kind || "realtime") === "realtime"
+      workspace === "live" || workspace === "shadow" ? (item.data_kind || "realtime") === "realtime"
       : workspace === "simulation" ? ["realtime", "replay"].includes(item.data_kind || "")
       : item.name === "paper"
     )),
@@ -135,7 +137,9 @@ export function LivePage() {
   const selectedQuoteProviderSpec = quoteProviderOptions.find((item) => item.name === selectedRuntimeQuoteProvider);
   const catalogsResolved = !brokerCatalog.loading && !quoteProviderCatalog.loading && Boolean(brokerCatalog.data && quoteProviderCatalog.data);
   const providerReady = workspace === "paper" || (catalogsResolved && Boolean(selectedBrokerSpec && selectedQuoteProviderSpec));
-  const observeOnlyQuotes = workspace === "simulation" && selectedQuoteProviderSpec?.data_kind !== "realtime";
+  const observeOnlyQuotes = workspace === "shadow" || (
+    workspace === "simulation" && selectedQuoteProviderSpec?.data_kind !== "realtime"
+  );
   const query = useMemo(() => ({
     mode: runtimeMode,
     broker: selectedRuntimeBroker,
@@ -179,17 +183,13 @@ export function LivePage() {
       : Promise.resolve({} as DeploymentPackage),
     [daemonTimingStrategy],
   );
-  const executionBinding = useAsync(
-    () => daemonTimingStrategy.trim()
-      ? api.get<ExecutionBinding>(`/api/trading/deployments/${daemonTimingStrategy.trim()}/execution-binding`)
-      : Promise.resolve(null as unknown as ExecutionBinding),
-    [daemonTimingStrategy],
-  );
   const [accountProfile, setAccountProfile] = useState("");
-  const deploymentQualification = useAsync(
+  const [deploymentAccountId, setDeploymentAccountId] = useState("");
+  const [deploymentReason, setDeploymentReason] = useState("");
+  const deploymentDiagnostics = useAsync(
     () => daemonTimingStrategy.trim()
-      ? api.get<QualificationPackage>(`/api/trading/deployments/${daemonTimingStrategy.trim()}/qualification`)
-      : Promise.resolve({ eligible_for_live_authorization: false } as QualificationPackage),
+      ? api.get<RuntimeDiagnostics>(`/api/trading/deployments/${daemonTimingStrategy.trim()}/diagnostics`)
+      : Promise.resolve({} as RuntimeDiagnostics),
     [daemonTimingStrategy],
   );
   const brokerUatRuns = useAsync(
@@ -222,7 +222,7 @@ export function LivePage() {
     if (!catalogsResolved || workspace === "paper") return;
     if (liveBrokerOptions.some((item) => item.name === runtimeBroker.trim())) return;
     const configured = (cfg?.trade_broker || cfg?.broker || "").trim();
-    const eligibleConfigured = workspace === "live" && configured && configured !== "paper" ? liveBrokerOptions.find((item) => item.name === configured) : undefined;
+    const eligibleConfigured = ["live", "shadow"].includes(workspace) && configured && configured !== "paper" ? liveBrokerOptions.find((item) => item.name === configured) : undefined;
     const fallback = liveBrokerOptions.find((item) => item.gateway_importable) || liveBrokerOptions[0];
     setRuntimeBroker((eligibleConfigured || fallback)?.name || "");
   }, [catalogsResolved, cfg?.broker, cfg?.trade_broker, liveBrokerOptions, runtimeBroker, workspace]);
@@ -231,7 +231,7 @@ export function LivePage() {
     if (workspace === "paper" || !catalogsResolved) return;
     if (quoteProviderOptions.some((item) => item.name === runtimeQuoteProvider.trim())) return;
     const configured = (cfg?.quote_provider || "").trim();
-    const eligibleConfigured = workspace === "live" && configured && configured !== "paper" ? quoteProviderOptions.find((item) => item.name === configured) : undefined;
+    const eligibleConfigured = ["live", "shadow"].includes(workspace) && configured && configured !== "paper" ? quoteProviderOptions.find((item) => item.name === configured) : undefined;
     const matching = quoteProviderOptions.find((item) => item.name === runtimeBroker);
     const fallback = quoteProviderOptions.find((item) => item.gateway_importable) || quoteProviderOptions[0];
     setRuntimeQuoteProvider((eligibleConfigured || matching || fallback)?.name || "");
@@ -242,8 +242,10 @@ export function LivePage() {
   }, [runtimeMode, selectedRuntimeBroker, selectedRuntimeQuoteProvider, preflightNetwork]);
 
   useEffect(() => {
-    if (executionBinding.data?.account_profile) setAccountProfile(executionBinding.data.account_profile);
-  }, [executionBinding.data?.account_profile]);
+    if (deploymentEvidence.data?.configuration?.account_profile) {
+      setAccountProfile(deploymentEvidence.data.configuration.account_profile);
+    }
+  }, [deploymentEvidence.data?.configuration?.account_profile]);
 
   useEffect(() => {
     if (observeOnlyQuotes) setTargetRoute(false);
@@ -265,13 +267,13 @@ export function LivePage() {
   const refreshWorkspace = useCallback(async () => {
     await Promise.all([
       daemonStatus.refresh(), runtimeState.refresh(), riskStatus.refresh(), ledgerEvents.refresh(),
-      deploymentEvidence.refresh(), executionBinding.refresh(), safetyState.refresh(),
-      deploymentQualification.refresh(), brokerUatRuns.refresh(),
+      deploymentEvidence.refresh(), deploymentDiagnostics.refresh(), safetyState.refresh(),
+      brokerUatRuns.refresh(),
     ]);
   }, [
     daemonStatus.refresh, runtimeState.refresh, riskStatus.refresh, ledgerEvents.refresh,
-    deploymentEvidence.refresh, executionBinding.refresh, safetyState.refresh,
-    deploymentQualification.refresh, brokerUatRuns.refresh,
+    deploymentEvidence.refresh, deploymentDiagnostics.refresh, safetyState.refresh,
+    brokerUatRuns.refresh,
   ]);
 
   const checkRuntime = () => run(async () => {
@@ -338,15 +340,15 @@ export function LivePage() {
     await command("/api/live/daemon/reconnect", t("liveDaemonReconnected"), { timeout: 20, auto_resume: false });
   };
   const deploymentCommand = (action: string, message: string) => run(async () => {
-    if (!daemonTimingStrategy.trim()) throw new Error("strategy instance is required");
-    await api.post(`/api/trading/deployments/${daemonTimingStrategy.trim()}/${action}`, { reason: "portal" });
+    if (!daemonTimingStrategy.trim()) throw new Error(t("liveStrategyRequired"));
+    await api.post(`/api/trading/deployments/${daemonTimingStrategy.trim()}/${action}`, {});
     await Promise.all([
       refreshWorkspace(), strategyInstances.refresh(), deploymentEvidence.refresh(),
-      deploymentQualification.refresh(),
+      deploymentDiagnostics.refresh(),
     ]);
   }, message);
   const strategyPause = () => deploymentCommand("pause", t("liveStrategyPaused"));
-  const strategyReconcile = () => deploymentCommand("reconcile", "策略实例对账完成");
+  const strategyReconcile = () => deploymentCommand("reconcile", t("liveStrategyReconciled"));
   const strategyResume = () => deploymentCommand("resume", t("liveStrategyResumed"));
   const strategyStop = async () => {
     if (!(await confirm({ message: t("liveStrategyStopConfirm"), danger: true }))) return;
@@ -354,10 +356,10 @@ export function LivePage() {
   };
   const strategyStart = async () => {
     if (workspace === "live" && !(await confirm({ message: t("liveStrategyStartConfirm"), danger: true }))) return;
-    if (workspace === "simulation") {
-      const binding = executionBinding.data;
+    if (workspace !== "paper") {
+      const binding = deploymentEvidence.data?.configuration;
       if (
-        !binding || binding.execution_environment !== "broker_simulation"
+        !binding || binding.run_mode !== workspace
         || binding.trade_provider !== selectedRuntimeBroker
         || binding.quote_provider !== selectedRuntimeQuoteProvider
       ) {
@@ -365,40 +367,44 @@ export function LivePage() {
         return;
       }
     }
-    if (workspace === "paper" && executionBinding.data?.execution_environment !== "local_paper") {
+    if (workspace === "paper" && deploymentEvidence.data?.configuration?.run_mode !== "paper") {
       await run(async () => { throw new Error(t("liveBindingRequired")); });
       return;
     }
     await deploymentCommand("start", t("liveStrategyStarted"));
   };
 
-  const saveExecutionBinding = () => run(async () => {
-    if (!daemonTimingStrategy.trim()) throw new Error("strategy instance is required");
+  const saveDeployment = () => run(async () => {
+    if (!daemonTimingStrategy.trim()) throw new Error(t("liveStrategyRequired"));
     if (workspace === "simulation" && !accountProfile.trim()) throw new Error(t("liveAccountProfileRequired"));
-    await api.put(`/api/trading/deployments/${daemonTimingStrategy.trim()}/execution-binding`, {
-      execution_environment: workspace === "simulation" ? "broker_simulation" : "local_paper",
-      trade_provider: workspace === "simulation" ? selectedRuntimeBroker : "paper",
-      quote_provider: workspace === "simulation" ? selectedRuntimeQuoteProvider : "paper",
+    if ((workspace === "live" || workspace === "shadow") && !deploymentAccountId.trim()) {
+      throw new Error(t("liveAccountIdRequired"));
+    }
+    await api.put(`/api/trading/deployments/${daemonTimingStrategy.trim()}`, {
+      run_mode: workspace,
+      trade_provider: workspace === "paper" ? "paper" : selectedRuntimeBroker,
+      quote_provider: workspace === "paper" ? "paper" : selectedRuntimeQuoteProvider,
       account_profile: workspace === "simulation" ? accountProfile.trim() : "",
-      reason: "portal execution binding change",
+      account_id: workspace === "live" || workspace === "shadow" ? deploymentAccountId.trim() : "",
+      reason: deploymentReason.trim() || undefined,
     });
-    await Promise.all([executionBinding.refresh(), deploymentEvidence.refresh()]);
+    await Promise.all([deploymentEvidence.refresh(), deploymentDiagnostics.refresh()]);
   }, t("liveBindingSaved"));
 
   const changeKillSwitch = async (scopeType: string, scopeId: string, action: "engage" | "release") => {
     const reason = killReason.trim();
     if (!reason) {
-      await run(async () => { throw new Error("kill switch 操作必须填写原因"); });
+      await run(async () => { throw new Error(t("liveKillReasonRequired")); });
       return;
     }
     if (!(await confirm({
-      message: `${action === "engage" ? "启用" : "解除"} ${scopeType}:${scopeId} kill switch？`,
+      message: `${t(action === "engage" ? "liveKillEngage" : "liveKillRelease")} ${scopeType}:${scopeId} Kill Switch?`,
       danger: true,
     }))) return;
     await run(async () => {
       await api.post(`/api/trading/kill-switches/${scopeType}/${encodeURIComponent(scopeId)}/${action}`, { reason });
       await Promise.all([deploymentEvidence.refresh(), safetyState.refresh()]);
-    }, action === "engage" ? "Kill switch 已启用" : "Kill switch 已解除");
+    }, t(action === "engage" ? "liveKillEngaged" : "liveKillReleased"));
   };
 
   const submitOrder = async () => {
@@ -458,7 +464,7 @@ export function LivePage() {
     <div className="stack live-workspace-page">
       <PageTitle title={t("navLive")} subtitle={t("liveWorkspaceIntro")} />
       <section className="panel inset">
-        <label className="field"><span>操作员令牌（只保存在当前浏览器内存）</span>
+        <label className="field"><span>{t("liveOperatorTokenScope")}</span>
           <input type="password" value={operatorToken} onChange={(event) => {
             setOperatorTokenValue(event.target.value);
             setOperatorToken(event.target.value);
@@ -467,6 +473,7 @@ export function LivePage() {
       </section>
       <div className="live-environment-tabs" role="tablist" aria-label={t("liveEnvironment")}>
         <button type="button" role="tab" aria-selected={workspace === "live"} className={workspace === "live" ? "active live" : ""} onClick={() => switchWorkspace("live")}>{t("liveEnvironmentLive")}</button>
+        <button type="button" role="tab" aria-selected={workspace === "shadow"} className={workspace === "shadow" ? "active shadow" : ""} onClick={() => switchWorkspace("shadow")}>SHADOW</button>
         <button type="button" role="tab" aria-selected={workspace === "simulation"} className={workspace === "simulation" ? "active simulation" : ""} onClick={() => switchWorkspace("simulation")}>{t("liveEnvironmentSimulation")}</button>
         <button type="button" role="tab" aria-selected={workspace === "paper"} className={workspace === "paper" ? "active" : ""} onClick={() => switchWorkspace("paper")}>{t("liveEnvironmentPaper")}</button>
       </div>
@@ -479,42 +486,66 @@ export function LivePage() {
       {brokerCatalog.error || quoteProviderCatalog.error ? <Alert tone="error">{brokerCatalog.error || quoteProviderCatalog.error}</Alert> : null}
       {observeOnlyQuotes ? <Alert tone="info">{t("liveReplayQuoteWarning")}</Alert> : null}
       <LiveStatusBar workspace={workspace} runtimeMode={runtimeMode} tradeBroker={selectedRuntimeBroker} quoteProvider={selectedRuntimeQuoteProvider} daemon={daemon} onRefresh={refreshWorkspace} onOpenDiagnostics={() => setDiagnosticsOpen(true)} onHalt={haltDaemon} onResume={resumeDaemon} />
-      {workspace !== "live" && daemonTimingStrategy.trim() ? (
+      <LiveProviderCard
+        workspace={workspace}
+        daemon={daemon}
+        brokers={liveBrokerOptions}
+        quoteProviders={quoteProviderOptions}
+        runtimeBroker={runtimeBroker}
+        setRuntimeBroker={setRuntimeBroker}
+        runtimeQuoteProvider={runtimeQuoteProvider}
+        setRuntimeQuoteProvider={setRuntimeQuoteProvider}
+        symbols={daemonSymbols}
+        setSymbols={setDaemonSymbols}
+        initialCash={initialCash}
+        setInitialCash={setInitialCash}
+        providerReady={providerReady}
+        providerSelectionLocked={Boolean(daemon?.alive)}
+        canStartDaemon={canStartDaemon}
+        preflight={preflight}
+        preflightNetwork={preflightNetwork}
+        setPreflightNetwork={setPreflightNetwork}
+        onPreflight={checkRuntime}
+        onConnect={connectRuntime}
+        onStartDaemon={startDaemon}
+        onRefreshDaemon={refreshDaemon}
+        onReconnectDaemon={reconnectDaemon}
+        onStopDaemon={stopDaemon}
+      />
+      {daemonTimingStrategy.trim() ? (
         <section className="panel inset" aria-label={t("liveExecutionBinding")}>
           <div className="panel-head"><div><h2>{t("liveExecutionBinding")}</h2><span className="muted">{t("liveExecutionBindingHint")}</span></div></div>
-          {workspace === "simulation" ? (
-            <div className="live-form-grid">
-              <label className="field"><span>{t("liveTradeBroker")}</span><select value={runtimeBroker} onChange={(event) => setRuntimeBroker(event.target.value)} disabled={bindingLocked}>{liveBrokerOptions.map((item) => <option key={item.name} value={item.name} disabled={!item.gateway_importable}>{item.name}</option>)}</select></label>
-              <label className="field"><span>{t("liveQuoteProvider")}</span><select value={runtimeQuoteProvider} onChange={(event) => setRuntimeQuoteProvider(event.target.value)} disabled={bindingLocked}>{quoteProviderOptions.map((item) => <option key={item.name} value={item.name} disabled={!item.gateway_importable}>{item.name} ({item.data_kind})</option>)}</select></label>
-              <label className="field"><span>{t("liveAccountProfile")}</span><input value={accountProfile} onChange={(event) => setAccountProfile(event.target.value)} disabled={bindingLocked} placeholder="tts-uat" /></label>
-            </div>
-          ) : <Alert tone="info">{t("liveLocalPaperBindingHint")}</Alert>}
-          <div className="row-actions"><button type="button" className="button small" disabled={bindingLocked || executionBinding.loading || !providerReady} onClick={saveExecutionBinding}>{t("save")}</button><code>{executionBinding.data?.binding_hash?.slice(0, 12) || "—"}</code></div>
+          {workspace === "paper" ? <Alert tone="info">{t("liveLocalPaperBindingHint")}</Alert> : (
+            <>
+              <Alert tone="info">{t("liveStrategyProviderBindingHint")}</Alert>
+              <div className="live-runner-summary">
+                <span><small>{t("liveTradeBroker")}</small><strong>{selectedRuntimeBroker || "—"}</strong></span>
+                <span><small>{t("liveQuoteProvider")}</small><strong>{selectedRuntimeQuoteProvider || "—"}</strong></span>
+                <span><small>{t("liveRunMode")}</small><strong>{workspace}</strong></span>
+              </div>
+              <div className="live-form-grid">
+                {workspace === "simulation" ? <label className="field"><span>{t("liveAccountProfile")}</span><input value={accountProfile} onChange={(event) => setAccountProfile(event.target.value)} disabled={bindingLocked} placeholder="tts-uat" /></label> : null}
+                {workspace === "live" || workspace === "shadow" ? <label className="field"><span>{t("liveAccountId")}</span><input type="password" value={deploymentAccountId} onChange={(event) => setDeploymentAccountId(event.target.value)} disabled={bindingLocked} autoComplete="off" /></label> : null}
+              </div>
+            </>
+          )}
+          <label className="field"><span>{t("liveDeploymentReason")}</span><input value={deploymentReason} onChange={(event) => setDeploymentReason(event.target.value)} disabled={bindingLocked} placeholder={t("liveDeploymentReasonHint")} /></label>
+          <div className="row-actions"><button type="button" className="button small" disabled={bindingLocked || deploymentEvidence.loading || !providerReady} onClick={saveDeployment}>{t("save")}</button><span>{deploymentEvidence.data?.configuration?.run_mode || t("liveDeploymentUnconfigured")}</span><code>{deploymentEvidence.data?.configuration?.binding_hash?.slice(0, 12) || "—"}</code></div>
         </section>
       ) : null}
       <div className="live-workbench-grid">
         <LiveStrategyCard
           daemon={daemon}
-          symbols={daemonSymbols}
-          setSymbols={setDaemonSymbols}
           strategy={daemonTimingStrategy}
           setStrategy={setDaemonTimingStrategy}
           strategyNames={(strategyInstances.data?.instances || [])
-            .filter((item) => item.deployment_level === (workspace === "live" ? "live" : "paper"))
+            .filter((item) => item.validation_state === "validated")
             .map((item) => item.instance_id)}
-          initialCash={initialCash}
-          setInitialCash={setInitialCash}
-          simulated={workspace === "paper"}
-          canStartDaemon={canStartDaemon}
-          onStartDaemon={startDaemon}
           onStrategyStart={strategyStart}
           onStrategyPause={strategyPause}
           onStrategyReconcile={strategyReconcile}
           onStrategyResume={strategyResume}
           onStrategyStop={strategyStop}
-          onRefreshDaemon={refreshDaemon}
-          onReconnectDaemon={reconnectDaemon}
-          onStopDaemon={stopDaemon}
         />
         <LiveOrderCard
           daemon={daemon}
@@ -548,70 +579,68 @@ export function LivePage() {
       <section className="panel" aria-labelledby="deployment-safety-title">
         <div className="panel-head">
           <div>
-            <h2 id="deployment-safety-title">部署证据与安全控制</h2>
-            <span className="muted">状态以 trading runtime 为准；daemon 心跳、对账和配置哈希不一致时自动路由关闭。</span>
+            <h2 id="deployment-safety-title">{t("liveRuntimeSafety")}</h2>
+            <span className="muted">{t("liveRuntimeSafetyHint")}</span>
           </div>
         </div>
-        {deploymentEvidence.error || deploymentQualification.error || safetyState.error || brokerUatRuns.error ? (
-          <Alert tone="error">{deploymentEvidence.error || deploymentQualification.error || safetyState.error || brokerUatRuns.error}</Alert>
+        {deploymentEvidence.error || deploymentDiagnostics.error || safetyState.error || brokerUatRuns.error ? (
+          <Alert tone="error">{deploymentEvidence.error || deploymentDiagnostics.error || safetyState.error || brokerUatRuns.error}</Alert>
         ) : null}
-        {!daemonTimingStrategy.trim() ? <div className="empty">选择策略实例后查看部署、阶段证据和 kill switch。</div> : (
+        {!daemonTimingStrategy.trim() ? <div className="empty">{t("liveRuntimeSafetyEmpty")}</div> : (
           <>
             <div className="live-runner-summary">
               <span><small>Desired / Observed</small><strong>{deploymentEvidence.data?.runtime?.desired_state || "—"} / {deploymentEvidence.data?.runtime?.observed_state || "—"}</strong></span>
-              <span><small>账户哈希 / Broker</small><strong>{deploymentEvidence.data?.runtime?.account_id_hash?.slice(0, 19) || "—"} / {deploymentEvidence.data?.runtime?.broker || "—"}</strong></span>
-              <span><small>最近心跳</small><strong>{deploymentEvidence.data?.runtime?.runner_heartbeat_at || "—"}</strong></span>
-              <span><small>需要对账</small><strong>{deploymentEvidence.data?.runtime?.reconcile_required ? "是" : "否"}</strong></span>
+              <span><small>{t("liveAccountProvider")}</small><strong>{deploymentEvidence.data?.runtime?.account_id_hash?.slice(0, 19) || "—"} / {deploymentEvidence.data?.runtime?.trade_provider || "—"}</strong></span>
+              <span><small>{t("liveLastHeartbeat")}</small><strong>{deploymentEvidence.data?.runtime?.runner_heartbeat_at || "—"}</strong></span>
+              <span><small>{t("liveNeedsReconcile")}</small><strong>{deploymentEvidence.data?.runtime?.reconcile_required ? t("liveYes") : t("liveNo")}</strong></span>
             </div>
-            <div className="live-runner-summary" aria-label="LIVE qualification">
-              <span><small>LIVE 资格</small><strong>{deploymentQualification.data?.eligible_for_live_authorization ? "PASS" : "BLOCKED"}</strong></span>
-              <span><small>PAPER</small><strong>{deploymentQualification.data?.paper?.trading_sessions ?? 0} / {deploymentQualification.data?.paper?.minimum_sessions ?? 20}</strong></span>
-              <span><small>SHADOW</small><strong>{deploymentQualification.data?.shadow?.trading_sessions ?? 0} / {deploymentQualification.data?.shadow?.minimum_sessions ?? 5}</strong></span>
-              <span><small>逐日 Parity</small><strong>{deploymentQualification.data?.parity?.passed ? "PASS" : `缺 ${deploymentQualification.data?.parity?.missing_sessions?.length ?? 0} 日`}</strong></span>
-              <span><small>Broker UAT</small><strong>{deploymentQualification.data?.broker_uat?.required ? (deploymentQualification.data?.broker_uat?.passed ? "PASS" : "BLOCKED") : "N/A"}</strong></span>
+            <div className="live-runner-summary" aria-label={t("liveRuntimeSafety")}>
+              {Object.entries(deploymentDiagnostics.data?.modes || {}).map(([mode, summary]) => (
+                <span key={mode}><small>{mode.toUpperCase()}</small><strong>{summary.trading_sessions || 0} {t("liveTradingDaysUnit")} / {summary.completed_runs || 0} {t("liveCompletedRunsUnit")}</strong></span>
+              ))}
             </div>
             <div className="table-wrap">
               <table>
-                <thead><tr><th>阶段</th><th>状态</th><th>交易日</th><th>配置哈希</th></tr></thead>
-                <tbody>{(deploymentEvidence.data?.stage_runs || []).map((item) => (
-                  <tr key={item.run_id}><td>{item.stage}</td><td>{item.status}</td><td>{item.trading_sessions}</td><td><code>{item.config_hash.slice(0, 12)}</code></td></tr>
+                <thead><tr><th>{t("liveRunMode")}</th><th>{t("status")}</th><th>{t("liveTradingSessions")}</th><th>{t("liveConfigHash")}</th></tr></thead>
+                <tbody>{(deploymentEvidence.data?.runs || []).map((item) => (
+                  <tr key={item.run_id}><td>{item.run_mode}</td><td>{item.status}</td><td>{item.trading_sessions}</td><td><code>{item.config_hash.slice(0, 12)}</code></td></tr>
                 ))}</tbody>
               </table>
             </div>
           </>
         )}
-        <label className="field"><span>Kill switch 操作原因</span>
-          <input value={killReason} onChange={(event) => setKillReason(event.target.value)} placeholder="必填，并写入操作员审计" />
+        <label className="field"><span>{t("liveKillReason")}</span>
+          <input value={killReason} onChange={(event) => setKillReason(event.target.value)} placeholder={t("liveKillReasonHint")} />
         </label>
         <div className="row-actions">
           {daemonTimingStrategy.trim() ? (
-            <button className="button danger" onClick={() => changeKillSwitch("instance", daemonTimingStrategy.trim(), "engage")}>实例级停止新单</button>
+            <button className="button danger" onClick={() => changeKillSwitch("instance", daemonTimingStrategy.trim(), "engage")}>{t("liveKillInstance")}</button>
           ) : null}
           {deploymentEvidence.data?.runtime?.account_id_hash ? (
-            <button className="button danger" onClick={() => changeKillSwitch("account", String(deploymentEvidence.data?.runtime?.account_id_hash), "engage")}>账户级停止新单</button>
+            <button className="button danger" onClick={() => changeKillSwitch("account", String(deploymentEvidence.data?.runtime?.account_id_hash), "engage")}>{t("liveKillAccount")}</button>
           ) : null}
-          <button className="button danger" onClick={() => changeKillSwitch("global", "*", "engage")}>全局停止新单</button>
+          <button className="button danger" onClick={() => changeKillSwitch("global", "*", "engage")}>{t("liveKillGlobal")}</button>
         </div>
         <div className="table-wrap">
           <table>
-            <thead><tr><th>范围</th><th>状态</th><th>原因</th><th>操作</th></tr></thead>
+            <thead><tr><th>{t("liveScope")}</th><th>{t("status")}</th><th>{t("reason")}</th><th>{t("action")}</th></tr></thead>
             <tbody>{(safetyState.data?.switches || []).map((item) => (
               <tr key={`${item.scope_type}:${item.scope_id}`}>
                 <td>{item.scope_type}:{item.scope_id}</td><td>{item.active ? "ACTIVE" : "released"}</td><td>{item.reason || "—"}</td>
-                <td>{item.active ? <button className="button small" onClick={() => changeKillSwitch(item.scope_type, item.scope_id, "release")}>解除</button> : "—"}</td>
+                <td>{item.active ? <button className="button small" onClick={() => changeKillSwitch(item.scope_type, item.scope_id, "release")}>{t("liveKillRelease")}</button> : "—"}</td>
               </tr>
             ))}</tbody>
           </table>
         </div>
         <details>
-          <summary>最近操作员审计</summary>
+          <summary>{t("liveRecentOperatorAudit")}</summary>
           <pre className="inline-json">{JSON.stringify((safetyState.data?.events || []).slice(0, 20), null, 2)}</pre>
         </details>
         <details>
-          <summary>XTP / EMT UAT 证据（只读）</summary>
+          <summary>{t("liveUatEvidence")}</summary>
           <div className="table-wrap">
             <table>
-              <thead><tr><th>Broker</th><th>环境</th><th>状态</th><th>步骤</th><th>标的</th><th>SDK</th><th>到期</th></tr></thead>
+              <thead><tr><th>Broker</th><th>{t("liveUatEnvironment")}</th><th>{t("status")}</th><th>{t("liveUatStep")}</th><th>{t("liveUatSymbol")}</th><th>SDK</th><th>{t("expiresAt")}</th></tr></thead>
               <tbody>{(brokerUatRuns.data?.runs || []).map((item) => (
                 <tr key={item.run_id}>
                   <td>{item.broker}</td><td>{item.environment || "—"}</td><td>{item.status}</td><td>{item.current_step || "—"}</td>
@@ -620,7 +649,7 @@ export function LivePage() {
               ))}</tbody>
             </table>
           </div>
-          {!(brokerUatRuns.data?.runs || []).length ? <div className="empty">尚无真实券商 UAT 证据；只能通过本地 CLI 运行。</div> : null}
+          {!(brokerUatRuns.data?.runs || []).length ? <div className="empty">{t("liveUatEmpty")}</div> : null}
         </details>
       </section>
       <LiveActivityTabs

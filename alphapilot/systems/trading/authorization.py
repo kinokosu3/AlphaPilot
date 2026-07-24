@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -34,7 +35,7 @@ class AutomatedRouteAuthorizer:
         missing = [
             name for name in (
                 "instance_id", "config_hash", "account_id", "broker",
-                "deployment_level", "runtime_id",
+                "run_mode", "runtime_id", "binding_hash",
             )
             if not str(getattr(context, name, "")).strip()
         ]
@@ -42,55 +43,64 @@ class AutomatedRouteAuthorizer:
             return self._deny("missing_binding", "missing route binding: " + ", ".join(missing))
         try:
             instance = self.store.get_instance(context.instance_id)
+            deployment = self.store.get_deployment_spec(context.instance_id)
             runtime = self.store.get_runtime_state(context.instance_id)
         except (KeyError, RuntimeError, ValueError) as exc:
             return self._deny("state_unavailable", str(exc))
 
-        if instance["config_hash"] != context.config_hash or runtime["config_hash"] != context.config_hash:
+        if instance.get("validation_state") != "validated":
+            return self._deny("validation_state", "strategy instance is not validated")
+        if deployment.get("stale"):
+            return self._deny("stale_deployment", "deployment is bound to an old config_hash")
+        if any(
+            str(item.get("config_hash") or "") != context.config_hash
+            for item in (instance, deployment, runtime)
+        ):
             return self._deny("config_hash", "route uses a stale or mismatched config_hash")
-        if instance["deployment_level"] != context.deployment_level:
-            return self._deny("deployment_level", "instance deployment level does not match route")
-        if runtime["deployment_level"] != context.deployment_level:
-            return self._deny("runtime_deployment", "runtime deployment level does not match route")
-        if context.deployment_level not in {"paper", "live"}:
-            return self._deny("routing_disabled", f"{context.deployment_level} cannot route orders")
+        if deployment["run_mode"] != context.run_mode or runtime["run_mode"] != context.run_mode:
+            return self._deny("run_mode", "deployment run mode does not match route")
+        if context.run_mode == "shadow":
+            return self._deny("shadow_no_route", "SHADOW deployments never route orders")
+        if context.run_mode not in {"paper", "simulation", "live"}:
+            return self._deny("routing_disabled", f"{context.run_mode} cannot route orders")
+        if context.run_mode == "live" and not account_identities_match(
+            str(deployment.get("account_id") or ""),
+            str(runtime.get("account_id") or ""),
+        ):
+            return self._deny(
+                "deployment_account_binding",
+                "runtime account_id does not match the configured LIVE deployment",
+            )
+        if context.run_mode == "live" and os.getenv(
+            "ALPHAPILOT_AUTOMATED_LIVE_ENABLED", ""
+        ).strip().lower() not in {"1", "true", "yes", "on"}:
+            return self._deny("live_disabled", "automated LIVE is disabled by environment")
+        for field in (
+            "execution_environment", "trade_provider", "quote_provider",
+            "quote_data_kind", "binding_hash",
+        ):
+            expected = str(deployment.get(field) or "").lower()
+            if str(runtime.get(field) or "").lower() != expected:
+                return self._deny(
+                    f"runtime_{field}", f"runtime {field} does not match deployment",
+                )
+            if str(getattr(context, field, "") or "").lower() != expected:
+                return self._deny(
+                    f"{field}_binding", f"{field} does not match deployment authorization",
+                )
+        if str(runtime.get("account_profile") or "") != str(
+            deployment.get("account_profile") or ""
+        ):
+            return self._deny(
+                "runtime_account_profile",
+                "runtime account_profile does not match the configured deployment",
+            )
         environment = str(runtime.get("execution_environment") or "")
-        if environment == "broker_simulation":
-            binding_missing = [
-                name for name in (
-                    "execution_environment", "trade_provider", "quote_provider",
-                    "quote_data_kind", "binding_hash",
-                )
-                if not str(getattr(context, name, "")).strip()
-            ]
-            if binding_missing:
-                return self._deny(
-                    "missing_simulation_binding",
-                    "missing simulation binding: " + ", ".join(binding_missing),
-                )
-            for field in (
-                "execution_environment", "trade_provider", "quote_provider",
-                "quote_data_kind", "binding_hash",
-            ):
-                if str(runtime.get(field) or "").lower() != str(
-                    getattr(context, field, "") or ""
-                ).lower():
-                    return self._deny(
-                        f"{field}_binding", f"{field} does not match deployment authorization",
-                    )
-            if context.quote_data_kind != "realtime":
-                return self._deny(
-                    "non_realtime_quote",
-                    "simulation routing requires a realtime quote provider",
-                )
-            if not bool(runtime.get("reconciled")):
-                return self._deny(
-                    "simulation_not_reconciled",
-                    "simulation account truth has not been reconciled",
-                )
+        if environment in {"live", "broker_simulation"} and not bool(runtime.get("reconciled")):
+            return self._deny("not_reconciled", "external account truth has not been reconciled")
         if not account_identities_match(runtime["account_id"], context.account_id):
             return self._deny("account_binding", "account_id does not match deployment authorization")
-        if runtime["broker"].lower() != context.broker.lower():
+        if runtime["trade_provider"].lower() != context.broker.lower():
             return self._deny("broker_binding", "broker does not match deployment authorization")
         if runtime["runtime_id"] != context.runtime_id:
             return self._deny("runtime_binding", "runtime_id does not match the observed daemon")
@@ -114,9 +124,6 @@ class AutomatedRouteAuthorizer:
                 "lifecycle",
                 f"deployment is {runtime['desired_state']}/{runtime['observed_state']}, not running",
             )
-        if instance["lifecycle"] != "running":
-            return self._deny("instance_lifecycle", "strategy instance is not running")
-
         blocks = self.store.active_route_blocks(
             instance_id=context.instance_id,
             account_id=str(runtime.get("account_id") or context.account_id),

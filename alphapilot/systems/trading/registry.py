@@ -183,6 +183,10 @@ class StrategyRegistry:
             try:
                 data = _read_toml(manifest)
                 section = data.get("strategy") or data
+                if "deployable_modes" in section:
+                    raise ValueError(
+                        "deployable_modes was removed; use supported_run_modes without replay"
+                    )
                 api_version = int(section.get("api_version", 1))
                 if api_version not in STRATEGY_API_VERSIONS:
                     raise ValueError(f"strategy api version {api_version} is unsupported")
@@ -208,9 +212,9 @@ class StrategyRegistry:
                     signal_kind=SignalKind(
                         str(section.get("signal_kind") or "instrument_timing")
                     ),
-                    deployable_modes=tuple(
-                        section.get("deployable_modes")
-                        or ("replay", "paper", "shadow", "live")
+                    supported_run_modes=tuple(
+                        section.get("supported_run_modes")
+                        or ("paper", "simulation", "shadow", "live")
                     ),
                 )
                 self._register(definition, base=manifest.parent)

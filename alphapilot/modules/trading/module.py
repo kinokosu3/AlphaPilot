@@ -182,54 +182,33 @@ class TradingModule(BaseModule):
         """Request cancellation of a queued or running unified replay."""
         return self._print(self._system().cancel_backtest_run(run_id))
 
-    def trading_promote(
+    def trading_deploy(
         self,
         instance_id: str,
-        to: str,
-        account_id: str = "",
-        broker: str = "",
-        approval: str = "",
+        run_mode: str,
+        trade_provider: str = "",
         quote_provider: str = "",
-        operator_id: str = "local-cli",
-        reason: str = "CLI deployment promotion",
-    ) -> dict[str, Any]:
-        """Promote an instance to a deployment stage after qualification checks."""
-        system = self._system()
-        result = system.promote(instance_id, {
-            "to": to,
-            "account_id": account_id,
-            "broker": broker,
-            "quote_provider": quote_provider,
-            "approval": approval,
-        })
-        system.operator_auth.audit(
-            self._operator(operator_id, reason),
-            action="promote_deployment", result="ok",
-            instance_id=instance_id, config_hash=result["config_hash"],
-            account_id=account_id, broker=broker,
-            details={"to": to, "quote_provider": quote_provider},
-        )
-        return self._print(result)
-
-    def trading_execution_binding(self, instance_id: str) -> dict[str, Any]:
-        """Read the execution environment bound to a strategy instance."""
-        return self._print(self._system().execution_binding(instance_id))
-
-    def trading_bind_execution(
-        self,
-        instance_id: str,
-        execution_environment: str = "local_paper",
-        trade_provider: str = "paper",
-        quote_provider: str = "paper",
         account_profile: str = "",
+        account_id: str = "",
+        reason: str = "",
     ) -> dict[str, Any]:
-        """Bind an instance to a trade provider, quote provider and account profile."""
-        return self._print(self._system().bind_execution(instance_id, {
-            "execution_environment": execution_environment,
+        """Configure or replace an independent deployment while its daemon is stopped."""
+        return self._print(public_account_state(self._system().configure_deployment(instance_id, {
+            "run_mode": run_mode,
             "trade_provider": trade_provider,
             "quote_provider": quote_provider,
             "account_profile": account_profile,
-        }))
+            "account_id": account_id,
+            "reason": reason,
+        })))
+
+    def trading_deployments(self) -> list[dict[str, Any]]:
+        """List independent strategy deployment configurations and runtime state."""
+        return self._print(public_account_state(self._system().list_deployments()))
+
+    def trading_diagnostics(self, instance_id: str) -> dict[str, Any]:
+        """Read neutral runtime diagnostics; results never change deployment authority."""
+        return self._print(self._system().deployment_diagnostics(instance_id))
 
     def trading_operator_token(
         self,
@@ -244,32 +223,6 @@ class TradingModule(BaseModule):
             expires_in_days=expires_in_days,
         ))
 
-    def trading_authorize_live(
-        self,
-        instance_id: str,
-        account_id: str,
-        broker: str,
-        reason: str,
-        operator_id: str,
-        ttl_seconds: int = 300,
-        baseline_positions: Any = None,
-    ) -> dict[str, Any]:
-        """Create a short-lived LIVE approval bound to instance, account and broker."""
-        operator = OperatorContext(
-            operator_id=operator_id,
-            request_id=uuid.uuid4().hex,
-            reason=reason,
-            auth_source="local-cli",
-        )
-        return self._print(public_account_state(self._system().authorize_live(instance_id, {
-            "account_id": account_id,
-            "broker": broker,
-            "reason": reason,
-            "ttl_seconds": ttl_seconds,
-            "baseline_confirmed": True,
-            "baseline_positions": _object(baseline_positions),
-        }, operator)))
-
     def _lifecycle(
         self, instance_id: str, action: str, operator_id: str, reason: str,
     ) -> dict[str, Any]:
@@ -281,7 +234,7 @@ class TradingModule(BaseModule):
             self._operator(operator_id, reason),
             action=f"deployment_{action}", result="ok" if result.get("ok", True) else "failed",
             instance_id=instance_id, config_hash=current["config_hash"],
-            account_id=runtime["account_id"], broker=runtime["broker"], details=result,
+            account_id=runtime["account_id"], broker=runtime["trade_provider"], details=result,
         )
         return self._print(public_account_state(result))
 
@@ -381,36 +334,31 @@ class TradingModule(BaseModule):
         """Evaluate the auditable legacy-entrypoint removal qualification report."""
         return self._print(self._system().removal_check(acceptance_instance_id))
 
-    def trading_parity_start(
+    def trading_decision_compare(
         self,
         instance_id: str,
-        replay_run_id: str,
-        shadow_stage_run_id: str,
+        left_mode: str,
+        left_run_id: str,
+        right_mode: str,
+        right_run_id: str,
     ) -> dict[str, Any]:
-        """Compare replay and SHADOW observations for one strategy instance."""
-        return self._print(self._system().start_parity_run(instance_id, {
-            "replay_run_id": replay_run_id,
-            "shadow_stage_run_id": shadow_stage_run_id,
+        """Compare persisted decisions from any two replay/deployment runs."""
+        return self._print(self._system().compare_decisions(instance_id, {
+            "left_mode": left_mode,
+            "left_run_id": left_run_id,
+            "right_mode": right_mode,
+            "right_run_id": right_run_id,
         }))
 
-    def trading_parity_status(self, run_id: str) -> dict[str, Any]:
-        """Read a persisted parity run and its per-session comparison results."""
-        return self._print(self._system().get_parity_run(run_id))
-
-    def trading_qualification(
+    def trading_decision_comparisons(
         self,
         instance_id: str,
-        account_id: str = "",
-        broker: str = "",
-    ) -> dict[str, Any]:
-        """Summarize deployment stage, parity, reconciliation, UAT and approval gates."""
-        return self._print(
-            self._system().qualification(
-                instance_id,
-                account_id=account_id,
-                broker=broker,
-            )
-        )
+        comparison_id: str = "",
+    ) -> Any:
+        """Read one decision comparison or list comparisons for an instance."""
+        if comparison_id:
+            return self._print(self._system().get_decision_comparison(comparison_id))
+        return self._print(self._system().list_decision_comparisons(instance_id))
 
     def trading_broker_uat_start(
         self,
@@ -527,9 +475,10 @@ class TradingModule(BaseModule):
             "trading_backtest": self.trading_backtest,
             "trading_backtest_status": self.trading_backtest_status,
             "trading_backtest_cancel": self.trading_backtest_cancel,
-            "trading_promote": self.trading_promote,
+            "trading_deploy": self.trading_deploy,
+            "trading_deployments": self.trading_deployments,
+            "trading_diagnostics": self.trading_diagnostics,
             "trading_operator_token": self.trading_operator_token,
-            "trading_authorize_live": self.trading_authorize_live,
             "trading_start": self.trading_start,
             "trading_pause": self.trading_pause,
             "trading_reconcile": self.trading_reconcile,
@@ -540,9 +489,8 @@ class TradingModule(BaseModule):
             "trading_audit": self.trading_audit,
             "trading_compatibility": self.trading_compatibility,
             "trading_removal_check": self.trading_removal_check,
-            "trading_parity_start": self.trading_parity_start,
-            "trading_parity_status": self.trading_parity_status,
-            "trading_qualification": self.trading_qualification,
+            "trading_decision_compare": self.trading_decision_compare,
+            "trading_decision_comparisons": self.trading_decision_comparisons,
             "trading_broker_uat_start": self.trading_broker_uat_start,
             "trading_broker_uat_preflight": self.trading_broker_uat_preflight,
             "trading_broker_uat_status": self.trading_broker_uat_status,

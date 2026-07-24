@@ -849,7 +849,10 @@ def _build_strategy_instance_runner(
         raise RuntimeError("formal strategy instances require a bound live runtime and bar source")
 
     from alphapilot.systems.live.instance_runner import StrategyInstanceRunner
-    from alphapilot.systems.trading.domain import StrategyInstanceConfig
+    from alphapilot.systems.trading.domain import (
+        InstanceValidationState,
+        StrategyInstanceConfig,
+    )
 
     trading = kernel_engine.get_system("trading")
     if runtime.execution_journal is not trading.store:
@@ -857,23 +860,28 @@ def _build_strategy_instance_runner(
             "formal strategy instances must use the configured deployment state directory"
         )
     stored = trading.store.get_instance(strategy_instance_id)
-    validation = trading.validate_instance(strategy_instance_id)
+    if stored["validation_state"] != InstanceValidationState.VALIDATED.value:
+        raise ValueError("strategy instance must be validated before daemon start")
+    instance = StrategyInstanceConfig.from_dict(stored["config"])
+    validation = trading.validate_instance_config(instance)
     if not validation.get("ok"):
         raise ValueError("; ".join(validation.get("errors") or []))
 
-    expected_level = {
+    expected_mode = {
         RunMode.PAPER: "paper",
-        RunMode.SIMULATION: "paper",
+        RunMode.SIMULATION: "simulation",
         RunMode.SHADOW: "shadow",
         RunMode.LIVE: "live",
     }.get(engine.config.mode)
-    if expected_level and stored["deployment_level"] != expected_level:
+    deployment = trading.store.get_deployment_spec(strategy_instance_id)
+    if deployment.get("stale"):
+        raise ValueError("strategy deployment is stale; configure it again")
+    if expected_mode and deployment["run_mode"] != expected_mode:
         raise ValueError(
-            f"strategy instance must be promoted to {expected_level.upper()} "
-            f"before running in {engine.config.mode}"
+            f"strategy deployment run_mode must be {expected_mode!r} "
+            f"before running in {engine.config.mode!r}"
         )
 
-    instance = StrategyInstanceConfig.from_dict(stored["config"])
     subscribed = set(_normalize_symbols(symbols))
     required = set(_normalize_symbols(list(instance.universe)))
     missing = sorted(required - subscribed)

@@ -1,10 +1,10 @@
 # 模拟与实盘交易
 
-> **风险提示：** 默认保持 `ALPHAPILOT_AUTOMATED_LIVE_ENABLED=false`。没有完成风控配置、对账、PAPER/SHADOW、券商 UAT 和人工授权时，不要启用真实路由。
+> **风险提示：** 默认保持 `ALPHAPILOT_AUTOMATED_LIVE_ENABLED=false`。即使部署不再要求逐级晋升，也应在确认风控、账户绑定、行情、对账和恢复流程后才启用真实路由。
 
 ## 适用场景与前置条件
 
-用于 PAPER 演练、仿真柜台、SHADOW 观察、人工运维和受控 LIVE 部署。PAPER 只需本地环境；simulation/live 需要对应插件、受限账户、合约与行情能力。自动策略还必须有已验证实例、专用账户绑定、有效证据和操作员授权。
+用于 PAPER 演练、仿真柜台、SHADOW 观察、人工运维和受控 LIVE 部署。PAPER 只需本地环境；simulation/live 需要对应插件、受限账户、合约与行情能力。自动策略必须有已验证实例和匹配当前配置哈希的独立部署。
 
 ## 运行边界
 
@@ -63,13 +63,13 @@ alphapilot live_daemon_order \
 正式部署只接受持久化 `instance_id`：
 
 ```bash
-alphapilot trading_promote --instance_id=ma_5_20 --to=paper
-alphapilot trading_start --instance_id=ma_5_20 --reason="paper rehearsal"
+alphapilot trading_deploy --instance_id=ma_5_20 --run_mode=paper
+alphapilot trading_start --instance_id=ma_5_20
 alphapilot trading_status --instance_id=ma_5_20
-alphapilot trading_pause --instance_id=ma_5_20 --reason="operator check"
-alphapilot trading_reconcile --instance_id=ma_5_20 --reason="broker reconciliation"
-alphapilot trading_resume --instance_id=ma_5_20 --reason="reconciled"
-alphapilot trading_stop --instance_id=ma_5_20 --reason="end rehearsal"
+alphapilot trading_pause --instance_id=ma_5_20
+alphapilot trading_reconcile --instance_id=ma_5_20
+alphapilot trading_resume --instance_id=ma_5_20
+alphapilot trading_stop --instance_id=ma_5_20
 ```
 
 LIVE 重启后固定进入 `PAUSED_PENDING_RECONCILE`，不会自动恢复下单。pause/stop 会尽力撤销实例活动订单并撤销路由授权。
@@ -84,17 +84,17 @@ alphapilot trading_kill_switch \
 
 支持实例、账户和全局三级。启用后阻止新订单，但撤单始终允许。解除前必须记录操作员和原因。
 
-## SHADOW、资格和 UAT
+## SHADOW、诊断和 UAT
 
 - SHADOW 使用真实账户和行情生成与 LIVE 相同的目标及计划，路由端口永久关闭。
-- `trading_qualification` 汇总 stage、parity、对账、Broker UAT、approval 和配置有效性。
-- XTP/EMT/TTS UAT 只能由本地 `trading_broker_uat_*` CLI 发起，且受白名单和金额上限约束；它是测试工具，不限制普通用户和策略委托价格。
+- `trading_diagnostics` 汇总各运行模式的会话和异常；`trading_decision_compare` 可比较任意两次回放/部署运行。二者都不改变部署权限。
+- XTP/EMT/TTS UAT 只能由本地 `trading_broker_uat_*` CLI 发起，且受白名单和金额上限约束；它是可选验收工具，不是 LIVE 门禁，也不限制普通用户和策略委托价格。
 
 券商安装和环境变量见 [XTP/EMT](../live-xtp.md)、[TTS](../tts-simulation.md) 和[插件开发](../live-plugins.md)。
 
 ## 输入、输出与审计产物
 
-输入包括 workspace、Broker/行情源、账户、标的、订单或目标组合以及操作原因。输出包括 runtime state、不可变 ledger、OMS 委托/成交、部署状态、stage/parity/UAT 证据和操作员审计。状态 JSON 是投影，Broker 查询与 SQLite/ledger 才共同构成恢复依据；不要单独编辑任一文件。
+输入包括 workspace、Broker/行情源、账户、标的、订单或目标组合。输出包括 runtime state、不可变 ledger、OMS 委托/成交、部署配置、运行诊断、可选决策比较/UAT 和操作员审计。状态 JSON 是投影，Broker 查询与 SQLite/ledger 才共同构成恢复依据；不要单独编辑任一文件。
 
 ## Fail-closed 条件
 

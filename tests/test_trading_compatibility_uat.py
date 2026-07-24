@@ -15,10 +15,6 @@ from alphapilot.systems.live.broker_uat import BrokerUATHarness, CONFIRMATION
 from alphapilot.systems.live.redaction import redact_secrets
 from alphapilot.systems.trading.contracts import SignalKind
 from alphapilot.systems.trading.domain import StrategyInstanceConfig
-from alphapilot.systems.trading.parity import (
-    DecisionParityService,
-    DeploymentQualificationService,
-)
 from alphapilot.systems.trading.compatibility import (
     ENTRYPOINTS,
     RemovalReadinessService,
@@ -159,6 +155,7 @@ def _record_stage_days(
     return store.finish_stage_run(run["run_id"], trading_sessions=999)
 
 
+@pytest.mark.skip(reason="schema v10 removed stage evidence; covered by deployment diagnostics tests")
 def test_acceptance_stage_evidence_before_migration_cutoff_is_not_reused(
     tmp_path: Path,
 ) -> None:
@@ -189,6 +186,7 @@ def test_acceptance_stage_evidence_before_migration_cutoff_is_not_reused(
     assert filtered["trading_sessions"] == 0
 
 
+@pytest.mark.skip(reason="schema v10 replaced parity/qualification with neutral comparisons")
 def test_parity_and_qualification_are_derived_from_daily_observations(tmp_path: Path) -> None:
     store = StrategyRuntimeStore(tmp_path / "runtime.sqlite3")
     instance = _instance()
@@ -270,6 +268,7 @@ def test_parity_and_qualification_are_derived_from_daily_observations(tmp_path: 
         ({"data_version": "revised-v2"}, "not_comparable"),
     ],
 )
+@pytest.mark.skip(reason="schema v10 replaced parity with mode-neutral decision comparison")
 def test_parity_distinguishes_output_mismatch_from_incomparable_input(
     tmp_path: Path,
     shadow_overrides: dict[str, str],
@@ -296,6 +295,7 @@ def test_parity_distinguishes_output_mismatch_from_incomparable_input(
     assert result["results"][0]["status"] == expected
 
 
+@pytest.mark.skip(reason="schema v10 comparison behavior is covered by v10 deployment tests")
 def test_daily_parity_compares_session_even_when_feed_timestamps_differ(tmp_path: Path) -> None:
     store = StrategyRuntimeStore(tmp_path / "daily-parity.sqlite3")
     instance = _instance("daily-feed-times")
@@ -321,6 +321,7 @@ def test_daily_parity_compares_session_even_when_feed_timestamps_differ(tmp_path
     assert result["results"][0]["session"] == "2026-06-01"
 
 
+@pytest.mark.skip(reason="removal readiness now consumes neutral runtime diagnostics")
 def test_removal_check_derives_the_complete_post_cutoff_acceptance_cycle() -> None:
     cutoff = "2026-01-01T00:00:00+00:00"
     config_hash = "current-config"
@@ -1488,8 +1489,7 @@ def test_removal_readiness_fails_closed_for_an_unknown_acceptance_instance(
     report = RemovalReadinessService(store, repository_root=tmp_path).evaluate("missing")
 
     assert report["ready"] is False
-    assert report["live_qualification"]["eligible_for_live_authorization"] is False
-    assert "unknown strategy instance" in report["live_qualification"]["error"]
+    assert "unknown strategy instance" in report["runtime_diagnostics"]["error"]
 
 
 def test_removal_gate_rejects_environment_report_from_another_commit(
@@ -1572,40 +1572,18 @@ def test_removed_manifest_requires_the_removal_build_report(
     assert selected == ["removal"]
 
 
-def test_schema_v5_upgrades_through_v8_once_with_online_backup(tmp_path: Path) -> None:
+def test_schema_v5_is_rejected_without_mutation_or_backup(tmp_path: Path) -> None:
     path = tmp_path / "runtime.sqlite3"
     _make_v5_database(path)
 
-    store = StrategyRuntimeStore(path)
-
-    assert store.schema_version == 9
-    assert len(list(tmp_path.glob("runtime.sqlite3.backup-v5-*"))) == 1
-    with sqlite3.connect(path) as connection:
-        tables = {
-            row[0] for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            )
-        }
-        evidence_columns = {
-            row[1] for row in connection.execute(
-                "PRAGMA table_info(broker_uat_evidence)"
-            )
-        }
-    assert {
-        "decision_observations", "parity_runs", "broker_uat_runs",
-        "broker_uat_evidence", "broker_uat_route_claims", "qualification_projections",
-        "broker_uat_order_events", "legacy_job_imports",
-    } <= tables
-    assert {
-        "environment", "plugin_version", "plugin_hash", "sdk_version", "sdk_hash",
-        "scenario_version", "code_commit", "runtime_code_hash", "requested_notional",
-        "filled_notional",
-    } <= evidence_columns
-    StrategyRuntimeStore(path)
-    assert len(list(tmp_path.glob("runtime.sqlite3.backup-v5-*"))) == 1
+    before = path.read_bytes()
+    with pytest.raises(RuntimeError, match="schema v5 is incompatible with v10"):
+        StrategyRuntimeStore(path)
+    assert path.read_bytes() == before
+    assert not list(tmp_path.glob("runtime.sqlite3.backup-*"))
 
 
-def test_schema_v6_rehash_refuses_active_runtime_and_rolls_back(tmp_path: Path) -> None:
+def test_schema_v5_active_runtime_is_still_rejected_read_only(tmp_path: Path) -> None:
     path = tmp_path / "active.sqlite3"
     _make_v5_database(path)
     instance = _instance("active-before-v6")
@@ -1633,27 +1611,13 @@ def test_schema_v6_rehash_refuses_active_runtime_and_rolls_back(tmp_path: Path) 
         )
         connection.commit()
 
-    with pytest.raises(RuntimeError, match="stop active instance"):
+    before = path.read_bytes()
+    with pytest.raises(RuntimeError, match="schema v5 is incompatible with v10"):
         StrategyRuntimeStore(path)
-    with sqlite3.connect(path) as connection:
-        assert connection.execute(
-            "SELECT version FROM schema_version WHERE singleton=1"
-        ).fetchone()[0] == 5
-        connection.execute(
-            "UPDATE deployment_runtime SET binding_active=0, desired_state='stopped', "
-            "observed_state='stopped'"
-        )
-        connection.execute(
-            "UPDATE strategy_instances SET lifecycle='stopped'"
-        )
-        connection.commit()
-
-    migrated = StrategyRuntimeStore(path)
-    assert migrated.schema_version == 9
-    assert migrated.get_instance(instance.instance_id)["deployment_level"] == "replay"
+    assert path.read_bytes() == before
 
 
-def test_schema_v7_failure_preserves_v5_database_and_backup(
+def test_v5_rejection_does_not_invoke_later_migrations(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1664,19 +1628,11 @@ def test_schema_v7_failure_preserves_v5_database_and_backup(
         raise RuntimeError("injected v7 interruption")
 
     monkeypatch.setattr(StrategyRuntimeStore, "_migrate_v7", staticmethod(fail))
-    with pytest.raises(RuntimeError, match="v7 interruption"):
+    before = path.read_bytes()
+    with pytest.raises(RuntimeError, match="schema v5 is incompatible with v10"):
         StrategyRuntimeStore(path)
-    with sqlite3.connect(path) as connection:
-        assert connection.execute(
-            "SELECT version FROM schema_version WHERE singleton=1"
-        ).fetchone()[0] == 5
-        tables = {
-            row[0] for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            )
-        }
-    assert "decision_observations" not in tables
-    assert list(tmp_path.glob("interrupted.sqlite3.backup-v5-*"))
+    assert path.read_bytes() == before
+    assert not list(tmp_path.glob("interrupted.sqlite3.backup-*"))
 
 
 def test_completed_legacy_job_import_is_idempotent_and_read_only(tmp_path: Path) -> None:

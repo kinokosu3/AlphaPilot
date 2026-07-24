@@ -37,7 +37,7 @@ AlphaPilot 是一个面向股票的量化研究与交易平台，覆盖数据准
 | 交易会话 | `alphapilot trade_session_create` | 将策略快照为可恢复的独立日频交易账户 |
 | 自定义信号策略 | `strategies/*/strategy.toml` | 用本地 Python 策略和显式清单扩展信号逻辑，再统一预览、回放和部署 |
 | 量化择时 | `alphapilot trading_instance_create` / `trading_backtest` | 通过正式策略实例完成技术指标信号预览、统一回放和受控部署；0.2.0 已移除旧 `timing_*` 入口 |
-| 模拟盘 / 实盘 | `alphapilot live_*` | `dry_run` / `paper` / `simulation` / `live` 运行模式、统一风控与 OMS、守护进程、恢复对账和审计账本；XTP Pro / EMT 实盘与 OpenCTP TTS 柜台仿真通过可选插件接入 |
+| 模拟盘 / 实盘 | `alphapilot live_*` | `dry_run` / `paper` / `simulation` / `shadow` / `live` 运行模式、统一风控与 OMS、守护进程、恢复对账和审计账本；XTP Pro / EMT 实盘与 OpenCTP TTS 柜台仿真通过可选插件接入 |
 | 统一门户 | `alphapilot portal` | 数据、因子、回测、择时、任务、通知和实盘控制集中到同一界面 |
 | 数据准备 | `alphapilot prepare_data` | baostock / tushare → Qlib 数据链路 |
 | 通知与远程 | `alphapilot notify_commands` | 任务完成推送（Telegram / 飞书 / 邮件）+ 聊天命令远程发起与查询任务 |
@@ -88,7 +88,7 @@ AlphaPilot 的主线能力是自动化因子研究。你可以用自然语言启
 
 ### 模拟盘与实盘交易
 
-实盘系统把研究侧生成的目标持仓或择时信号接入统一执行链路：`LiveRuntime → LiveEngine → RiskGate → BrokerGateway`。默认模式是不会路由订单的 `dry_run`，本地演练使用 `paper`，外部柜台仿真使用 `simulation`；只有显式选择 `live` 并再次确认后，命令才允许向真实券商路由。
+实盘系统把研究侧生成的目标持仓或择时信号接入统一执行链路：`LiveRuntime → LiveEngine → RiskGate → BrokerGateway`。底层 `dry_run` 永远不路由订单；正式策略部署可使用 `paper`、`simulation`、`shadow` 或 `live`。SHADOW 会读取真实账户和实时行情，但永远不能路由订单；LIVE 还必须显式开启环境开关并完成启动对账。
 
 - 支持 `dry_run`、`paper`、`simulation`、`shadow`、`live` 运行模式，以及前台运行和长驻 daemon
 - 支持人工委托、撤单和目标组合提交；自动策略只能通过持久化实例与 `trading_*` 部署控制启动
@@ -347,7 +347,7 @@ supported_assets = ["equity", "fund"]
 supported_frequencies = ["day"]
 required_history = 21
 state_schema_version = 1
-deployable_modes = ["replay", "paper", "shadow", "live"]
+supported_run_modes = ["paper", "simulation", "shadow", "live"]
 description = "Long when close is above its simple moving average."
 parameter_schema_json = '''
 {"type":"object","properties":{"window":{"type":"integer","default":20,"minimum":2}},"required":["window"],"additionalProperties":false}
@@ -379,7 +379,7 @@ alphapilot trading_instance_create \
   --universe=600000.SSE \
   --params='{"window":20}' \
   --frequency=day \
-  --data_policy='{"feature_adjustment":"backward","history_window":21}' \
+  --data_policy='{"feature_adjustment":"backward","history_window":21,"data_version":"daily-bars-2026-07"}' \
   --portfolio_policy='{"policy_id":"timing_fixed_exposure","params":{"target_percent":0.2,"cash_buffer":0.1,"max_position_weight":0.3}}'
 
 alphapilot trading_instance_validate --instance_id=sma_20_demo
@@ -391,7 +391,54 @@ alphapilot trading_backtest --instance_id=sma_20_demo \
 
 其中 `target_percent` 属于 PortfolioPolicy，而不是信号算法：它控制信号激活时单个标的的目标仓位。这样，同一套信号代码可以用不同的仓位、现金缓冲和持仓上限创建多个实例。回放结果会在输出目录中保存信号、目标权重、委托、成交、持仓、权益和汇总文件。
 
-迭代策略时，请同步提升清单中的 `version` 并重启长驻进程。代码、版本、参数、股票池、数据政策或仓位政策变化都会改变 `config_hash`；系统会重新绑定持久化实例并使旧证据失效，随后需要重新验证。进入实盘前还必须按 `REPLAY → PAPER → SHADOW → LIVE` 完成门禁，不能从自定义策略直接绕过风控和 OMS。
+### 5. 编写多因子或模型策略
+
+复杂策略不要把数据读取、模型推理、组合构建和下单揉在一个类里。推荐按以下边界拆分：Provider 计算因子并输出 `SignalEnvelope`，模型及因子版本放入不可变研究 artifact，PortfolioPolicy 把信号转成目标权重，AccountSizer、RiskGate 和 OMS 继续由框架负责。需要跨周期缓存、在线模型状态或断点恢复时使用 Provider v2，并实现 `initialize`、`warmup`、`evaluate`、`snapshot`、`restore` 和 `stop`。
+
+因子模型已有研究资产时，先把它快照成实例：
+
+```bash
+alphapilot trading_instance_from_research \
+  --instance_id=lgb_factor_v3 \
+  --strategy_name=my_lgb_factor_asset \
+  --universe=600000.SSE,000001.SZ,510300.SSE \
+  --portfolio_policy='{"policy_id":"selection_topk_dropout_equal_weight","params":{"topk":10,"n_drop":2,"max_position_weight":0.1}}'
+alphapilot trading_instance_validate --instance_id=lgb_factor_v3
+```
+
+快照会绑定模型 SHA-256、因子与数据指纹、股票池和政策。不同模型或因子组合建议使用不同实例 ID；不要让运行中策略读取任意模型路径。参数、模型、因子、股票池、数据政策或 PortfolioPolicy 改变后，旧部署配置会保留但标记为 `stale`：先停止 daemon、重新验证实例，再调用一次 `trading_deploy` 绑定新的 `config_hash`。
+
+### 6. 独立配置 PAPER、仿真、SHADOW 或 LIVE
+
+REPLAY 只是 `trading_backtest` 执行的历史回放，不是部署级别。验证后的实例可以在 daemon 停止时直接配置或替换任意受支持运行模式，不需要逐级“晋级”：
+
+```bash
+# 内置本地撮合；Provider 固定为 paper
+alphapilot trading_deploy --instance_id=sma_20_demo --run_mode=paper
+
+# 券商仿真柜台；Provider 必须声明 simulation 账户能力
+alphapilot trading_deploy --instance_id=sma_20_demo --run_mode=simulation \
+  --trade_provider=tts --quote_provider=emt --account_profile=tts-sim-main
+
+# 真实账户只读影子运行；永远不能路由订单
+alphapilot trading_deploy --instance_id=sma_20_demo --run_mode=shadow \
+  --trade_provider=xtp --quote_provider=xtp --account_id=YOUR_ACCOUNT_ID
+
+# 直接配置 LIVE（不依赖 PAPER/SHADOW/UAT/一致性记录）
+ALPHAPILOT_AUTOMATED_LIVE_ENABLED=true \
+alphapilot trading_deploy --instance_id=sma_20_demo --run_mode=live \
+  --trade_provider=xtp --quote_provider=xtp --account_id=YOUR_ACCOUNT_ID
+
+alphapilot trading_start --instance_id=sma_20_demo
+alphapilot trading_deployments
+alphapilot trading_diagnostics --instance_id=sma_20_demo
+```
+
+LIVE 启动后先停在待对账状态；运行 `trading_reconcile` 成功后，再显式运行 `trading_resume`。即使不再有晋级门禁，LIVE 仍会逐单检查环境开关、账户与 Provider 绑定、单账户单写者、合约/行情、心跳、对账、Kill Switch 和 RiskGate。PAPER/SHADOW 会话与 `trading_decision_compare` 只提供诊断，不改变部署权限。
+
+Portal 的部署配置与生命周期接口仅允许本机监听，不要求 Operator Bearer 或必填原因。操作员令牌可用 `alphapilot trading_operator_token --operator_id=...` 在本机生成，明文只返回一次；它只用于仍受保护的 Kill Switch、Broker UAT、策略写操作和手工交易。
+
+迭代策略时，请同步提升清单中的 `version` 并重启长驻进程。代码、版本或任何实例绑定变化都会产生新的 `config_hash` 并要求重新验证和重新绑定部署，但不会删除原部署配置或运行诊断。
 
 仓库内还有一个带成交量确认的完整样例：[`strategies/dual_ma_volume_confirmed`](strategies/dual_ma_volume_confirmed)。需要生命周期状态、快照与恢复能力时，可继续实现 Provider v2；接口、pip entry point 和自定义 PortfolioPolicy 见[自定义策略开发文档](docs/developer/strategy-extension.md)，实例生命周期和常见错误见[策略实例指南](docs/user/strategy-instances.md)。
 
@@ -401,7 +448,7 @@ alphapilot trading_backtest --instance_id=sma_20_demo \
 2. 用 `mine` 或 AlphaForge 系列命令生成候选因子。
 3. 用 `backtest` 做组合回测或 IC 快筛，并在门户中查看结果。
 4. 将有效策略沉淀到策略资产，再用 `strategy_backtest`、`daily_signals` 或可恢复的 `trade_session` 持续验证。
-5. 如需走向交易，按 `dry_run → paper → shadow → live` 顺序演练；通过预检、风控和恢复检查后，再把目标组合或择时策略接入 daemon。
+5. 如需走向交易，先验证实例，再独立选择 `paper | simulation | shadow | live` 部署；`dry_run` 只属于底层调试，REPLAY 只属于回测。研究团队可自行要求演练时长或一致性阈值，但这些诊断不授予或阻断 LIVE。
 
 ## 📚 更多文档
 

@@ -14,7 +14,7 @@ function renderLivePage() {
   );
 }
 
-function mockLiveFetch(options: { alive?: boolean; accountMetrics?: boolean; daemonMode?: "paper" | "live" } = {}) {
+function mockLiveFetch(options: { alive?: boolean; accountMetrics?: boolean; daemonMode?: "paper" | "live"; noStrategies?: boolean } = {}) {
   const alive = options.alive ?? true;
   const daemonState = {
     engine: {
@@ -190,9 +190,9 @@ function mockLiveFetch(options: { alive?: boolean; accountMetrics?: boolean; dae
       });
     }
     if (path === "/api/trading/strategy-instances") {
-      return Response.json({ instances: [
-        { instance_id: "paper_sma", strategy_id: "sma_filter", deployment_level: "paper", lifecycle: "paper", config_hash: "paper-hash" },
-        { instance_id: "live_sma", strategy_id: "sma_filter", deployment_level: "live", lifecycle: "live", config_hash: "live-hash" },
+      return Response.json({ instances: options.noStrategies ? [] : [
+        { instance_id: "paper_sma", strategy_id: "sma_filter", validation_state: "validated", config_hash: "paper-hash" },
+        { instance_id: "live_sma", strategy_id: "sma_filter", validation_state: "validated", config_hash: "live-hash" },
       ] });
     }
     if (path === "/api/trading/broker-uat-runs") {
@@ -205,38 +205,51 @@ function mockLiveFetch(options: { alive?: boolean; accountMetrics?: boolean; dae
     }
     if (path === "/api/trading/deployments/live_sma") {
       return Response.json({
-        instance: { instance_id: "live_sma", lifecycle: "running", deployment_level: "live", config_hash: "live-hash" },
+        instance: { instance_id: "live_sma", validation_state: "validated", config_hash: "live-hash" },
+        configuration: {
+          instance_id: "live_sma", config_hash: "live-hash", run_mode: "live",
+          execution_environment: "live", trade_provider: "emt", quote_provider: "emt",
+          account_profile: "", account_id_hash: "sha256:live-account-hash",
+          quote_data_kind: "realtime", binding_hash: "binding-live", version: 1,
+        },
         runtime: {
           desired_state: "running", observed_state: "running", account_id_hash: "sha256:live-account-hash",
-          broker: "emt", runner_heartbeat_at: "2026-07-06T10:02:03+08:00", reconcile_required: false,
+          run_mode: "live", trade_provider: "emt", quote_provider: "emt",
+          runner_heartbeat_at: "2026-07-06T10:02:03+08:00", reconcile_required: false,
         },
-        stage_runs: [
-          { run_id: "paper-run", stage: "paper", status: "passed", trading_sessions: 20, config_hash: "live-hash" },
-          { run_id: "shadow-run", stage: "shadow", status: "passed", trading_sessions: 5, config_hash: "live-hash" },
+        runs: [
+          { run_id: "live-run", run_mode: "live", status: "running", trading_sessions: 1, config_hash: "live-hash" },
         ],
         route_blocks: [],
       });
     }
     if (path === "/api/trading/deployments/paper_sma") {
       return Response.json({
-        instance: { instance_id: "paper_sma", lifecycle: "ready", deployment_level: "paper", config_hash: "paper-hash" },
+        instance: { instance_id: "paper_sma", validation_state: "validated", config_hash: "paper-hash" },
+        configuration: {
+          instance_id: "paper_sma", config_hash: "paper-hash", run_mode: "paper",
+          execution_environment: "local_paper", trade_provider: "paper", quote_provider: "paper",
+          account_profile: "", quote_data_kind: "synthetic", binding_hash: "binding-paper", version: 1,
+        },
         runtime: {
-          desired_state: "ready", observed_state: "ready", broker: "paper",
+          desired_state: "ready", observed_state: "ready", run_mode: "paper",
           execution_environment: "local_paper", trade_provider: "paper", quote_provider: "paper",
           quote_data_kind: "synthetic", reconcile_required: false,
         },
-        stage_runs: [], route_blocks: [],
+        runs: [], route_blocks: [],
       });
     }
-    if (path === "/api/trading/deployments/paper_sma/execution-binding") {
+    if (path === "/api/trading/deployments/live_sma/diagnostics") {
       return Response.json({
-        instance_id: "paper_sma", execution_environment: "local_paper",
-        trade_provider: "paper", quote_provider: "paper", account_profile: "",
-        quote_data_kind: "synthetic", binding_hash: "binding-paper", version: 1,
+        instance_id: "live_sma", config_hash: "live-hash",
+        modes: { paper: { trading_sessions: 0, completed_runs: 0 }, simulation: { trading_sessions: 0, completed_runs: 0 }, shadow: { trading_sessions: 0, completed_runs: 0 }, live: { trading_sessions: 1, completed_runs: 0 } },
       });
     }
-    if (path === "/api/trading/deployments/paper_sma/qualification") {
-      return Response.json({ eligible_for_live_authorization: false });
+    if (path === "/api/trading/deployments/paper_sma/diagnostics") {
+      return Response.json({
+        instance_id: "paper_sma", config_hash: "paper-hash",
+        modes: { paper: { trading_sessions: 0, completed_runs: 0 }, simulation: { trading_sessions: 0, completed_runs: 0 }, shadow: { trading_sessions: 0, completed_runs: 0 }, live: { trading_sessions: 0, completed_runs: 0 } },
+      });
     }
     if (path === "/api/trading/kill-switches") {
       return Response.json({ kill_switches: [] });
@@ -435,9 +448,10 @@ describe("LivePage", () => {
     expect(await screen.findByRole("tab", { name: "实盘 LIVE" })).toHaveAttribute("aria-selected", "true");
 
     fireEvent.click(screen.getByRole("button", { name: "连接与诊断" }));
-    expect(await screen.findByLabelText("交易券商")).toBeDisabled();
-    fireEvent.click(screen.getByLabelText("网络预检"));
-    fireEvent.click(screen.getByRole("button", { name: "预检" }));
+    const drawer = await screen.findByRole("dialog", { name: "连接与诊断" });
+    expect(within(drawer).getByLabelText("交易券商")).toBeDisabled();
+    fireEvent.click(within(drawer).getByLabelText("网络预检"));
+    fireEvent.click(within(drawer).getByRole("button", { name: "预检" }));
     await waitFor(() => expect(postedJson(fetchMock, "/api/live/runtime/preflight")?.network).toBe(true));
     expect(postedJson(fetchMock, "/api/live/runtime/preflight")?.trade_broker).toBe("emt");
     fireEvent.keyDown(document, { key: "Escape" });
@@ -459,7 +473,6 @@ describe("LivePage", () => {
     fireEvent.change(screen.getByLabelText("择时策略"), { target: { value: "live_sma" } });
     fireEvent.click(screen.getByRole("button", { name: "暂停策略" }));
     await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input) === "/api/trading/deployments/live_sma/pause")).toBe(true));
-    fireEvent.click(screen.getByText("更多技术操作"));
     fireEvent.click(screen.getByRole("button", { name: "重连" }));
     await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input) === "/api/live/daemon/reconnect")).toBe(true));
 
@@ -484,9 +497,10 @@ describe("LivePage", () => {
   });
 
   it("starts the Paper daemon with the selected initial cash", async () => {
-    const fetchMock = mockLiveFetch({ alive: false });
+    const fetchMock = mockLiveFetch({ alive: false, noStrategies: true });
     renderLivePage();
 
+    expect(await screen.findByText(/当前没有已验证的策略实例/)).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: "启动 daemon" })).toBeEnabled();
     fireEvent.change(screen.getByLabelText("初始资金"), { target: { value: "250000" } });
     fireEvent.click(screen.getByRole("button", { name: "启动 daemon" }));
@@ -497,7 +511,7 @@ describe("LivePage", () => {
 
   it("starts the Live daemon with resolved providers and no simulated cash", async () => {
     window.localStorage.setItem("portal_live_workspace", "live");
-    const fetchMock = mockLiveFetch({ alive: false });
+    const fetchMock = mockLiveFetch({ alive: false, noStrategies: true });
     vi.spyOn(window, "confirm").mockReturnValue(true);
     renderLivePage();
 
@@ -515,20 +529,54 @@ describe("LivePage", () => {
     renderLivePage();
 
     fireEvent.click(await screen.findByRole("tab", { name: "柜台仿真" }));
-    await waitFor(() => expect(screen.getByText("tts")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByLabelText("交易券商")).toHaveValue("tts"));
     expect(postedJson(fetchMock, "/api/live/daemon/start")).toBeNull();
 
-    fireEvent.change(screen.getByLabelText("择时策略"), { target: { value: "paper_sma" } });
     const quote = await screen.findByLabelText("行情源");
     const broker = screen.getByLabelText("交易券商");
     expect(broker).toHaveValue("tts");
-    expect(within(broker).getAllByRole("option").map((item) => item.textContent)).toEqual(["tts"]);
+    expect(within(broker).getAllByRole<HTMLOptionElement>("option").map((item) => item.value)).toEqual(["tts"]);
     fireEvent.change(quote, { target: { value: "tts_7x24" } });
 
     expect(await screen.findByText(/当前为回放行情/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("tab", { name: "目标仓位" }));
     expect(screen.getByLabelText("真实路由下单")).toBeDisabled();
     expect(screen.getByRole("button", { name: "对账并下单" })).toBeDisabled();
+  });
+
+  it("supports manual buy and sell with no strategy instances", async () => {
+    const fetchMock = mockLiveFetch({ noStrategies: true });
+    renderLivePage();
+
+    expect(await screen.findByText("交易连接与行情源")).toBeInTheDocument();
+    expect(screen.getByLabelText("交易券商")).toHaveValue("paper");
+    expect(screen.getByLabelText("行情源")).toHaveValue("paper");
+    expect(screen.getByText(/当前没有已验证的策略实例/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "预检" }));
+    await waitFor(() => expect(postedJson(fetchMock, "/api/live/runtime/preflight")).toMatchObject({
+      trade_broker: "paper",
+      quote_provider: "paper",
+    }));
+
+    fireEvent.change(screen.getByLabelText("代码"), { target: { value: "SH600000" } });
+    fireEvent.change(screen.getByLabelText("价格"), { target: { value: "10.12" } });
+    const submit = screen.getByRole("button", { name: "提交委托" });
+    fireEvent.click(submit);
+    await waitFor(() => {
+      const calls = fetchMock.mock.calls.filter(([input, init]) => String(input) === "/api/live/daemon/order" && init?.method === "POST");
+      expect(calls).toHaveLength(1);
+    });
+    await waitFor(() => expect(submit).toBeEnabled());
+
+    fireEvent.change(screen.getByLabelText("方向"), { target: { value: "sell" } });
+    fireEvent.click(submit);
+    await waitFor(() => {
+      const calls = fetchMock.mock.calls.filter(([input, init]) => String(input) === "/api/live/daemon/order" && init?.method === "POST");
+      expect(calls).toHaveLength(2);
+      const sides = calls.map(([, init]) => JSON.parse(String(init?.body || "{}")).side);
+      expect(sides).toEqual(["buy", "sell"]);
+    });
   });
 
   it("persists environment changes and always resets target routing", async () => {

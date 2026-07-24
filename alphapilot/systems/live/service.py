@@ -33,6 +33,24 @@ class LiveSystem(BaseSystem):
         # a standalone LiveConfig from the environment.
         self.config: LiveConfig = getattr(context.config, "live", None) or LiveConfig.load()
 
+    def deployment_provider_metadata(
+        self,
+        mode: str,
+        trade_provider: str,
+        quote_provider: str,
+    ) -> dict[str, str]:
+        """Resolve deployment capabilities behind the live-system boundary."""
+
+        from alphapilot.systems.live.brokers.registry import validate_provider_pair
+
+        trade, quote = validate_provider_pair(mode, trade_provider, quote_provider)
+        return {
+            "trade_provider": str(trade.name).strip().lower(),
+            "quote_provider": str(quote.name).strip().lower(),
+            "trade_account_kind": str(trade.account_kind).strip().lower(),
+            "quote_data_kind": str(quote.data_kind).strip().lower(),
+        }
+
     # ---- engine factory -------------------------------------------------- #
     def make_broker(self):
         """Pick the broker gateway for the configured mode/broker.

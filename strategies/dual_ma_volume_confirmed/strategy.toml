@@ -11,6 +11,6 @@ supported_frequencies = ["day"]
 output_type = "signals"
 required_history = 51
 state_schema_version = 1
-deployable_modes = ["replay", "paper", "shadow", "live"]
+supported_run_modes = ["paper", "simulation", "shadow", "live"]
 description = "Long/flat 10/50 moving-average cross with 20-day median-volume entry confirmation."
 parameter_schema_json = '''{"type":"object","properties":{"short_window":{"type":"integer","default":10,"minimum":1},"long_window":{"type":"integer","default":50,"minimum":2},"volume_window":{"type":"integer","default":20,"minimum":1},"target_percent":{"type":"number","default":1.0,"minimum":0.0,"maximum":1.0}},"required":["short_window","long_window","volume_window"],"additionalProperties":false}'''

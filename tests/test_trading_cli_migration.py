@@ -23,7 +23,10 @@ class _TradingCLIStore:
         return {"instance_id": instance_id, "config_hash": "config-hash"}
 
     def get_runtime_state(self, instance_id: str) -> dict[str, Any]:
-        return {"instance_id": instance_id, "account_id": "account", "broker": "xtp"}
+        return {
+            "instance_id": instance_id, "account_id": "account",
+            "trade_provider": "xtp",
+        }
 
 
 class _TradingCLISystem:
@@ -69,18 +72,17 @@ class _TradingCLISystem:
     def cancel_backtest_run(self, run_id):  # noqa: ANN001, ANN201
         return self._result("cancel", run_id)
 
-    def promote(self, instance_id, payload):  # noqa: ANN001, ANN201
-        self.calls.append(("promote", payload))
-        return {"instance_id": instance_id, "config_hash": "config-hash"}
+    def configure_deployment(self, instance_id, payload):  # noqa: ANN001, ANN201
+        return self._result("deploy", {"instance_id": instance_id, **payload})
+
+    def list_deployments(self):  # noqa: ANN201
+        return [self._result("deployments")]
+
+    def deployment_diagnostics(self, instance_id):  # noqa: ANN001, ANN201
+        return self._result("diagnostics", instance_id)
 
     def create_operator_token(self, operator_id, **payload):  # noqa: ANN001, ANN201
         return self._result("token", {"operator_id": operator_id, **payload})
-
-    def authorize_live(self, instance_id, payload, operator):  # noqa: ANN001, ANN201
-        return self._result("authorize", {
-            "instance_id": instance_id, "payload": payload,
-            "operator_id": operator.operator_id,
-        })
 
     def lifecycle_action(self, instance_id, action):  # noqa: ANN001, ANN201
         return {"ok": True, "instance_id": instance_id, "action": action}
@@ -110,14 +112,14 @@ class _TradingCLISystem:
     def removal_check(self, instance_id):  # noqa: ANN001, ANN201
         return self._result("removal", instance_id)
 
-    def start_parity_run(self, instance_id, payload):  # noqa: ANN001, ANN201
-        return self._result("parity-start", {"instance_id": instance_id, **payload})
+    def compare_decisions(self, instance_id, payload):  # noqa: ANN001, ANN201
+        return self._result("decision-compare", {"instance_id": instance_id, **payload})
 
-    def get_parity_run(self, run_id):  # noqa: ANN001, ANN201
-        return self._result("parity-status", run_id)
+    def get_decision_comparison(self, comparison_id):  # noqa: ANN001, ANN201
+        return self._result("decision-comparison", comparison_id)
 
-    def qualification(self, instance_id, **payload):  # noqa: ANN001, ANN201
-        return self._result("qualification", {"instance_id": instance_id, **payload})
+    def list_decision_comparisons(self, instance_id):  # noqa: ANN001, ANN201
+        return [self._result("decision-comparisons", instance_id)]
 
     def start_broker_uat(self, payload):  # noqa: ANN001, ANN201
         if self.fail_uat:
@@ -203,12 +205,14 @@ def test_trading_cli_formal_surface_and_file_outputs(
     assert completed["status"] == "completed"
     assert module.trading_backtest_status("run-1", detail=True)["detail"] is True
     module.trading_backtest_cancel("run-1")
-    module.trading_promote("alpha", "paper", account_id="account", broker="xtp")
-    module.trading_operator_token("operator", label="release", expires_in_days=1)
-    module.trading_authorize_live(
-        "alpha", "account", "xtp", "approved", "operator",
-        baseline_positions='{"600000.SSE": 100}',
+    module.trading_deploy("alpha", "paper")
+    module.trading_deploy(
+        "alpha", "simulation", trade_provider="tts", quote_provider="emt",
+        account_profile="sim-main",
     )
+    module.trading_deployments()
+    module.trading_diagnostics("alpha")
+    module.trading_operator_token("operator", label="release", expires_in_days=1)
     for action in ("start", "pause", "reconcile", "resume", "stop"):
         getattr(module, f"trading_{action}")("alpha")
     module.trading_status("alpha")
@@ -229,9 +233,9 @@ def test_trading_cli_formal_surface_and_file_outputs(
         module.trading_compatibility(export_path=str(tmp_path / "blocked.json"))
 
     module.trading_removal_check("alpha")
-    module.trading_parity_start("alpha", "replay", "shadow")
-    module.trading_parity_status("parity")
-    module.trading_qualification("alpha")
+    module.trading_decision_compare("alpha", "replay", "replay", "shadow", "shadow")
+    module.trading_decision_comparisons("alpha")
+    module.trading_decision_comparisons("alpha", "comparison")
     started = module.trading_broker_uat_start(
         "xtp", "600000.SSE", "buy", 100, 10, 1500,
         "I_UNDERSTAND_REAL_ORDERS",
@@ -256,7 +260,13 @@ def test_trading_cli_formal_surface_and_file_outputs(
     assert set(module.commands()) >= {
         "trading_preview", "trading_backtest", "trading_broker_uat_start",
         "trading_broker_uat_preflight",
-        "trading_removal_check",
+        "trading_removal_check", "trading_deploy", "trading_deployments",
+        "trading_diagnostics", "trading_decision_compare",
     }
+    for removed in (
+        "trading_promote", "trading_authorize_live", "trading_qualification",
+        "trading_parity_start", "trading_parity_status",
+    ):
+        assert not hasattr(module, removed)
     assert len(system.operator_auth.events) >= 10
     assert capsys.readouterr().out

@@ -11,7 +11,7 @@ from alphapilot.systems.live.targets import TargetPortfolio
 from alphapilot.systems.live.types import (
     Account, Direction, Exchange, Order, OrderStatus, Position,
 )
-from alphapilot.systems.trading.domain import StrategyInstanceConfig
+from alphapilot.systems.trading.domain import DeploymentSpec, StrategyInstanceConfig
 from alphapilot.systems.trading.registry import StrategyRegistry, resolve_required_history
 from alphapilot.systems.trading.store import StrategyRuntimeStore
 
@@ -79,6 +79,28 @@ parameter_schema_json = '''{"type":"object","properties":{"window":{"type":"inte
     helper.write_text("VALUE = 2\n", encoding="utf-8")
     refreshed = StrategyRegistry(local_root=tmp_path / "strategies").discover()
     assert refreshed.get("custom_demo").code_hash != initial_hash
+
+
+def test_legacy_manifest_deployable_modes_is_rejected_without_alias(
+    tmp_path: Path,
+) -> None:
+    local = tmp_path / "strategies" / "legacy"
+    local.mkdir(parents=True)
+    (local / "strategy.py").write_text("class Demo: pass\n", encoding="utf-8")
+    (local / "strategy.toml").write_text(
+        "[strategy]\n"
+        "id='legacy_modes'\n"
+        "version='0.1.0'\n"
+        "factory='strategy:Demo'\n"
+        "deployable_modes=['replay','paper']\n",
+        encoding="utf-8",
+    )
+
+    registry = StrategyRegistry(local_root=tmp_path / "strategies").discover(
+        builtin_contributions=[],
+    )
+    assert "legacy_modes" not in {item.strategy_id for item in registry.list()}
+    assert "deployable_modes was removed" in registry.quarantined()[0]["reason"]
 
 
 def test_local_v2_manifest_uses_lifecycle_worker_without_forced_artifact_argument(
@@ -162,49 +184,47 @@ def test_execution_planner_applies_dynamic_equity_order_cap() -> None:
     assert [request.volume for request in plan.requests] == [2000, 2000]
 
 
-def test_runtime_store_enforces_stage_evidence_and_single_live_writer(tmp_path: Path) -> None:
+def test_runtime_store_allows_direct_live_and_enforces_single_writer(tmp_path: Path) -> None:
     store = StrategyRuntimeStore(tmp_path / "runtime.sqlite3")
     for instance_id in ("a", "b"):
-        store.create_instance(StrategyInstanceConfig(
+        created = store.create_instance(StrategyInstanceConfig(
             instance_id, "dual_ma", "1.0.0", {"short_window": 5, "long_window": 20},
             ("SH600000",),
         ))
+        store.set_validation_state(instance_id, "validated")
+        store.configure_deployment(DeploymentSpec(
+            instance_id=instance_id,
+            config_hash=created["config_hash"],
+            run_mode="live",
+            execution_environment="live",
+            trade_provider="xtp",
+            quote_provider="xtp",
+            account_id="acc",
+            quote_data_kind="realtime",
+        ))
 
-    with pytest.raises(ValueError, match="evidence"):
-        store.promote("a", "paper")
-    store.record_stage("a", "replay", passed=True)
-    assert store.promote("a", "paper")["deployment_level"] == "paper"
-    store.record_stage("a", "paper", passed=True)
-    store.promote("a", "shadow")
-    store.record_stage("a", "shadow", passed=True)
-    assert store.promote("a", "live", account_id="acc", broker="paper", approval="ok")["deployment_level"] == "live"
-
-    store.record_stage("b", "replay", passed=True)
-    store.promote("b", "paper")
-    store.record_stage("b", "paper", passed=True)
-    store.promote("b", "shadow")
-    store.record_stage("b", "shadow", passed=True)
-    with pytest.raises(ValueError, match="already has writer"):
-        store.promote("b", "live", account_id="acc", broker="paper", approval="ok")
+    store.update_runtime_state("a", binding_active=True)
+    with pytest.raises(ValueError, match="active automated writer"):
+        store.update_runtime_state("b", binding_active=True)
 
     assert store.record_decision("d1", "a", "hash", {}) is True
     assert store.record_decision("d1", "a", "hash", {}) is False
 
 
-def test_instance_configuration_change_resets_live_to_replay(tmp_path: Path) -> None:
+def test_instance_configuration_change_marks_deployment_stale(tmp_path: Path) -> None:
     store = StrategyRuntimeStore(tmp_path / "runtime.sqlite3")
-    store.create_instance(StrategyInstanceConfig(
+    created = store.create_instance(StrategyInstanceConfig(
         "a", "dual_ma", "1.0.0", {"short_window": 5, "long_window": 20}, ("SH600000",),
     ))
-    for source, target in (("replay", "paper"), ("paper", "shadow")):
-        store.record_stage("a", source, passed=True)
-        store.promote("a", target)
-    store.record_stage("a", "shadow", passed=True)
-    store.promote("a", "live", account_id="account", broker="paper", approval="test")
+    store.set_validation_state("a", "validated")
+    store.configure_deployment(DeploymentSpec(
+        instance_id="a", config_hash=created["config_hash"], run_mode="paper",
+    ))
 
     updated = store.update_instance("a", {"params": {"short_window": 10, "long_window": 30}})
 
-    assert updated["deployment_level"] == "replay"
+    assert updated["validation_state"] == "created"
+    assert store.get_deployment_spec("a")["stale"] is True
     assert updated["config_hash"] == updated["config"]["config_hash"]
     assert len(updated["config_hash"]) == 64
 
@@ -222,7 +242,7 @@ def test_model_artifact_requires_explicit_trusted_root(tmp_path: Path, monkeypat
     assert len(verify_trusted_model(model)) == 64
 
 
-def test_daemon_runner_accepts_only_promoted_persistent_instance(engine) -> None:
+def test_daemon_runner_accepts_only_validated_deployed_persistent_instance(engine) -> None:
     from alphapilot.systems.live.daemon import _build_strategy_instance_runner
 
     trading = engine.get_system("trading")
@@ -260,7 +280,7 @@ def test_daemon_runner_accepts_only_promoted_persistent_instance(engine) -> None
                 runtime=runtime,
                 bar_source=runtime.market_data,
             )
-        with pytest.raises(ValueError, match="promoted to PAPER"):
+        with pytest.raises(ValueError, match="must be validated"):
             _build_strategy_instance_runner(
                 runtime.engine,
                 ["600000"],
@@ -270,8 +290,22 @@ def test_daemon_runner_accepts_only_promoted_persistent_instance(engine) -> None
                 runtime=runtime,
                 bar_source=runtime.market_data,
             )
-        trading.store.record_stage(instance_id, "replay", passed=True)
-        trading.store.promote(instance_id, "paper")
+        validated = trading.validate_instance(instance_id)["instance"]
+        with pytest.raises(KeyError, match="deployment is not configured"):
+            _build_strategy_instance_runner(
+                runtime.engine,
+                ["600000"],
+                bar_seconds=60,
+                kernel_engine=engine,
+                strategy_instance_id=instance_id,
+                runtime=runtime,
+                bar_source=runtime.market_data,
+            )
+        trading.store.configure_deployment(DeploymentSpec(
+            instance_id=instance_id,
+            config_hash=validated["config_hash"],
+            run_mode="paper",
+        ))
         runner = _build_strategy_instance_runner(
             runtime.engine,
             ["600000"],
@@ -376,8 +410,12 @@ def test_real_daemon_persistent_paper_instance_uses_formal_instance_runner(
         "universe": ["SH600000"],
         "frequency": "day",
     })
-    trading.store.record_stage(instance_id, "replay", passed=True)
-    trading.store.promote(instance_id, "paper")
+    validated = trading.validate_instance(instance_id)["instance"]
+    trading.store.configure_deployment(DeploymentSpec(
+        instance_id=instance_id,
+        config_hash=validated["config_hash"],
+        run_mode="paper",
+    ))
     monkeypatch.setattr(trading, "historical_data", History())
     bar_source = BarSource()
 
@@ -440,12 +478,12 @@ def test_timing_policy_rejects_unsafe_exposure_configurations() -> None:
         TimingFixedExposurePolicy(exposure_mode="unsupported").build(inputs, context)
 
 
-def test_contract_redaction_release_and_parity_validation_branches(
+def test_contract_redaction_release_and_comparison_validation_branches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from alphapilot.systems.live.redaction import redact_secrets
     from alphapilot.systems.trading.contracts import CompletedBar
-    from alphapilot.systems.trading.parity import DecisionParityService
+    from alphapilot.systems.trading.comparison import DecisionComparisonService
     from alphapilot.systems.trading.release_verification import (
         report_path_for,
         required_checks_for,
@@ -477,43 +515,38 @@ def test_contract_redaction_release_and_parity_validation_branches(
         "config_hash": "current",
         "as_of": "2026-07-17T15:00:00+08:00",
         "observation_id": "observation",
+        "history_hash": "history",
+        "provider_state_before_hash": "before",
+        "provider_state_after_hash": "after",
+        "signal_hash": "signal",
+        "weights_hash": "weights",
+        "data_version": "data-v1",
+        "model_version": "model-v1",
+        "policy_version": "policy-v1",
+        "account_hash": "",
+        "quote_hash": "",
+        "instrument_hash": "",
+        "plan_hash": "",
     }
-
-    class Store:
-        def __init__(self) -> None:
-            self.results = []
-
-        def create_parity_run(self, *_args, **_kwargs):  # noqa: ANN002, ANN003, ANN201
-            return {"parity_run_id": "parity", "config_hash": "current"}
-
-        def get_instance(self, _instance_id):  # noqa: ANN001, ANN201
-            return {"config": {"frequency": "day"}}
-
-        def list_decision_observations(self, _instance_id, *, mode, run_id):  # noqa: ANN001, ANN201
-            del run_id
-            if mode == "replay":
-                return [
-                    {**template, "observation_id": "replay-1"},
-                    {**template, "observation_id": "replay-2"},
-                    {**template, "config_hash": "stale", "observation_id": "stale"},
-                ]
-            return [{**template, "observation_id": "shadow"}]
-
-        def record_parity_result(self, *_args, **kwargs):  # noqa: ANN002, ANN003, ANN201
-            self.results.append(kwargs)
-
-        def finish_parity_run(self, run_id, *, details):  # noqa: ANN001, ANN201
-            return {"parity_run_id": run_id, "details": details, "results": self.results}
-
-    store = Store()
-    result = DecisionParityService(store).compare(
-        "instance", replay_run_id="replay", shadow_stage_run_id="shadow",
+    grouped = DecisionComparisonService._group_observations(
+        [
+            {**template, "observation_id": "left-1"},
+            {**template, "observation_id": "left-2"},
+            {**template, "config_hash": "stale", "observation_id": "stale"},
+        ],
+        config_hash="current",
+        daily=True,
     )
-    assert result["results"][0]["status"] == "not_comparable"
-    assert result["results"][0]["details"] == {
-        "replay_count": 2, "shadow_count": 1,
-    }
-    missing = DecisionParityService._compare_observations(None, template)
-    assert missing[2] == {"missing": "replay"}
-    missing = DecisionParityService._compare_observations(template, None)
-    assert missing[2] == {"missing": "shadow"}
+    assert len(grouped["2026-07-17"]) == 2
+    missing = DecisionComparisonService._compare_observations(None, template)
+    assert missing[2] == {"missing": "left"}
+    missing = DecisionComparisonService._compare_observations(template, None)
+    assert missing[2] == {"missing": "right"}
+    mismatch = DecisionComparisonService._compare_observations(
+        template, {**template, "signal_hash": "different"},
+    )
+    assert mismatch[0] == "mismatch"
+    incomparable = DecisionComparisonService._compare_observations(
+        template, {**template, "data_version": "revised"},
+    )
+    assert incomparable[0] == "not_comparable"

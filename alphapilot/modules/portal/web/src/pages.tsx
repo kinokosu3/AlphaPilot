@@ -481,7 +481,7 @@ export function TimingPage() {
   const [progress, setProgress] = useState<JobProgress | null>(null);
   const [detail, setDetail] = useState<TimingDetailPayload | null>(null);
   const instances = useAsync(
-    () => api.get<{ instances: Array<{ instance_id: string; strategy_id: string; lifecycle: string; deployment_level: string; config_hash: string }> }>("/api/trading/strategy-instances"),
+    () => api.get<{ instances: Array<{ instance_id: string; strategy_id: string; validation_state: string; config_hash: string }> }>("/api/trading/strategy-instances"),
     [],
   );
   const [newInstanceId, setNewInstanceId] = useState("");
@@ -721,7 +721,7 @@ export function TimingPage() {
 
       <section className="panel">
         <div className="panel-head compact">
-          <div><h2>策略实例与部署</h2><span className="muted">同一个策略定义可以保存多组参数；实盘权限绑定实例和配置哈希。</span></div>
+          <div><h2>策略实例</h2><span className="muted">实例只保存代码、参数、因子、模型、股票池和政策；部署在实盘工作区独立配置。</span></div>
         </div>
         <div className="row-actions">
           <input value={newInstanceId} onChange={(event) => setNewInstanceId(event.target.value)} placeholder="实例 ID，例如 ma_5_20" />
@@ -735,10 +735,10 @@ export function TimingPage() {
         </div>
         <div className="table-wrap">
           <table>
-            <thead><tr><th>实例</th><th>策略</th><th>生命周期</th><th>部署级别</th><th>配置哈希</th><th>操作</th></tr></thead>
+            <thead><tr><th>实例</th><th>策略</th><th>校验状态</th><th>配置哈希</th><th>操作</th></tr></thead>
             <tbody>{(instances.data?.instances || []).map((item) => (
               <tr key={item.instance_id}>
-                <td>{item.instance_id}</td><td>{item.strategy_id}</td><td>{item.lifecycle}</td><td>{item.deployment_level}</td>
+                <td>{item.instance_id}</td><td>{item.strategy_id}</td><td>{item.validation_state}</td>
                 <td><code>{item.config_hash.slice(0, 12)}</code></td>
                 <td><button className="button small" disabled={busy} onClick={() => validateStrategyInstance(item.instance_id)}>校验</button></td>
               </tr>

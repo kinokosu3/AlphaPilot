@@ -111,7 +111,7 @@ class LiveTimingRunner:
                     origin=RouteOrigin.AUTOMATED,
                     instance_id=self.instance_id,
                     config_hash=self.config_hash,
-                    deployment_level=engine.config.mode,
+                    run_mode=engine.config.mode,
                     runtime_id=self.runtime_id,
                 ),
             )
@@ -260,7 +260,7 @@ class LiveTimingRunner:
         try:
             intents = self.strategy.on_bar(bar)
         except Exception as exc:
-            self._record_stage_event(
+            self._record_runtime_event(
                 "unresolved_errors",
                 details={"where": "strategy.on_bar", "error": f"{type(exc).__name__}: {exc}"},
             )
@@ -387,7 +387,7 @@ class LiveTimingRunner:
     def _discard_pending_target(self, reason: str, *, event_type: str) -> None:
         count = len(self.pending_intents)
         self.pending_intents = []
-        self._record_stage_event(
+        self._record_runtime_event(
             event_type,
             details={"reason": reason, "discarded_intents": count},
         )
@@ -428,7 +428,7 @@ class LiveTimingRunner:
             ):
                 accepted.append(request)
             else:
-                self._record_stage_event(
+                self._record_runtime_event(
                     "duplicate_routes",
                     details={"reference": request.reference, "plan_id": plan_id},
                 )
@@ -513,12 +513,12 @@ class LiveTimingRunner:
                     payload = candidate if isinstance(candidate, dict) else {}
                     break
             rule = str(payload.get("rule") or "")
-            self._record_stage_event(
+            self._record_runtime_event(
                 "route_rejections",
                 details={"reference": request.reference, "rule": rule},
             )
             if rule == "duplicate":
-                self._record_stage_event(
+                self._record_runtime_event(
                     "duplicate_routes",
                     details={"reference": request.reference, "source": "risk_gate"},
                 )
@@ -527,7 +527,7 @@ class LiveTimingRunner:
                 "max_total_position_pct",
                 "max_position_count",
             }:
-                self._record_stage_event(
+                self._record_runtime_event(
                     "position_breaches",
                     details={"reference": request.reference},
                 )
@@ -580,9 +580,9 @@ class LiveTimingRunner:
         return self.status()
 
     def _heartbeat(self) -> None:
-        stage = str(self.engine.config.mode)
-        if stage in {RunMode.PAPER, RunMode.SHADOW}:
-            record_session = getattr(self.runtime_store, "record_stage_session", None)
+        run_mode = str(self.engine.config.mode)
+        if run_mode in {RunMode.PAPER, RunMode.SIMULATION, RunMode.SHADOW, RunMode.LIVE}:
+            record_session = getattr(self.runtime_store, "record_runtime_session", None)
             state_value = str(getattr(self.engine.session.state, "value", self.engine.session.state))
             if callable(record_session) and state_value not in {"closed", "pre_open", "post_close"}:
                 now = (
@@ -592,7 +592,7 @@ class LiveTimingRunner:
                 record_session(
                     self.instance_id,
                     config_hash=self.config_hash,
-                    stage=stage,
+                    run_mode=run_mode,
                     session=now.date().isoformat(),
                 )
         if not self.runtime_id:
@@ -608,16 +608,16 @@ class LiveTimingRunner:
             observed_state=self.status()["lifecycle"],
         )
 
-    def _record_stage_event(self, event_type: str, *, details: Any = None) -> None:
-        stage = str(self.engine.config.mode)
-        if stage not in {RunMode.PAPER, RunMode.SHADOW}:
+    def _record_runtime_event(self, event_type: str, *, details: Any = None) -> None:
+        run_mode = str(self.engine.config.mode)
+        if run_mode not in {RunMode.PAPER, RunMode.SIMULATION, RunMode.SHADOW, RunMode.LIVE}:
             return
-        record = getattr(self.runtime_store, "record_stage_event", None)
+        record = getattr(self.runtime_store, "record_runtime_event", None)
         if callable(record):
             record(
                 self.instance_id,
                 config_hash=self.config_hash,
-                stage=stage,
+                run_mode=run_mode,
                 event_type=event_type,
                 details=details,
             )

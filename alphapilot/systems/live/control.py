@@ -47,11 +47,11 @@ class DaemonRuntimeControl:
         return result
 
     def start(self, instance: dict[str, Any]) -> RuntimeCommandResult:
-        level = str(instance["deployment_level"])
+        run_mode = str((instance.get("deployment") or {}).get("run_mode") or "")
         runtime = instance.get("runtime") or {}
-        mode = _mode_for_level(level, str(runtime.get("execution_environment") or ""))
+        mode = _mode_for_deployment(run_mode)
         config = self._config_for(instance)
-        broker = str(runtime.get("trade_provider") or runtime.get("broker") or config.trade_broker or config.broker or "paper")
+        broker = str(runtime.get("trade_provider") or config.trade_broker or config.broker or "paper")
         quote_provider = str(runtime.get("quote_provider") or config.quote_provider or broker)
         if mode == RunMode.PAPER:
             broker = "paper"
@@ -202,7 +202,7 @@ class DaemonRuntimeControl:
         return self._owned_command(
             instance,
             "strategy_resume",
-            {"confirm_live": instance["deployment_level"] == "live"},
+            {"confirm_live": (instance.get("deployment") or {}).get("run_mode") == "live"},
         )
 
     def stop(self, instance: dict[str, Any]) -> RuntimeCommandResult:
@@ -273,16 +273,15 @@ class DaemonRuntimeControl:
             return "daemon runtime_id does not match the observed deployment runtime"
         raw = result.raw or {}
         try:
-            expected_mode = _mode_for_level(
-                str(instance.get("deployment_level") or ""),
-                str(runtime.get("execution_environment") or ""),
+            expected_mode = _mode_for_deployment(
+                str((instance.get("deployment") or {}).get("run_mode") or "")
             )
         except ValueError:
-            return "deployment level has no controllable runtime mode"
+            return "deployment has no controllable run mode"
         actual_mode = str(raw.get("mode") or "")
         if actual_mode != expected_mode:
-            return "daemon run mode does not match the deployment level"
-        expected_broker = str(runtime.get("broker") or "")
+            return "daemon run mode does not match the deployment"
+        expected_broker = str(runtime.get("trade_provider") or "")
         actual_broker = str(raw.get("trade_broker") or raw.get("broker") or "")
         if expected_broker and actual_broker.lower() != expected_broker.lower():
             return "daemon broker does not match the deployment binding"
@@ -337,14 +336,16 @@ class DaemonRuntimeControl:
     def _config_for(self, instance: dict[str, Any]) -> LiveConfig:
         runtime = instance.get("runtime") or {}
         environment = str(runtime.get("execution_environment") or "local_paper")
-        trade = str(runtime.get("trade_provider") or runtime.get("broker") or "paper")
+        trade = str(runtime.get("trade_provider") or "paper")
         quote = str(runtime.get("quote_provider") or ("paper" if trade == "paper" else trade))
         binding_hash = str(runtime.get("binding_hash") or instance.get("config_hash") or "unbound")
         namespace = (
             Path("runtimes") / _slug(environment)
             / f"{_slug(trade)}--{_slug(quote)}" / binding_hash[:16]
         )
-        mode = _mode_for_level(str(instance.get("deployment_level") or ""), environment)
+        mode = _mode_for_deployment(
+            str((instance.get("deployment") or {}).get("run_mode") or "")
+        )
         config = clone_config(
             self.config,
             mode=mode,
@@ -399,17 +400,16 @@ class DaemonRuntimeControl:
         )
 
 
-def _mode_for_level(level: str, execution_environment: str = "") -> str:
-    if level == "paper":
-        return (
-            RunMode.SIMULATION
-            if execution_environment == "broker_simulation" else RunMode.PAPER
-        )
-    if level == "shadow":
+def _mode_for_deployment(run_mode: str) -> str:
+    if run_mode == "paper":
+        return RunMode.PAPER
+    if run_mode == "simulation":
+        return RunMode.SIMULATION
+    if run_mode == "shadow":
         return RunMode.SHADOW
-    if level == "live":
+    if run_mode == "live":
         return RunMode.LIVE
-    raise ValueError(f"deployment level {level!r} has no runtime mode")
+    raise ValueError(f"deployment run mode {run_mode!r} is unsupported")
 
 
 def _slug(value: str) -> str:

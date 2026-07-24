@@ -23,7 +23,7 @@ from alphapilot.systems.live.runtime import LiveRuntime
 from alphapilot.modules.live.module import LiveModule
 from alphapilot.systems.trading.account_identity import account_identity_hash
 from alphapilot.systems.trading.authorization import AutomatedRouteAuthorizer
-from alphapilot.systems.trading.domain import StrategyInstanceConfig
+from alphapilot.systems.trading.domain import DeploymentSpec, StrategyInstanceConfig
 from alphapilot.systems.trading.ports import RouteContext, RouteOrigin
 from alphapilot.systems.trading.store import StrategyRuntimeStore
 
@@ -80,26 +80,35 @@ def _install_tts() -> None:
 
 
 def _paper_instance(store: StrategyRuntimeStore, instance_id: str) -> dict:
-    store.create_instance(StrategyInstanceConfig(
+    created = store.create_instance(StrategyInstanceConfig(
         instance_id=instance_id,
         strategy_id="dual_ma",
         strategy_version="1.0.0",
         params={"short_window": 5, "long_window": 20},
         universe=("600000.SSE",),
     ))
-    store.record_stage(instance_id, "replay", passed=True)
-    return store.promote(instance_id, "paper")
+    validated = store.set_validation_state(instance_id, "validated")
+    store.configure_deployment(DeploymentSpec(
+        instance_id=instance_id,
+        config_hash=created["config_hash"],
+        run_mode="paper",
+    ))
+    return validated
 
 
 def _bind_realtime(store: StrategyRuntimeStore, instance_id: str, profile: str = "tts-main") -> dict:
     _install_tts()
-    return store.set_execution_binding(
-        instance_id,
+    current = store.get_instance(instance_id)
+    return store.configure_deployment(DeploymentSpec(
+        instance_id=instance_id,
+        config_hash=current["config_hash"],
+        run_mode="simulation",
         execution_environment="broker_simulation",
         trade_provider="tts",
         quote_provider="xtp",
         account_profile=profile,
-    )
+        quote_data_kind="realtime",
+    ))["configuration"]
 
 
 def test_provider_catalog_filters_tts_to_simulation_and_replay_quote() -> None:
@@ -115,61 +124,75 @@ def test_provider_catalog_filters_tts_to_simulation_and_replay_quote() -> None:
         registry.validate_provider_pair(RunMode.LIVE, "tts", "xtp")
 
 
-def test_binding_change_invalidates_paper_evidence_and_requires_reconcile(tmp_path: Path) -> None:
+def test_binding_change_preserves_diagnostics_and_resets_runtime(tmp_path: Path) -> None:
     store = StrategyRuntimeStore(tmp_path / "runtime.sqlite3")
-    _paper_instance(store, "alpha")
-    store.record_stage("alpha", "paper", passed=True, details={"source": "local"})
-    old_hash = store.get_execution_binding("alpha")["binding_hash"]
+    current = _paper_instance(store, "alpha")
+    old_hash = store.get_deployment_spec("alpha")["binding_hash"]
+    run = store.start_runtime_run("alpha", "paper")
+    store.record_runtime_session(
+        "alpha", config_hash=current["config_hash"], run_mode="paper",
+        session="2026-07-16",
+    )
+    store.finish_runtime_run(run["run_id"])
 
     binding = _bind_realtime(store, "alpha")
     deployment = store.deployment("alpha")
 
     assert binding["binding_hash"] != old_hash
-    assert deployment["evidence"] == []
     assert deployment["runtime"]["execution_environment"] == "broker_simulation"
-    assert deployment["runtime"]["reconcile_required"] is True
+    assert store.runtime_diagnostics("alpha")["modes"]["paper"]["trading_sessions"] == 1
+    assert deployment["runtime"]["desired_state"] == "ready"
+    assert deployment["runtime"]["reconcile_required"] is False
     assert deployment["runtime"]["reconciled"] is False
-    assert deployment["runtime"]["observed_state"] == "paused_pending_reconcile"
+    assert deployment["runtime"]["observed_state"] == "ready"
 
 
-def test_paper_to_shadow_switches_from_tts_to_live_provider_binding(tmp_path: Path) -> None:
+def test_simulation_to_shadow_replaces_provider_binding_directly(tmp_path: Path) -> None:
     store = StrategyRuntimeStore(tmp_path / "runtime.sqlite3")
     _paper_instance(store, "alpha")
     simulation = _bind_realtime(store, "alpha")
-    store.record_stage("alpha", "paper", passed=True, details={"source": "tts"})
-
-    promoted = store.promote(
-        "alpha", "shadow", broker="xtp", quote_provider="emt",
-    )
+    current = store.get_instance("alpha")
+    shadow = store.configure_deployment(DeploymentSpec(
+        instance_id="alpha",
+        config_hash=current["config_hash"],
+        run_mode="shadow",
+        execution_environment="live",
+        trade_provider="xtp",
+        quote_provider="emt",
+        account_id="live-account",
+        quote_data_kind="realtime",
+    ))["configuration"]
     deployment = store.deployment("alpha")
 
-    assert promoted["deployment_level"] == "shadow"
-    assert deployment["execution_binding"] == {
-        **deployment["execution_binding"],
+    assert shadow["run_mode"] == "shadow"
+    assert deployment["configuration"] == {
+        **deployment["configuration"],
         "execution_environment": "live",
         "trade_provider": "xtp",
         "quote_provider": "emt",
         "quote_data_kind": "realtime",
     }
-    assert deployment["execution_binding"]["binding_hash"] != simulation["binding_hash"]
+    assert deployment["configuration"]["binding_hash"] != simulation["binding_hash"]
     assert deployment["runtime"]["execution_environment"] == "live"
     assert deployment["runtime"]["trade_provider"] == "xtp"
     assert deployment["runtime"]["quote_provider"] == "emt"
-    # PAPER/TTS evidence belongs to the old binding and cannot qualify SHADOW/LIVE.
-    assert deployment["evidence"] == []
 
 
 def test_replay_quote_binding_can_observe_but_runmode_cannot_route(tmp_path: Path) -> None:
     store = StrategyRuntimeStore(tmp_path / "runtime.sqlite3")
     _paper_instance(store, "alpha")
     _install_tts()
-    binding = store.set_execution_binding(
-        "alpha",
+    current = store.get_instance("alpha")
+    binding = store.configure_deployment(DeploymentSpec(
+        instance_id="alpha",
+        config_hash=current["config_hash"],
+        run_mode="simulation",
         execution_environment="broker_simulation",
         trade_provider="tts",
         quote_provider="tts_7x24",
         account_profile="night-replay",
-    )
+        quote_data_kind="replay",
+    ))["configuration"]
     assert binding["quote_data_kind"] == "replay"
     machine = RunModeMachine(
         RunMode.SIMULATION,
@@ -257,7 +280,7 @@ def test_simulation_authorizer_accepts_hashed_persisted_account_identity(tmp_pat
         config_hash=instance["config_hash"],
         account_id="actual-tts-account",
         broker="tts",
-        deployment_level="paper",
+        run_mode="simulation",
         runtime_id="runtime-tts-1",
         execution_environment="broker_simulation",
         trade_provider="tts",
@@ -272,6 +295,8 @@ def test_simulation_authorizer_accepts_hashed_persisted_account_identity(tmp_pat
     assert authorizer.authorize(replay).rule == "quote_data_kind_binding"
     wrong_account = RouteContext(**{**context.__dict__, "account_id": "other"})
     assert authorizer.authorize(wrong_account).rule == "account_binding"
+    store.update_runtime_state("alpha", account_profile="other-profile")
+    assert authorizer.authorize(context).rule == "runtime_account_profile"
 
 
 def test_daemon_runtime_directories_are_namespaced_by_binding(tmp_path: Path) -> None:
@@ -286,7 +311,7 @@ def test_daemon_runtime_directories_are_namespaced_by_binding(tmp_path: Path) ->
         return {
             "instance_id": "alpha",
             "config_hash": "config-hash",
-            "deployment_level": "paper",
+            "deployment": {"run_mode": "simulation"},
             "runtime": {
                 "execution_environment": "broker_simulation",
                 "trade_provider": "tts",

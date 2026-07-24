@@ -160,7 +160,6 @@
 | 命令 | 用途 | 参数签名 | 返回 | 影响 | 状态 | Portal | HTTP |
 |---|---|---|---|---|---|---|---|
 | `trading_audit` | List recent operator audit events with sensitive account data redacted. | `(limit: 'int' = 200) -> 'list[dict[str, Any]]'` | `list[dict[str, Any]]` | 只读、诊断或本地计算 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
-| `trading_authorize_live` | Create a short-lived LIVE approval bound to instance, account and broker. | `(instance_id: 'str', account_id: 'str', broker: 'str', reason: 'str', operator_id: 'str', ttl_seconds: 'int' = 300, baseline_positions: 'Any' = None) -> 'dict[str, Any]'` | `dict[str, Any]` | 策略或部署写操作 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
 | `trading_backtest` | Start an asynchronous unified replay, optionally waiting for completion. | `(instance_id: 'str', options: 'Any' = None, wait: 'bool' = False, output_dir: 'str' = '') -> 'dict[str, Any]'` | `dict[str, Any]` | 策略或部署写操作 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
 | `trading_backtest_cancel` | Request cancellation of a queued or running unified replay. | `(run_id: 'str') -> 'dict[str, Any]'` | `dict[str, Any]` | 策略或部署写操作 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
 | `trading_backtest_status` | Read a unified replay run, optionally including full artifacts. | `(run_id: 'str', detail: 'bool' = False) -> 'dict[str, Any]'` | `dict[str, Any]` | 只读、诊断或本地计算 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
@@ -170,20 +169,21 @@
 | `trading_broker_uat_start` | Start a bounded, callback-derived real-broker UAT scenario. | `(broker: 'str', symbol: 'str', side: 'str', volume: 'float', price: 'float', max_notional: 'float', confirmation: 'str', timeout: 'float' = 30.0, operator_id: 'str' = 'local-cli', reason: 'str' = 'bounded real-broker UAT') -> 'dict[str, Any]'` | `dict[str, Any]` | 本地受控券商 UAT | 仅本地 UAT | 策略实例/模拟与实盘 | `/api/trading` |
 | `trading_broker_uat_status` | Show one broker UAT run or list runs, optionally filtered by broker. | `(run_id: 'str' = '', broker: 'str' = '') -> 'Any'` | `Any` | 本地受控券商 UAT | 仅本地 UAT | 策略实例/模拟与实盘 | `/api/trading` |
 | `trading_compatibility` | Inspect, set or exchange legacy-entrypoint migration cutoff reports. | `(set_cutoff: 'bool' = False, export_path: 'str' = '', import_path: 'str' = '') -> 'dict[str, Any]'` | `dict[str, Any]` | 兼容审计（可选写入 cutoff/报告） | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
+| `trading_decision_compare` | Compare persisted decisions from any two replay/deployment runs. | `(instance_id: 'str', left_mode: 'str', left_run_id: 'str', right_mode: 'str', right_run_id: 'str') -> 'dict[str, Any]'` | `dict[str, Any]` | 诊断写入 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
+| `trading_decision_comparisons` | Read one decision comparison or list comparisons for an instance. | `(instance_id: 'str', comparison_id: 'str' = '') -> 'Any'` | `Any` | 只读、诊断或本地计算 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
 | `trading_definitions` | List installed strategy definitions and their parameter contracts. | `() -> 'dict[str, Any]'` | `dict[str, Any]` | 只读、诊断或本地计算 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
+| `trading_deploy` | Configure or replace an independent deployment while its daemon is stopped. | `(instance_id: 'str', run_mode: 'str', trade_provider: 'str' = '', quote_provider: 'str' = '', account_profile: 'str' = '', account_id: 'str' = '', reason: 'str' = '') -> 'dict[str, Any]'` | `dict[str, Any]` | 策略或部署写操作 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
+| `trading_deployments` | List independent strategy deployment configurations and runtime state. | `() -> 'list[dict[str, Any]]'` | `list[dict[str, Any]]` | 只读、诊断或本地计算 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
+| `trading_diagnostics` | Read neutral runtime diagnostics; results never change deployment authority. | `(instance_id: 'str') -> 'dict[str, Any]'` | `dict[str, Any]` | 只读、诊断或本地计算 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
 | `trading_instance_create` | Create a strategy instance from a registered definition. | `(instance_id: 'str', strategy_id: 'str', universe: 'Any', params: 'Any' = None, frequency: 'str' = 'day', data_policy: 'Any' = None, portfolio_policy: 'Any' = None) -> 'dict[str, Any]'` | `dict[str, Any]` | 策略或部署写操作 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
 | `trading_instance_from_research` | Snapshot a saved research asset into a deployable selection instance. | `(instance_id: 'str', strategy_name: 'str', universe: 'Any' = None, portfolio_policy: 'Any' = None, risk_policy: 'Any' = None) -> 'dict[str, Any]'` | `dict[str, Any]` | 策略或部署写操作 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
 | `trading_instance_validate` | Validate one strategy instance, artifact, data policy and parameters. | `(instance_id: 'str') -> 'dict[str, Any]'` | `dict[str, Any]` | 策略或部署写操作 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
 | `trading_instances` | List persisted strategy instances and their lifecycle state. | `() -> 'list[dict[str, Any]]'` | `list[dict[str, Any]]` | 只读、诊断或本地计算 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
 | `trading_kill_switch` | Engage or release an instance, account or global kill switch. | `(scope_type: 'str', scope_id: 'str', active: 'bool', reason: 'str', operator_id: 'str' = 'local-cli') -> 'dict[str, Any]'` | `dict[str, Any]` | 策略或部署写操作 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
 | `trading_operator_token` | Create a local operator token; its plaintext is returned only once. | `(operator_id: 'str', label: 'str' = '', expires_in_days: 'int \| None' = None) -> 'dict[str, Any]'` | `dict[str, Any]` | 策略或部署写操作 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
-| `trading_parity_start` | Compare replay and SHADOW observations for one strategy instance. | `(instance_id: 'str', replay_run_id: 'str', shadow_stage_run_id: 'str') -> 'dict[str, Any]'` | `dict[str, Any]` | 策略或部署写操作 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
-| `trading_parity_status` | Read a persisted parity run and its per-session comparison results. | `(run_id: 'str') -> 'dict[str, Any]'` | `dict[str, Any]` | 只读、诊断或本地计算 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
 | `trading_pause` | Pause new decisions and request cancellation of instance orders. | `(instance_id: 'str', operator_id: 'str' = 'local-cli', reason: 'str' = 'CLI pause') -> 'dict[str, Any]'` | `dict[str, Any]` | 策略或部署写操作 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
 | `trading_policies` | List installed portfolio-policy definitions and parameter contracts. | `() -> 'dict[str, Any]'` | `dict[str, Any]` | 只读、诊断或本地计算 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
 | `trading_preview` | Evaluate one instance and optionally export its signal as JSON or CSV. | `(instance_id: 'str', options: 'Any' = None, output_path: 'str' = '', output_format: 'str' = 'json') -> 'dict[str, Any]'` | `dict[str, Any]` | 策略或部署写操作 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
-| `trading_promote` | Promote an instance to a deployment stage after qualification checks. | `(instance_id: 'str', to: 'str', account_id: 'str' = '', broker: 'str' = '', approval: 'str' = '', quote_provider: 'str' = '', operator_id: 'str' = 'local-cli', reason: 'str' = 'CLI deployment promotion') -> 'dict[str, Any]'` | `dict[str, Any]` | 策略或部署写操作 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
-| `trading_qualification` | Summarize deployment stage, parity, reconciliation, UAT and approval gates. | `(instance_id: 'str', account_id: 'str' = '', broker: 'str' = '') -> 'dict[str, Any]'` | `dict[str, Any]` | 只读、诊断或本地计算 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
 | `trading_reconcile` | Reconcile runtime state with broker account, orders and fills. | `(instance_id: 'str', operator_id: 'str' = 'local-cli', reason: 'str' = 'CLI reconcile') -> 'dict[str, Any]'` | `dict[str, Any]` | 策略或部署写操作 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
 | `trading_removal_check` | Evaluate the auditable legacy-entrypoint removal qualification report. | `(acceptance_instance_id: 'str') -> 'dict[str, Any]'` | `dict[str, Any]` | 只读、诊断或本地计算 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
 | `trading_resume` | Resume a reconciled deployment after an explicit operator action. | `(instance_id: 'str', operator_id: 'str' = 'local-cli', reason: 'str' = 'CLI resume') -> 'dict[str, Any]'` | `dict[str, Any]` | 策略或部署写操作 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
@@ -207,6 +207,13 @@
 - `trading_stage_start`
 - `trading_stage_finish`
 - `trading_stage_evaluate`
+- `trading_promote`
+- `trading_authorize_live`
+- `trading_qualification`
+- `trading_parity_start`
+- `trading_parity_status`
+- `trading_bind_execution`
+- `trading_execution_binding`
 - `timing_strategies`
 - `timing_signal`
 - `timing_backtest`

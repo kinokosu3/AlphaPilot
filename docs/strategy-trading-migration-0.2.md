@@ -1,208 +1,95 @@
-# 0.2.0 策略链路迁移、券商 UAT 与旧入口删除手册（历史记录）
+# 策略交易链路破坏性升级记录
 
-> 本页记录 0.1.x → 0.2.0 的一次性迁移和验收过程，不是当前接口使用手册。当前入口请查看[策略实例用户指南](user/strategy-instances.md)、[模拟与实盘指南](user/live-trading.md)和[HTTP API 参考](reference/http-api.md)。文中出现的旧路径只用于解释历史迁移，不得重新接入生产调用。
+> 本页记录历史接口的删除结果和 schema v10 的切换方式，不是日常操作教程。当前用法请查看[策略实例用户指南](user/strategy-instances.md)、[模拟与实盘指南](user/live-trading.md)和[HTTP API 参考](reference/http-api.md)。
 
-本文是 AlphaPilot 从 0.1.x 兼容入口迁移到正式 `/api/trading`、`trading_*` 链路的操作手册。
-0.2.0 已依据一次性完整等价验收、正式入口零调用证明和真实 XTP/EMT UAT v2 移除公共旧入口。
-自动策略晋升 LIVE 仍独立要求 20 个 PAPER 交易日、5 个 SHADOW 交易日和逐日 parity；接口删除
-不会绕过这项运行安全门禁。
+## 当前结论
 
-## 已实现的链路
+策略实例与部署已经彻底拆分：实例只描述代码、参数、因子、模型、股票池和政策；REPLAY 是实例上的回测操作。部署单独保存 `paper | simulation | shadow | live` 模式、Provider、账户绑定和运行状态。
 
-规则择时和 Qlib 横截面选股分别通过同一条下游链路运行：
+系统不再包含 `REPLAY → PAPER → SHADOW → LIVE` 晋级状态机，也不存在系统级 LIVE qualification、临时 approval、人工账户 baseline 或阶段证据。PAPER/SHADOW 会话、通用 decision comparison 和 Broker UAT 都是诊断事实，不会授予或撤销部署权限。
 
-```text
-provider -> SignalEnvelope -> PortfolioPolicy -> PortfolioDecision
-         -> D+1 AccountSizer -> ExecutionPlan -> OMS -> Risk -> Broker
+```mermaid
+flowchart LR
+    Instance[策略实例 + config_hash] --> Replay[REPLAY 回测]
+    Instance --> Deployment[独立 DeploymentSpec]
+    Deployment --> Mode{run_mode}
+    Mode --> Paper[PAPER]
+    Mode --> Simulation[SIMULATION]
+    Mode --> Shadow[SHADOW 只观察]
+    Mode --> Live[LIVE]
+    Paper --> Diagnostics[运行诊断]
+    Simulation --> Diagnostics
+    Shadow --> Diagnostics
+    Live --> Diagnostics
+    Replay --> Compare[Decision comparison]
+    Diagnostics --> Compare
 ```
 
-`data_policy.history_window` 是实例配置哈希的一部分。provider 第一次创建时才执行
-`initialize + warmup`；checkpoint 恢复只执行 `restore`。同一模式下，同一 `as_of` 的历史哈希
-发生变化会 fail closed。每个决策保存历史、provider 前后状态、信号、权重、政策、代码、模型
-和数据版本哈希。日线 Bar 统一按交易日期标识，避免历史回放的 `00:00` 和实盘收盘时间造成
-伪差异。
+## 已删除的公共接口
 
-兼容版本曾将旧 timing signal/backtest 转成仅允许 REPLAY 的临时实例，以完成等价验证和历史
-Portal job 导入。0.2.0 不再创建临时实例或接受旧 job kind；已导入的 `legacy_import`
-`backtest_runs`、兼容调用审计和 UAT 证据继续保留并可只读查询。
+以下 CLI 已从命令注册表删除，不提供兼容别名：
 
-## 正式替代入口
+- `trading_promote`
+- `trading_authorize_live`
+- `trading_qualification`
+- `trading_parity_start`、`trading_parity_status`
+- `trading_bind_execution`、`trading_execution_binding`
+- 手工 stage start/finish/evaluate 命令
 
-| 0.1.x 兼容入口 | 正式入口 |
-|---|---|
-| `/api/timing/strategies`、`timing_strategies` | `/api/trading/strategy-definitions`、`trading_definitions` |
-| `/api/timing/signal`、`timing_signal` | 创建实例后调用实例 `/preview`、`trading_preview` |
-| `/api/timing/backtest`、`timing_backtest` | 实例异步 `/backtest-runs`、`trading_backtest --wait` |
-| `/api/timing/jobs/{id}/detail` | `/api/trading/backtest-runs/{run_id}/detail` |
-| `/api/jobs` 的 `timing_backtest` kind | 实例异步 `/backtest-runs` |
-| `/api/modules/run` 的 timing 兼容命令 | 正式 `/api/trading` 资源接口 |
-| `/api/live/daemon/strategy/*` | `/api/trading/deployments/{id}/{start,pause,reconcile,resume,stop,status}` |
-| `live_daemon_strategy_*` CLI | `trading_{status,start,pause,reconcile,resume,stop}` |
-| daemon strategy-name 参数 | `strategy_instance_id` |
-| 同步实例 backtest | 异步 backtest run |
-| 泛化 deployment action | 五个显式生命周期路由 |
-| 手工 stage start/finish/evaluate | runtime 自动 stage run + 只读 qualification |
+对应的 promotion、authorize-live、qualification、parity、execution-binding 和 stage-run HTTP 写接口也已删除。未知 `/api/*` 路径返回 404，不会被 Portal 的单页应用回退页吞掉。
 
-0.2.0 中上述 HTTP 路径返回 404/405，旧 CLI 不再出现在 registry/help，旧 job kind 和 module
-dispatcher 调用会被拒绝。`/api/trading/compatibility` 继续以 `removed_in=0.2.0` 展示 23 个历史
-兼容面的机器可读等价矩阵；调用审计、环境报告和删除资格证据不随入口删除而丢失。
+替代入口为：
 
-## REPLAY 与 SHADOW 一致性
+| 能力 | CLI | HTTP |
+|---|---|---|
+| 配置或替换部署 | `trading_deploy` | `PUT /api/trading/deployments/{instance_id}` |
+| 列出部署 | `trading_deployments` | `GET /api/trading/deployments` |
+| 查看运行诊断 | `trading_diagnostics` | `GET /api/trading/deployments/{instance_id}/diagnostics` |
+| 比较两次决策 | `trading_decision_compare` | `POST /api/trading/deployments/{instance_id}/decision-comparisons` |
+| 查询比较结果 | `trading_decision_comparisons` | `GET /api/trading/decision-comparisons/{comparison_id}` |
+| 生命周期 | `trading_{start,pause,reconcile,resume,stop,status}` | `/api/trading/deployments/{instance_id}/{action}` |
 
-每次 REPLAY、PAPER、SHADOW 和 LIVE-plan 都保存 `DecisionObservation`。正式比较命令为：
+部署配置与生命周期 HTTP 接口不要求 Operator Bearer 或必填原因，但只允许 Portal 绑定在 loopback 地址时使用。Kill Switch、Broker UAT、策略写操作和低层手工交易仍保留操作员鉴权与审计。
 
-```bash
-alphapilot trading_parity_start INSTANCE_ID REPLAY_RUN_ID SHADOW_STAGE_RUN_ID
-alphapilot trading_parity_status PARITY_RUN_ID
-alphapilot trading_qualification INSTANCE_ID
-```
+## schema v10 切换
 
-日频按交易日比较。相同历史、provider 前置状态、数据、模型和政策版本时，信号或权重不同为
-`MISMATCH`；输入不同、任一侧缺失或同一交易日存在歧义观测为 `NOT_COMPARABLE`；只有确定性输出
-一致才是 `PASS`。账户、原始报价和合约哈希也相同时才额外比较目标股数与执行计划。
+v10 将以下事实分别持久化：
 
-`live_qualification` 从 SQLite 运行事实派生，不接收调用方填写的交易日数。当前配置必须同时满足：
+- 策略实例及验证状态；
+- 部署配置与不可变 `binding_hash`；
+- 部署 runtime、心跳、writer lock 与对账状态；
+- PAPER/SIMULATION/SHADOW/LIVE 运行和中性诊断；
+- 通用决策比较及逐交易日结果。
 
-- PAPER 至少 20 个不同交易日且无未解决异常、重复路由、仓位越界或对账警告；
-- SHADOW 至少 5 个不同交易日，全部交易日都有唯一 parity PASS；
-- 当前账户/Broker 的 UAT 证据有效；
-- 无待对账状态，实例仍是当前配置哈希并处于 SHADOW。
+v1–v9 runtime SQLite 不会自动迁移。进程检测到旧 schema 时，会在任何写入前报错并保持原文件字节不变。切换步骤如下：
 
-## XTP/EMT 真实 UAT
+1. 停止所有策略 daemon，并保留旧 SQLite 作为只读历史文件。
+2. 将 `ALPHAPILOT_STRATEGY_RUNTIME_STORE` 指向一个全新的路径。
+3. 启动 AlphaPilot，由系统创建 schema v10。
+4. 重新创建或导入实例，执行实例验证，再通过 `trading_deploy` 或 HTTP `PUT` 配置部署。
 
-UAT 只能从本机 CLI 启动、恢复或终止。Portal 和 API 只有只读查询接口。先在私有 secret 文件或
-进程环境中配置券商凭据；不得把密码、software key 或 token 放入 CLI 参数、数据库或产物。
+不要把旧数据库复制到新路径后尝试启动，也不要删除旧文件来掩盖错误。需要历史审计时，应在隔离环境中以旧版本只读查看。
 
-仓库提供的本地包装器只读取已知 XTP/EMT 字段，并要求 `.env`、`secrets.txt` 权限为 `0600`。
-先执行不会下单的预检：
+## LIVE 行为变化
 
-```bash
-python scripts/broker_uat_local.py preflight \
-  --broker=xtp --secret-file=.env --symbols=510300.SSE --max-notional=20000
-python scripts/broker_uat_local.py preflight \
-  --broker=emt --secret-file=secrets.txt --symbols=510500.SSE --max-notional=20000
-```
+经过验证的实例可以直接配置 LIVE，不要求事先产生 PAPER/SHADOW/UAT/approval 记录。这个变化只删除晋级门禁，不降低运行安全：
 
-包装器在子进程内设置以下安全变量；不得把密码、software key 或 token 放入命令行、数据库或
-产物：
+- 必须设置 `ALPHAPILOT_AUTOMATED_LIVE_ENABLED=true`；
+- 部署必须绑定真实交易 Provider、实时行情 Provider 和账户；
+- `config_hash`、`binding_hash`、runtime 与实际账户必须一致；
+- 同一账户只能有一个 writer；
+- 合约、行情新鲜度、心跳、Kill Switch 和逐单 RiskGate 继续 fail closed；
+- LIVE 每次启动后先完成 reconcile，再显式调用 `resume` 才能路由；
+- SHADOW 永久禁止路由。
 
-```dotenv
-ALPHAPILOT_BROKER_UAT_ENABLED=true
-ALPHAPILOT_BROKER_UAT_ENVIRONMENT=xtp-test-account-a
-ALPHAPILOT_BROKER_UAT_WHITELIST=600000.SSE
-ALPHAPILOT_BROKER_UAT_MAX_NOTIONAL=20000
-```
+实例参数、模型、因子、股票池或政策变化后，原部署会保留但标记为 `stale`。必须重新验证实例，并在 daemon 停止后再次 `PUT`，把部署绑定到新的 `config_hash`。
 
-一次运行示例（价格和数量必须来自刚完成的预检；两笔子订单累计不得超过 20,000 元）：
+## 研究 campaign 与 UAT
 
-```bash
-python scripts/broker_uat_local.py start \
-  --broker=xtp --secret-file=.env --symbol=510300.SSE --side=buy \
-  --volume=<at-least-two-lots> --price=<fresh-marketable-limit> --max-notional=20000 \
-  --confirmation=I_UNDERSTAND_REAL_ORDERS
-# start 返回 restart_required 后，必须从一个新启动的本地进程恢复：
-python scripts/broker_uat_local.py resume \
-  --broker=xtp --secret-file=.env --run-id=<RUN_ID> \
-  --confirmation=I_UNDERSTAND_REAL_ORDERS
-```
+研究 campaign 可以继续要求 20 个 PAPER 日、5 个 SHADOW 日、决策一致性、Broker UAT 或其他阈值，但这些条件只属于该 campaign 的验收政策。campaign 从运行诊断、通用 decision comparison 和 UAT 证据读取事实，不得调用部署晋级接口，也不得改变 LIVE 授权。
 
-失败后的再次恢复和受审计终止：
+Broker UAT 仍可能产生真实委托，只能通过受保护的本机流程运行。凭据必须放在权限受限的 secret 文件或进程环境中，不得写入 CLI 参数、数据库、日志或产物。低层 `/api/live` 手工交易及其 `confirm_live` 机制不受本次升级影响。
 
-```bash
-alphapilot trading_broker_uat_resume <RUN_ID> I_UNDERSTAND_REAL_ORDERS
-alphapilot trading_broker_uat_abort <RUN_ID> I_UNDERSTAND_REAL_ORDERS \
-  "operator diagnosed and cancelled remaining order"
-```
+## 回滚边界
 
-Harness 先验证 trade/quote 插件可导入、SDK/进程架构、必需凭据字段及声明的网络端点，主动订阅
-白名单标的并等待新鲜行情。UAT v2 使用同一 OMS、Risk 和 Broker callback 提交两笔子订单：第一笔
-可成交限价单必须有真实成交回报，第二笔挂单保持活动，从而稳定验证计划层“已成交+剩余”、
-撤余单、断线重连、进程重启恢复、稳定引用和三级 kill switch。`start` 在余单仍活动时写入
-`restart_required` 检查点并关闭当前 runtime；`resume` 会拒绝原进程，只有新的本地 CLI 进程才能
-重新查询委托并继续。此检查点期间必须由操作员持续监控，并立即执行 `resume` 或 `abort`。
-唯一真实委托引用在 SQLite 中原子
-认领；即使在券商受理与 callback 落库之间崩溃，也不会自动重发。Kill switch 探针没有可路由引用，
-取消委托始终允许。每个 route claim 都在 SQLite 内原子累计请求名义金额，失败重试也不能突破
-20,000 元上限。证据绑定 Git commit、实盘核心代码、Broker、账户哈希、环境、native SDK、插件和
-gateway SHA-256，逐次 callback 状态、请求金额与成交金额进入 schema v8，90 天后过期；任何核心
-artifact 变化立即失效。UAT 日志和产物必须运行 `scripts/check_secret_leaks.py`，输出只包含命中数，
-不显示匹配内容。
-
-每次 UAT 后应立即将 `ALPHAPILOT_BROKER_UAT_ENABLED` 恢复为 `false`。普通 CI 使用模拟 callback，
-不会访问真实账户，也不能生成可用于晋升的真实环境证据。
-
-## 多环境零调用证明
-
-每个受控环境使用稳定的 `ALPHAPILOT_ENVIRONMENT_ID`。第一方客户端全部迁移后，在每个环境开始
-完整验收周期：
-
-```bash
-alphapilot trading_compatibility --set-cutoff=true
-```
-
-任一旧调用都会增加该环境的 post-cutoff 计数；需要修复调用方并重新设置 cutoff，再完整执行一轮
-仅使用正式新入口的 API/CLI/daemon/Portal/SHADOW 验收和两家券商 UAT。周期结束后，各环境导出
-哈希报告：
-
-```bash
-alphapilot trading_compatibility \
-  --export-path=reports/compatibility-env-a.json
-```
-
-将受控环境报告复制到发布检查环境并从本地 CLI 导入：
-
-```bash
-alphapilot trading_compatibility \
-  --import-path=reports/compatibility-env-a.json
-```
-
-报告绑定环境 ID、schema、cutoff、代码 commit、逐入口计数、活动 legacy runtime 数、未导入旧 job
-数和 SHA-256。导入报告哈希或总数不一致
-会被拒绝。删除检查以所有环境中最晚的 cutoff 为验收起点；更早的接口验收与 UAT 证据不会复用，
-并且每份环境报告都必须在整个验收周期完成后重新导出。假如存在无法观测或无法
-提交最终报告的第三方客户端，删除门禁视为不满足。
-
-## 数据库迁移与回滚
-
-runtime SQLite 从 v5 顺序迁移到 v6、v7、v8。v6 增加确定性历史/checkpoint、provenance、详细兼容
-调用、观测和 parity；v7 增加券商 UAT、唯一 UAT route claim、旧 job 映射和多环境报告；v8 增加
-UAT v2、核心 artifact 指纹、累计请求/成交金额和 callback 状态序列。
-
-迁移前使用 SQLite online backup，全部 DDL 和 config rehash 位于一个 `BEGIN IMMEDIATE` 事务。
-存在活动 runtime 时 v6 拒绝迁移。history window 或 timing policy 归属变化会重算配置哈希，撤销
-旧 stage evidence、approval 和自动路由绑定，并把实例退回 REPLAY。失败时原 v5 数据库及备份保留，
-自动路由保持阻断。恢复时先正式 stop runtime、保留失败库、从 `backup-v5-*` 复制到新的恢复路径，
-诊断后重新迁移；不得删除原库或静默创建空库。
-
-## 0.2.0 删除门禁
-
-先运行只读检查：
-
-```bash
-alphapilot trading_removal_check ACCEPTANCE_INSTANCE_ID
-```
-
-`removal_qualification` 必须同时通过 timing 等价矩阵、第一方生产源码除兼容层外零旧引用、全部
-环境完整且零调用、XTP 与 EMT 当前核心代码/插件/native SDK UAT、无活动 legacy runner/job、活动
-UAT 委托、未导入旧 job 或对账差异，以及干净 Git commit。`live_qualification` 中的 20/5 日和
-parity 会并列展示，但不阻止旧入口删除。全量发布验证由固定脚本产生，不能填写布尔值：
-
-```bash
-python -m pip install -e '.[test]'
-python scripts/verify_trading_removal.py --build-kind=compatibility
-```
-
-脚本拒绝 dirty worktree，并实际运行全量离线 pytest、Portal coverage/typecheck/build、OpenAPI、CLI、
-依赖边界、相对固定 0.1.x 基线的 Python/TypeScript 变更行 90% coverage，以及 wheel 安装/import
-smoke。`reports/trading-compatibility-verification.json` 绑定待发布兼容 commit 和报告哈希；缺失、
-失败、过期 commit 或篡改都会使 removal check 失败。删除提交完成后再运行
-`--build-kind=removal`，保留独立的 `reports/trading-removal-verification.json`，并额外验证旧 HTTP、
-CLI、daemon 参数和 Portal 调用均已消失。
-
-只有最终报告 `ready=true` 时，才在单独的 0.2.0 破坏性提交删除兼容入口。研究资产
-`/api/strategies/*`、`strategy_create/strategy_backtest`，以及人工恢复用 `live_order`、
-`live_cancel`、`live_submit_target` 不属于删除范围。
-
-当前仓库实现了门禁和演练工具；只有兼容构建报告、两家真实模拟 UAT、cutoff 后正式入口验收与
-零调用证明全部通过，才能执行 0.2.0 删除提交。自动 LIVE 默认仍为关闭状态，且仍受独立 20/5 日
-门禁约束。
+这是破坏性升级，没有 v10 → v9 数据回滚或双写模式。需要回到旧版本时，必须同时切回旧程序和原来的旧版 SQLite；不得让旧程序打开 v10 store，也不得让新程序打开 v1–v9 store。

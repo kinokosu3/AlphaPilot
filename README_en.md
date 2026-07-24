@@ -88,13 +88,13 @@ Main entry: `alphapilot strategy_backtest --strategy_name "<strategy name>" --mo
 
 ### Paper and Live Trading
 
-The live subsystem connects target portfolios or timing signals to one execution path: `LiveRuntime → LiveEngine → RiskGate → BrokerGateway`. The default `dry_run` mode never routes orders, while `paper` is intended for local rehearsal. A command can route to a real broker only after `live` is selected and live execution is explicitly confirmed.
+The live subsystem connects target portfolios or timing signals to one execution path: `LiveRuntime → LiveEngine → RiskGate → BrokerGateway`. The low-level `dry_run` mode never routes orders; formal strategy deployments use `paper`, `simulation`, `shadow`, or `live`. SHADOW consumes real account and quote data but can never route an order, while LIVE routing remains disabled unless its environment switch is enabled.
 
-- Three run modes—`dry_run`, `paper`, and `live`—with foreground and persistent daemon operation
+- Five runtime modes—`dry_run`, `paper`, `simulation`, `shadow`, and `live`—with foreground and persistent daemon operation
 - Manual orders, cancellation, and target-portfolio submission; automated strategies start only through persistent instances and `trading_*` deployment controls
 - A single pre-trade gate for session, board-lot, price, cash, position, concentration, per-order, and daily-turnover checks
 - OMS state, append-only audit events, runtime snapshots, and recovery reconciliation; a trade-channel disconnect halts execution and requires review before resuming
-- XTP Pro and EMT broker/quote integrations are decoupled from the core as installable pip plugins; trading and quote providers can be configured independently
+- XTP Pro, EMT, and OpenCTP TTS broker/quote integrations are decoupled from the core as installable pip plugins; trading and quote providers can be configured independently
 - The Portal Live page exposes preflight, connection, daemon and strategy controls, risk state, orders, and ledger queries
 
 The safest first step is a paper daemon:
@@ -116,7 +116,7 @@ AlphaPilot provides a unified Web portal for daily research and runtime operatio
 - Unified access to factor mining, backtesting, timing, strategy libraries, market data, notification settings, and live runtime status
 - Supports background tasks, scheduled tasks, and result review
 - Built-in backtest visualizations: cumulative returns, excess returns, account composition, turnover charts, date-range filters, daily details, factor leaderboards, and benchmark comparisons
-- The Live page separates paper and live workspaces and exposes preflight, daemon, strategy, risk, and audit controls
+- The Live page separates paper, broker-simulation, SHADOW, and LIVE workspaces and exposes preflight, daemon, deployment, diagnostics, risk, and audit controls
 - Suitable for both local research environments and server deployments
 
 Main entry: `alphapilot portal`
@@ -347,7 +347,7 @@ supported_assets = ["equity", "fund"]
 supported_frequencies = ["day"]
 required_history = 21
 state_schema_version = 1
-deployable_modes = ["replay", "paper", "shadow", "live"]
+supported_run_modes = ["paper", "simulation", "shadow", "live"]
 description = "Long when close is above its simple moving average."
 parameter_schema_json = '''
 {"type":"object","properties":{"window":{"type":"integer","default":20,"minimum":2}},"required":["window"],"additionalProperties":false}
@@ -379,7 +379,7 @@ alphapilot trading_instance_create \
   --universe=600000.SSE \
   --params='{"window":20}' \
   --frequency=day \
-  --data_policy='{"feature_adjustment":"backward","history_window":21}' \
+  --data_policy='{"feature_adjustment":"backward","history_window":21,"data_version":"daily-bars-2026-07"}' \
   --portfolio_policy='{"policy_id":"timing_fixed_exposure","params":{"target_percent":0.2,"cash_buffer":0.1,"max_position_weight":0.3}}'
 
 alphapilot trading_instance_validate --instance_id=sma_20_demo
@@ -391,7 +391,54 @@ alphapilot trading_backtest --instance_id=sma_20_demo \
 
 `target_percent` belongs to the PortfolioPolicy, not the signal algorithm: it controls the target weight of each instrument while its signal is active. You can therefore reuse one signal definition across instances with different exposure, cash-buffer, and position-limit settings. The replay directory contains signals, target weights, orders, fills, positions, equity, and summary artifacts.
 
-When iterating, bump the manifest `version` and restart long-running processes. A code, version, parameter, universe, data-policy, or portfolio-policy change produces a new `config_hash`; the runtime rebinds persisted instances, invalidates old evidence, and requires validation again. Live execution additionally requires progression through `REPLAY → PAPER → SHADOW → LIVE`; custom code cannot bypass risk controls or the OMS.
+### 5. Build multi-factor or model-based strategies
+
+Keep data loading, factor/model inference, portfolio construction, and order routing in separate layers. A Provider computes factors and emits a `SignalEnvelope`; immutable research artifacts bind model and factor versions; a PortfolioPolicy converts signals to target weights; AlphaPilot retains ownership of AccountSizer, RiskGate, and OMS. Use Provider v2—and implement `initialize`, `warmup`, `evaluate`, `snapshot`, `restore`, and `stop`—when the algorithm needs cross-session state, online-model state, or recovery.
+
+Snapshot an existing factor/model research asset into an instance as follows:
+
+```bash
+alphapilot trading_instance_from_research \
+  --instance_id=lgb_factor_v3 \
+  --strategy_name=my_lgb_factor_asset \
+  --universe=600000.SSE,000001.SZ,510300.SSE \
+  --portfolio_policy='{"policy_id":"selection_topk_dropout_equal_weight","params":{"topk":10,"n_drop":2,"max_position_weight":0.1}}'
+alphapilot trading_instance_validate --instance_id=lgb_factor_v3
+```
+
+The snapshot binds model SHA-256, factor/data fingerprints, universe, and policy. Prefer separate instance IDs for different model or factor sets; never let a running strategy load an arbitrary model path. If parameters, model, factors, universe, data policy, or PortfolioPolicy change, the existing deployment is retained but becomes `stale`. Stop the daemon, validate the instance again, and call `trading_deploy` once more to bind the new `config_hash`.
+
+### 6. Configure PAPER, simulation, SHADOW, or LIVE independently
+
+REPLAY is a historical `trading_backtest` operation, not a deployment level. Any validated instance can be assigned or reassigned directly to a supported run mode while its daemon is stopped:
+
+```bash
+# Built-in local matching; Providers are forced to paper
+alphapilot trading_deploy --instance_id=sma_20_demo --run_mode=paper
+
+# Broker simulation; the trade Provider must advertise a simulation account
+alphapilot trading_deploy --instance_id=sma_20_demo --run_mode=simulation \
+  --trade_provider=tts --quote_provider=emt --account_profile=tts-sim-main
+
+# Read-only real-account shadow; it can never route orders
+alphapilot trading_deploy --instance_id=sma_20_demo --run_mode=shadow \
+  --trade_provider=xtp --quote_provider=xtp --account_id=YOUR_ACCOUNT_ID
+
+# Configure LIVE directly; no PAPER/SHADOW/UAT/comparison record is required
+ALPHAPILOT_AUTOMATED_LIVE_ENABLED=true \
+alphapilot trading_deploy --instance_id=sma_20_demo --run_mode=live \
+  --trade_provider=xtp --quote_provider=xtp --account_id=YOUR_ACCOUNT_ID
+
+alphapilot trading_start --instance_id=sma_20_demo
+alphapilot trading_deployments
+alphapilot trading_diagnostics --instance_id=sma_20_demo
+```
+
+A LIVE start remains paused pending reconciliation. Run `trading_reconcile`, then explicitly call `trading_resume`. Removing promotion gates does not remove order safety: LIVE still checks the environment switch, account/Provider binding, single writer, market/contract metadata, reconciliation, heartbeat, Kill Switch, and per-order RiskGate. PAPER/SHADOW sessions and `trading_decision_compare` are diagnostics only and never grant deployment authority.
+
+Deployment configuration and lifecycle HTTP endpoints are available only on a loopback-bound Portal and do not require an Operator Bearer or mandatory reason. Generate an operator token locally with `alphapilot trading_operator_token --operator_id=...`; its plaintext is returned once and is now needed only for protected Kill Switch, Broker UAT, strategy-write, and manual-trading operations.
+
+When iterating, bump the manifest `version` and restart long-running processes. Code, version, or any instance binding change produces a new `config_hash` and requires validation plus deployment rebinding, while retaining the old deployment record and diagnostics.
 
 For a more complete local example with volume confirmation, see [`strategies/dual_ma_volume_confirmed`](strategies/dual_ma_volume_confirmed). Implement Provider v2 when you need explicit lifecycle state, snapshots, and recovery. The [strategy extension guide](docs/developer/strategy-extension.md) covers Provider v2, pip entry points, and custom PortfolioPolicy implementations; the [strategy instance guide](docs/user/strategy-instances.md) covers lifecycle and troubleshooting.
 
@@ -401,7 +448,7 @@ For a more complete local example with volume confirmation, see [`strategies/dua
 2. Use `mine` or AlphaForge commands to generate candidate factors.
 3. Use `backtest` for portfolio backtests or quick IC screening, then review results in the portal.
 4. Save effective strategies as strategy assets, then continue validation with `strategy_backtest`, `daily_signals`, or a resumable `trade_session`.
-5. To move toward execution, rehearse in the order `dry_run → paper → shadow → live`; only attach a target portfolio or timing strategy to the daemon after preflight, risk, and recovery checks pass.
+5. To move toward execution, validate the instance and independently select `paper | simulation | shadow | live`. `dry_run` remains a low-level debug mode and REPLAY remains a backtest operation. A research team may impose its own rehearsal or comparison thresholds, but those diagnostics neither grant nor block LIVE.
 
 ## 📚 More Documentation
 

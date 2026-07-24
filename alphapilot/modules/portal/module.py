@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -39,6 +40,9 @@ class PortalModule(BaseModule):
         apply_portal_env()
 
         if reload:
+            # The reloader creates the app in a child process, so carry the
+            # actual listener boundary into the factory through the environment.
+            os.environ["ALPHAPILOT_PORTAL_BIND_HOST"] = str(host)
             uvicorn.run("alphapilot.modules.portal.api:create_app", host=host, port=port, reload=True, factory=True)
             return
         static_dir = Path(__file__).parent / "web" / "dist"

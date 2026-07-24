@@ -24,7 +24,7 @@ from alphapilot.systems.trading.contracts import (
     TimingSignal,
 )
 from alphapilot.systems.trading.deployment import DeploymentCoordinator
-from alphapilot.systems.trading.domain import StrategyInstanceConfig
+from alphapilot.systems.trading.domain import DeploymentSpec, StrategyInstanceConfig
 from alphapilot.systems.trading.ports import RouteContext, RouteOrigin, RuntimeCommandResult
 from alphapilot.systems.trading.store import LATEST_SCHEMA_VERSION, StrategyRuntimeStore
 
@@ -39,24 +39,29 @@ def _create(store: StrategyRuntimeStore, instance_id: str = "alpha") -> dict:
     ))
 
 
-def _promote_live(store: StrategyRuntimeStore, instance_id: str = "alpha") -> dict:
+@pytest.fixture(autouse=True)
+def _enable_automated_live(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALPHAPILOT_AUTOMATED_LIVE_ENABLED", "true")
+
+
+def _configure_live(store: StrategyRuntimeStore, instance_id: str = "alpha") -> dict:
     current = _create(store, instance_id)
-    for source, target in (("replay", "paper"), ("paper", "shadow")):
-        store.record_stage(instance_id, source, passed=True)
-        store.promote(instance_id, target)
-    store.record_stage(instance_id, "shadow", passed=True)
-    store.promote(
-        instance_id,
-        "live",
+    store.set_validation_state(instance_id, "validated")
+    store.configure_deployment(DeploymentSpec(
+        instance_id=instance_id,
+        config_hash=current["config_hash"],
+        run_mode="live",
+        execution_environment="live",
+        trade_provider="xtp",
+        quote_provider="xtp",
         account_id="account-1",
-        broker="paper",
-        approval="operator-approval",
-    )
+        quote_data_kind="realtime",
+    ))
     return current
 
 
 def _running_live(store: StrategyRuntimeStore, now: datetime) -> RouteContext:
-    current = _promote_live(store)
+    current = _configure_live(store)
     store.transition_runtime(
         "alpha",
         lifecycle="running",
@@ -65,16 +70,23 @@ def _running_live(store: StrategyRuntimeStore, now: datetime) -> RouteContext:
         runtime_id="runtime-1",
         runner_heartbeat_at=now.isoformat(),
         reconcile_required=False,
+        reconciled=True,
         binding_active=True,
     )
+    deployment = store.get_deployment_spec("alpha")
     return RouteContext(
         origin=RouteOrigin.AUTOMATED,
         instance_id="alpha",
         config_hash=current["config_hash"],
         account_id="account-1",
-        broker="paper",
-        deployment_level="live",
+        broker="xtp",
+        run_mode="live",
         runtime_id="runtime-1",
+        execution_environment="live",
+        trade_provider="xtp",
+        quote_provider="xtp",
+        quote_data_kind="realtime",
+        binding_hash=deployment["binding_hash"],
     )
 
 
@@ -94,8 +106,8 @@ def test_automated_route_authorization_matches_full_runtime_binding(tmp_path: Pa
     assert authorizer.authorize(wrong_broker).rule == "broker_binding"
     wrong_runtime = RouteContext(**{**context.__dict__, "runtime_id": "old-runtime"})
     assert authorizer.authorize(wrong_runtime).rule == "runtime_binding"
-    wrong_level = RouteContext(**{**context.__dict__, "deployment_level": "shadow"})
-    assert authorizer.authorize(wrong_level).rule == "deployment_level"
+    wrong_mode = RouteContext(**{**context.__dict__, "run_mode": "shadow"})
+    assert authorizer.authorize(wrong_mode).rule == "run_mode"
     store.update_runtime_state("alpha", binding_active=False)
     assert authorizer.authorize(context).rule == "writer_revoked"
     store.update_runtime_state("alpha", binding_active=True, desired_state="paused")
@@ -105,15 +117,31 @@ def test_automated_route_authorization_matches_full_runtime_binding(tmp_path: Pa
     assert authorizer.authorize(context).rule == "reconcile_required"
 
 
+def test_corrupted_deployment_binding_hash_fails_closed(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 14, 2, 0, tzinfo=timezone.utc)
+    store = StrategyRuntimeStore(tmp_path / "runtime.sqlite3")
+    context = _running_live(store, now)
+    with sqlite3.connect(store.path) as db:
+        db.execute(
+            "UPDATE deployment_specs SET quote_provider='emt' WHERE instance_id='alpha'"
+        )
+        db.commit()
+
+    denied = AutomatedRouteAuthorizer(store, now_fn=lambda: now).authorize(context)
+    assert denied.rule == "state_unavailable"
+    assert "corrupted" in denied.reason
+
+
 def test_daemon_control_validates_runtime_strategy_account_and_broker_binding() -> None:
     instance = {
         "instance_id": "alpha",
         "config_hash": "config-1",
-        "deployment_level": "live",
+        "deployment": {"run_mode": "live"},
         "runtime": {
             "runtime_id": "runtime-1",
             "account_id": "account-1",
-            "broker": "xtp",
+            "trade_provider": "xtp",
+            "quote_provider": "xtp",
         },
     }
     result = RuntimeCommandResult(
@@ -123,6 +151,7 @@ def test_daemon_control_validates_runtime_strategy_account_and_broker_binding() 
         raw={
             "mode": "live",
             "trade_broker": "xtp",
+            "quote_provider": "xtp",
             "state": {"account": {"account_id": "account-1"}},
         },
     )
@@ -152,6 +181,10 @@ def test_three_level_kill_switches_fail_closed(
     authorizer = AutomatedRouteAuthorizer(store, now_fn=lambda: now)
 
     store.set_route_block(scope_type, scope_id, active=True, reason="test")
+    assert any(
+        row["scope_type"] == scope_type and row["active"]
+        for row in store.list_route_blocks(instance_id="alpha")
+    )
     denied = authorizer.authorize(context)
     assert denied.allowed is False and denied.rule == "kill_switch"
     assert scope_id not in denied.reason
@@ -246,7 +279,9 @@ def _confirmed(lifecycle: str, *, recovery: dict | None = None) -> RuntimeComman
         runner_status={"lifecycle": lifecycle},
         recovery=recovery or {},
         raw={
-            "trade_broker": "paper",
+            "mode": "live",
+            "trade_broker": "xtp",
+            "quote_provider": "xtp",
             "state": {"account": {"account_id": "account-1"}},
         },
     )
@@ -254,7 +289,7 @@ def _confirmed(lifecycle: str, *, recovery: dict | None = None) -> RuntimeComman
 
 def test_live_deployment_requires_reconcile_then_explicit_resume(tmp_path: Path) -> None:
     store = StrategyRuntimeStore(tmp_path / "runtime.sqlite3")
-    _promote_live(store)
+    _configure_live(store)
     control = FakeRuntimeControl()
     control.results = {
         "start": _confirmed("paused_pending_reconcile"),
@@ -278,12 +313,54 @@ def test_live_deployment_requires_reconcile_then_explicit_resume(tmp_path: Path)
     assert control.calls == ["start", "reconcile", "resume"]
 
 
+def test_deployment_lifecycle_and_reconfiguration_cannot_clear_manual_kill_switch(
+    tmp_path: Path,
+) -> None:
+    store = StrategyRuntimeStore(tmp_path / "runtime.sqlite3")
+    current = _configure_live(store)
+    store.set_route_block(
+        "instance", "alpha", active=True, reason="operator emergency stop",
+    )
+    control = FakeRuntimeControl()
+    control.results = {
+        "start": _confirmed("paused_pending_reconcile"),
+        "reconcile": _confirmed("paused", recovery={"warnings": []}),
+        "resume": _confirmed("running"),
+        "stop": _confirmed("stopped"),
+    }
+    coordinator = DeploymentCoordinator(store, control)
+
+    coordinator.start("alpha")
+    coordinator.reconcile("alpha")
+    coordinator.resume("alpha")
+    active = store.active_route_blocks(instance_id="alpha", account_id="account-1")
+    assert [(row["scope_type"], row["reason"]) for row in active] == [
+        ("instance", "operator emergency stop"),
+    ]
+
+    coordinator.stop("alpha")
+    store.configure_deployment(DeploymentSpec(
+        instance_id="alpha",
+        config_hash=current["config_hash"],
+        run_mode="live",
+        execution_environment="live",
+        trade_provider="xtp",
+        quote_provider="xtp",
+        account_id="account-1",
+        quote_data_kind="realtime",
+    ))
+    active = store.active_route_blocks(instance_id="alpha", account_id="account-1")
+    assert [(row["scope_type"], row["reason"]) for row in active] == [
+        ("instance", "operator emergency stop"),
+    ]
+
+
 def test_live_resume_can_warm_up_then_become_routable_from_runner_heartbeat(
     tmp_path: Path,
 ) -> None:
     now = datetime.now(timezone.utc)
     store = StrategyRuntimeStore(tmp_path / "runtime.sqlite3")
-    current = _promote_live(store)
+    current = _configure_live(store)
     control = FakeRuntimeControl()
     control.results = {
         "start": _confirmed("paused_pending_reconcile"),
@@ -303,9 +380,14 @@ def test_live_resume_can_warm_up_then_become_routable_from_runner_heartbeat(
         instance_id="alpha",
         config_hash=current["config_hash"],
         account_id="account-1",
-        broker="paper",
-        deployment_level="live",
+        broker="xtp",
+        run_mode="live",
         runtime_id="runtime-1",
+        execution_environment="live",
+        trade_provider="xtp",
+        quote_provider="xtp",
+        quote_data_kind="realtime",
+        binding_hash=store.get_deployment_spec("alpha")["binding_hash"],
     )
     authorizer = AutomatedRouteAuthorizer(store, now_fn=lambda: now)
     assert authorizer.authorize(context).rule == "lifecycle"
@@ -321,7 +403,7 @@ def test_live_resume_can_warm_up_then_become_routable_from_runner_heartbeat(
 
 def test_runtime_command_timeout_never_becomes_observed_success(tmp_path: Path) -> None:
     store = StrategyRuntimeStore(tmp_path / "runtime.sqlite3")
-    _promote_live(store)
+    _configure_live(store)
     control = FakeRuntimeControl()
     control.results["start"] = RuntimeCommandResult(
         False,
@@ -342,7 +424,7 @@ def test_coordinator_does_not_publish_observed_state_before_daemon_confirmation(
     tmp_path: Path,
 ) -> None:
     store = StrategyRuntimeStore(tmp_path / "runtime.sqlite3")
-    _promote_live(store)
+    _configure_live(store)
     control = InspectingRuntimeControl(store)
     control.results["start"] = RuntimeCommandResult(False, error="not confirmed", timed_out=True)
 
@@ -352,12 +434,12 @@ def test_coordinator_does_not_publish_observed_state_before_daemon_confirmation(
     assert before["runtime"]["desired_state"] == "paused"
     assert before["runtime"]["observed_state"] == "ready"
     assert before["runtime"]["runtime_id"]
-    assert before["instance"]["lifecycle"] == "ready"
+    assert before["instance"]["validation_state"] == "validated"
 
 
 def test_failed_stop_keeps_live_writer_binding_reserved(tmp_path: Path) -> None:
     store = StrategyRuntimeStore(tmp_path / "runtime.sqlite3")
-    current = _promote_live(store)
+    current = _configure_live(store)
     store.transition_runtime(
         "alpha",
         lifecycle="running",
@@ -388,19 +470,20 @@ def test_failed_stop_keeps_live_writer_binding_reserved(tmp_path: Path) -> None:
         observed_state="running",
     ) is True
     assert store.get_runtime_state("alpha")["observed_state"] == "running"
-    assert store.get_instance("alpha")["lifecycle"] == "halted"
+    assert store.get_instance("alpha")["validation_state"] == "validated"
+    assert store.active_route_blocks(instance_id="alpha", account_id="account-1")
 
     control.results["status"] = _confirmed("running")
     status = coordinator.status("alpha")
     assert status["ok"] is False
     assert status["runtime"]["desired_state"] == "paused"
     assert status["runtime"]["observed_state"] == "running"
-    assert store.get_instance("alpha")["lifecycle"] == "halted"
+    assert store.get_instance("alpha")["validation_state"] == "validated"
 
 
 def test_reconciliation_warning_keeps_live_deployment_paused(tmp_path: Path) -> None:
     store = StrategyRuntimeStore(tmp_path / "runtime.sqlite3")
-    _promote_live(store)
+    _configure_live(store)
     control = FakeRuntimeControl()
     control.results = {
         "start": _confirmed("paused_pending_reconcile"),
@@ -420,66 +503,72 @@ def test_reconciliation_warning_keeps_live_deployment_paused(tmp_path: Path) -> 
     assert store.active_route_blocks(instance_id="alpha", account_id="account-1")
 
 
-def test_stage_evidence_uses_recorded_sessions_and_detects_duplicates(tmp_path: Path) -> None:
+def test_runtime_diagnostics_use_recorded_sessions_and_detect_duplicates(tmp_path: Path) -> None:
     store = StrategyRuntimeStore(tmp_path / "runtime.sqlite3")
     current = _create(store)
-    store.record_stage("alpha", "replay", passed=True)
-    store.promote("alpha", "paper")
-    run = store.start_stage_run("alpha", "paper")
+    store.set_validation_state("alpha", "validated")
+    store.configure_deployment(DeploymentSpec(
+        instance_id="alpha", config_hash=current["config_hash"], run_mode="paper",
+    ))
+    run = store.start_runtime_run("alpha", "paper")
     for day in range(1, 21):
-        store.record_stage_session(
+        store.record_runtime_session(
             "alpha",
             config_hash=current["config_hash"],
-            stage="paper",
+            run_mode="paper",
             session=f"2026-06-{day:02d}",
         )
-    store.record_stage_event(
+    store.record_runtime_event(
         "alpha",
         config_hash=current["config_hash"],
-        stage="paper",
+        run_mode="paper",
         event_type="duplicate_routes",
     )
-    finished = store.finish_stage_run(run["run_id"], trading_sessions=999)
+    finished = store.finish_runtime_run(run["run_id"], trading_sessions=999)
 
     assert finished["trading_sessions"] == 20
     assert finished["metrics"]["declared_trading_sessions"] == 999
-    evidence = store.evaluate_stage("alpha", "paper", minimum_sessions=20)
-    assert evidence["passed"] is False
-    assert evidence["failures"]["duplicate_routes"] == 1
+    diagnostics = store.runtime_diagnostics("alpha")["modes"]["paper"]
+    assert diagnostics["trading_sessions"] == 20
+    assert diagnostics["failures"]["duplicate_routes"] == 1
 
 
-def test_stage_evidence_counts_a_trading_date_only_once_across_restarts(tmp_path: Path) -> None:
+def test_runtime_diagnostics_count_a_trading_date_once_across_restarts(tmp_path: Path) -> None:
     store = StrategyRuntimeStore(tmp_path / "runtime.sqlite3")
     current = _create(store)
-    store.record_stage("alpha", "replay", passed=True)
-    store.promote("alpha", "paper")
+    store.set_validation_state("alpha", "validated")
+    store.configure_deployment(DeploymentSpec(
+        instance_id="alpha", config_hash=current["config_hash"], run_mode="paper",
+    ))
 
-    first = store.start_stage_run("alpha", "paper")
-    store.record_stage_session(
-        "alpha", config_hash=current["config_hash"], stage="paper", session="2026-07-14"
+    first = store.start_runtime_run("alpha", "paper")
+    store.record_runtime_session(
+        "alpha", config_hash=current["config_hash"], run_mode="paper", session="2026-07-14"
     )
-    store.finish_stage_run(first["run_id"], trading_sessions=1)
-    second = store.start_stage_run("alpha", "paper")
-    store.record_stage_session(
-        "alpha", config_hash=current["config_hash"], stage="paper", session="2026-07-14"
+    store.finish_runtime_run(first["run_id"], trading_sessions=1)
+    second = store.start_runtime_run("alpha", "paper")
+    store.record_runtime_session(
+        "alpha", config_hash=current["config_hash"], run_mode="paper", session="2026-07-14"
     )
-    store.finish_stage_run(second["run_id"], trading_sessions=1)
+    store.finish_runtime_run(second["run_id"], trading_sessions=1)
 
-    evidence = store.evaluate_stage("alpha", "paper", minimum_sessions=2)
-    assert evidence["trading_sessions"] == 1
-    assert evidence["passed"] is False
+    diagnostics = store.runtime_diagnostics("alpha")["modes"]["paper"]
+    assert diagnostics["trading_sessions"] == 1
+    assert diagnostics["completed_runs"] == 2
 
 
-def test_config_change_invalidates_running_stage_and_old_evidence(tmp_path: Path) -> None:
+def test_config_change_invalidates_running_diagnostic_and_marks_deployment_stale(tmp_path: Path) -> None:
     store = StrategyRuntimeStore(tmp_path / "runtime.sqlite3")
     current = _create(store)
-    store.record_stage("alpha", "replay", passed=True)
-    store.promote("alpha", "paper")
-    run = store.start_stage_run("alpha", "paper")
-    store.record_stage_session(
+    store.set_validation_state("alpha", "validated")
+    store.configure_deployment(DeploymentSpec(
+        instance_id="alpha", config_hash=current["config_hash"], run_mode="paper",
+    ))
+    run = store.start_runtime_run("alpha", "paper")
+    store.record_runtime_session(
         "alpha",
         config_hash=current["config_hash"],
-        stage="paper",
+        run_mode="paper",
         session="2026-07-14",
     )
 
@@ -488,16 +577,13 @@ def test_config_change_invalidates_running_stage_and_old_evidence(tmp_path: Path
         {"params": {"short_window": 10, "long_window": 30, "target_percent": 0.2}},
     )
 
-    assert updated["deployment_level"] == "replay"
-    assert store.get_stage_run(run["run_id"])["status"] == "invalidated"
-    assert store.deployment("alpha")["evidence"] == []
-    with pytest.raises(RuntimeError, match="config changed"):
-        store.record_stage(
-            "alpha",
-            "replay",
-            passed=True,
-            expected_config_hash=current["config_hash"],
-        )
+    assert updated["validation_state"] == "created"
+    assert store.get_runtime_run(run["run_id"])["status"] == "invalidated"
+    assert store.get_deployment_spec("alpha")["stale"] is True
+    assert store.record_runtime_session(
+        "alpha", config_hash=current["config_hash"], run_mode="paper",
+        session="2026-07-15",
+    ) is False
 
 
 def test_shadow_connects_to_supplied_real_path_but_cannot_route(tmp_path: Path) -> None:
@@ -605,23 +691,19 @@ def _make_v1_database(path: Path) -> None:
         )
 
 
-def test_versionless_database_migrates_once_with_backup(tmp_path: Path) -> None:
+def test_versionless_database_is_rejected_without_backup_or_mutation(tmp_path: Path) -> None:
     path = tmp_path / "runtime.sqlite3"
     _make_v1_database(path)
+    before = path.read_bytes()
 
-    store = StrategyRuntimeStore(path)
-    backups = list(tmp_path.glob("runtime.sqlite3.backup-v1-*"))
+    with pytest.raises(RuntimeError, match="schema v1 is incompatible with v10"):
+        StrategyRuntimeStore(path)
 
-    assert store.schema_version == LATEST_SCHEMA_VERSION
-    assert len(backups) == 1
-    with sqlite3.connect(path) as db:
-        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert {"deployment_runtime", "stage_runs", "stage_run_sessions", "route_blocks"} <= tables
-    StrategyRuntimeStore(path)
-    assert len(list(tmp_path.glob("runtime.sqlite3.backup-v1-*"))) == 1
+    assert path.read_bytes() == before
+    assert not list(tmp_path.glob("runtime.sqlite3.backup-*"))
 
 
-def test_v4_migration_rehashes_instances_and_invalidates_old_evidence(tmp_path: Path) -> None:
+def test_populated_legacy_database_is_rejected_without_rehash(tmp_path: Path) -> None:
     path = tmp_path / "runtime.sqlite3"
     _make_v1_database(path)
     legacy_hash_payload = {
@@ -661,17 +743,10 @@ def test_v4_migration_rehashes_instances_and_invalidates_old_evidence(tmp_path: 
         )
         db.commit()
 
-    store = StrategyRuntimeStore(path)
-    migrated = store.get_instance("legacy-live")
-
-    assert migrated["config_hash"] != legacy_hash
-    assert migrated["config"]["artifact_binding"] == {}
-    assert migrated["deployment_level"] == "replay"
-    assert migrated["lifecycle"] == "validated"
-    assert store.deployment("legacy-live")["evidence"] == []
-    runtime = store.get_runtime_state("legacy-live")
-    assert runtime["binding_active"] is False
-    assert runtime["deployment_level"] == "replay"
+    before = path.read_bytes()
+    with pytest.raises(RuntimeError, match="schema v1 is incompatible with v10"):
+        StrategyRuntimeStore(path)
+    assert path.read_bytes() == before
 
 
 def test_corrupted_instance_projection_fails_closed(tmp_path: Path) -> None:
@@ -690,7 +765,7 @@ def test_corrupted_instance_projection_fails_closed(tmp_path: Path) -> None:
         store.get_instance("alpha")
 
 
-def test_failed_migration_preserves_v1_database_and_backup(tmp_path: Path, monkeypatch) -> None:
+def test_legacy_rejection_never_invokes_a_migration(tmp_path: Path, monkeypatch) -> None:
     path = tmp_path / "runtime.sqlite3"
     _make_v1_database(path)
 
@@ -698,11 +773,9 @@ def test_failed_migration_preserves_v1_database_and_backup(tmp_path: Path, monke
         raise RuntimeError("injected migration failure")
 
     monkeypatch.setattr(StrategyRuntimeStore, "_migrate_v2", staticmethod(fail))
-    with pytest.raises(RuntimeError, match="injected"):
+    before = path.read_bytes()
+    with pytest.raises(RuntimeError, match="schema v1 is incompatible with v10"):
         StrategyRuntimeStore(path)
 
-    with sqlite3.connect(path) as db:
-        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert "strategy_instances" in tables
-        assert "schema_version" not in tables
-    assert list(tmp_path.glob("runtime.sqlite3.backup-v1-*"))
+    assert path.read_bytes() == before
+    assert not list(tmp_path.glob("runtime.sqlite3.backup-*"))

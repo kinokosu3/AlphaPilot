@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 import uuid
 
@@ -9,7 +10,11 @@ from alphapilot.systems.trading.account_identity import (
     ACCOUNT_HASH_PREFIX,
     account_identities_match,
 )
-from alphapilot.systems.trading.domain import DeploymentLevel, LifecycleState
+from alphapilot.systems.trading.domain import (
+    DeploymentMode,
+    InstanceValidationState,
+    LifecycleState,
+)
 from alphapilot.systems.trading.ports import RuntimeCommandResult, RuntimeControlPort
 
 
@@ -22,11 +27,15 @@ class DeploymentCoordinator:
 
     def start(self, instance_id: str) -> dict[str, Any]:
         instance = self._instance(instance_id)
-        level = instance["deployment_level"]
-        if level == DeploymentLevel.REPLAY.value:
-            raise ValueError("REPLAY instances cannot be started as a deployment")
-        live = level == DeploymentLevel.LIVE.value
-        external = live or instance["runtime"].get("execution_environment") == "broker_simulation"
+        mode = instance["deployment"]["run_mode"]
+        live = mode == DeploymentMode.LIVE.value
+        if live:
+            _require_automated_live_enabled()
+        external = mode in {
+            DeploymentMode.SIMULATION.value,
+            DeploymentMode.SHADOW.value,
+            DeploymentMode.LIVE.value,
+        }
         self._block(instance_id, True, "deployment start is awaiting runtime confirmation")
         runtime_id = str(instance["runtime"].get("runtime_id") or uuid.uuid4().hex)
         prepared = self.store.update_runtime_state(
@@ -35,7 +44,9 @@ class DeploymentCoordinator:
             desired_state=(LifecycleState.PAUSED.value if external else LifecycleState.RUNNING.value),
             reconcile_required=external,
             reconciled=not external,
-            binding_active=(True if external else instance["runtime"]["binding_active"]),
+            binding_active=(
+                mode in {DeploymentMode.SIMULATION.value, DeploymentMode.LIVE.value}
+            ),
             runtime_id=runtime_id,
             last_error={},
         )
@@ -45,7 +56,7 @@ class DeploymentCoordinator:
             return self._command_failed(instance_id, "start", result)
         current_runtime = self.store.get_runtime_state(instance_id)
         account_id, broker = _observed_binding(result)
-        if live:
+        if mode in {DeploymentMode.SHADOW.value, DeploymentMode.LIVE.value}:
             if account_id and not account_identities_match(
                 current_runtime["account_id"], account_id,
             ):
@@ -54,17 +65,17 @@ class DeploymentCoordinator:
                     runtime_id=result.runtime_id,
                     heartbeat_at=result.heartbeat_at,
                     runner_status=result.runner_status,
-                    error="daemon account does not match the LIVE promotion binding",
+                    error="daemon account does not match the deployment binding",
                     raw=result.raw,
                 )
                 return self._command_failed(instance_id, "start", mismatch)
-            if broker and broker.lower() != current_runtime["broker"].lower():
+            if broker and broker.lower() != current_runtime["trade_provider"].lower():
                 mismatch = RuntimeCommandResult(
                     False,
                     runtime_id=result.runtime_id,
                     heartbeat_at=result.heartbeat_at,
                     runner_status=result.runner_status,
-                    error="daemon broker does not match the LIVE promotion binding",
+                    error="daemon broker does not match the deployment provider",
                     raw=result.raw,
                 )
                 return self._command_failed(instance_id, "start", mismatch)
@@ -77,7 +88,6 @@ class DeploymentCoordinator:
             observed_state=observed,
             runtime_id=result.runtime_id,
             account_id=current_runtime["account_id"] or account_id,
-            broker=current_runtime["broker"] or broker,
             runner_heartbeat_at=result.heartbeat_at,
             last_command_id=result.command_id,
             last_error={},
@@ -87,9 +97,8 @@ class DeploymentCoordinator:
         )
         if not external:
             self._block(instance_id, False)
-            if level in {DeploymentLevel.PAPER.value, DeploymentLevel.SHADOW.value}:
-                if self.store.get_active_stage_run(instance_id, stage=level) is None:
-                    self.store.start_stage_run(instance_id, level)
+            if self.store.get_active_runtime_run(instance_id, run_mode=mode) is None:
+                self.store.start_runtime_run(instance_id, mode)
         elif not live:
             reconciled = self.reconcile(instance_id)
             if not reconciled["ok"]:
@@ -99,20 +108,12 @@ class DeploymentCoordinator:
                     "startup_phase": "reconcile",
                     "auto_reconciled": False,
                 }
-            if runtime.get("quote_data_kind") == "realtime":
-                resumed = self.resume(instance_id)
-                return {
-                    **resumed,
-                    "action": "start",
-                    "startup_phase": "running" if resumed["ok"] else "resume",
-                    "auto_reconciled": True,
-                }
+            resumed = self.resume(instance_id)
             return {
-                **reconciled,
+                **resumed,
                 "action": "start",
-                "startup_phase": "observe_only",
+                "startup_phase": "running" if resumed["ok"] else "resume",
                 "auto_reconciled": True,
-                "routing_disabled": "non-realtime quote provider",
             }
         return self._response(instance_id, "start", result, runtime)
 
@@ -151,7 +152,7 @@ class DeploymentCoordinator:
         if not result.ok:
             return self._command_failed(instance_id, "reconcile", result)
         if warnings:
-            self._record_stage_event(
+            self._record_runtime_event(
                 instance,
                 "reconciliation_warnings",
                 count=len(warnings),
@@ -180,22 +181,16 @@ class DeploymentCoordinator:
             reconciled=True,
             last_error={},
         )
-        level = instance["deployment_level"]
-        if level in {DeploymentLevel.PAPER.value, DeploymentLevel.SHADOW.value}:
-            if self.store.get_active_stage_run(instance_id, stage=level) is None:
-                self.store.start_stage_run(instance_id, level)
         return self._response(instance_id, "reconcile", result, runtime)
 
     def resume(self, instance_id: str) -> dict[str, Any]:
         instance = self._instance(instance_id)
+        mode = instance["deployment"]["run_mode"]
+        if mode == DeploymentMode.LIVE.value:
+            _require_automated_live_enabled()
         current = self.store.get_runtime_state(instance_id)
         if current["reconcile_required"]:
             raise ValueError("deployment must reconcile successfully before resume")
-        if (
-            current.get("execution_environment") == "broker_simulation"
-            and current.get("quote_data_kind") != "realtime"
-        ):
-            raise ValueError("replay/synthetic quote providers cannot resume automated routing")
         self._block(instance_id, True, "deployment resume is awaiting runtime confirmation")
         self.store.update_runtime_state(
             instance_id,
@@ -218,16 +213,16 @@ class DeploymentCoordinator:
         # WARMING_UP remains fail-closed through the desired/observed lifecycle
         # checks and will become routable only after a matching runner heartbeat.
         self._block(instance_id, False)
-        if instance["deployment_level"] == DeploymentLevel.LIVE.value:
-            if self.store.get_active_stage_run(instance_id, stage="live") is None:
-                self.store.start_stage_run(instance_id, "live")
+        if self.store.get_active_runtime_run(instance_id, run_mode=mode) is None:
+            self.store.start_runtime_run(instance_id, mode)
         return self._response(instance_id, "resume", result, runtime)
 
     def stop(self, instance_id: str) -> dict[str, Any]:
         instance = self._instance(instance_id)
-        active_run = self.store.get_active_stage_run(
+        mode = instance["deployment"]["run_mode"]
+        active_run = self.store.get_active_runtime_run(
             instance_id,
-            stage=instance["deployment_level"],
+            run_mode=mode,
         )
         self._block(instance_id, True, "deployment stopped")
         self.store.update_runtime_state(
@@ -246,15 +241,18 @@ class DeploymentCoordinator:
             runner_heartbeat_at="",
             last_command_id=result.command_id,
             reconcile_required=(
-                instance["deployment_level"] == DeploymentLevel.LIVE.value
-                or instance["runtime"].get("execution_environment") == "broker_simulation"
+                mode in {
+                    DeploymentMode.SIMULATION.value,
+                    DeploymentMode.SHADOW.value,
+                    DeploymentMode.LIVE.value,
+                }
             ),
             reconciled=False,
             binding_active=False,
             last_error={},
         )
         if active_run is not None:
-            self.store.finish_stage_run(
+            self.store.finish_runtime_run(
                 active_run["run_id"],
                 trading_sessions=active_run["trading_sessions"],
                 metrics={},
@@ -295,7 +293,7 @@ class DeploymentCoordinator:
                     last_error={"action": "status", "error": mismatch.error},
                     reconcile_required=True,
                 )
-                self._record_stage_event(
+                self._record_runtime_event(
                     instance,
                     "unresolved_errors",
                     details={"action": "status", "error": mismatch.error},
@@ -344,8 +342,8 @@ class DeploymentCoordinator:
             reconcile_required=True,
             reconciled=False,
         )
-        instance = self.store.get_instance(instance_id)
-        self._record_stage_event(
+        instance = self._instance(instance_id)
+        self._record_runtime_event(
             instance,
             "unresolved_errors",
             details={"action": action, "error": result.error, "timed_out": result.timed_out},
@@ -356,14 +354,19 @@ class DeploymentCoordinator:
         instance = dict(self.store.get_instance(instance_id))
         if instance["config_hash"] != instance["config"].get("config_hash"):
             raise ValueError("strategy instance config projection is inconsistent")
+        if instance["validation_state"] != InstanceValidationState.VALIDATED.value:
+            raise ValueError("strategy instance must be validated before daemon control")
+        deployment = self.store.get_deployment_spec(instance_id)
+        if deployment["stale"]:
+            raise ValueError("deployment is stale; validate and configure it again")
         instance["runtime"] = self.store.get_runtime_state(instance_id)
-        instance["execution_binding"] = self.store.get_execution_binding(instance_id)
+        instance["deployment"] = deployment
         return instance
 
     def _block(self, instance_id: str, active: bool, reason: str = "") -> None:
-        self.store.set_route_block("instance", instance_id, active=active, reason=reason)
+        self.store.set_route_block("runtime", instance_id, active=active, reason=reason)
 
-    def _record_stage_event(
+    def _record_runtime_event(
         self,
         instance: dict[str, Any],
         event_type: str,
@@ -371,13 +374,11 @@ class DeploymentCoordinator:
         count: int = 1,
         details: Any = None,
     ) -> None:
-        level = instance["deployment_level"]
-        if level not in {DeploymentLevel.PAPER.value, DeploymentLevel.SHADOW.value}:
-            return
-        self.store.record_stage_event(
+        mode = instance["deployment"]["run_mode"]
+        self.store.record_runtime_event(
             instance["instance_id"],
             config_hash=instance["config_hash"],
-            stage=level,
+            run_mode=mode,
             event_type=event_type,
             count=count,
             details=details,
@@ -432,3 +433,11 @@ def _states_compatible(desired: str, observed: str) -> bool:
             LifecycleState.PAUSED_PENDING_RECONCILE.value,
         }
     return desired == observed
+
+
+def _require_automated_live_enabled() -> None:
+    value = os.getenv("ALPHAPILOT_AUTOMATED_LIVE_ENABLED", "").strip().lower()
+    if value not in {"1", "true", "yes", "on"}:
+        raise ValueError(
+            "automated LIVE is disabled; set ALPHAPILOT_AUTOMATED_LIVE_ENABLED=true"
+        )

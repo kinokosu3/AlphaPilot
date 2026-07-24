@@ -14,9 +14,6 @@ from alphapilot.systems.live.plugin import (
     QuoteChannelSpec,
     TradeChannelSpec,
 )
-from alphapilot.systems.trading.account_identity import account_identity_hash
-
-
 def _tts_contract_spec() -> LivePluginSpec:
     """Portal contract fixture for the separately installed TTS plugin."""
 
@@ -55,10 +52,9 @@ def _operator_headers(engine) -> dict[str, str]:  # noqa: ANN001
     return {"Authorization": f"Bearer {token}", "X-Request-ID": uuid4().hex}
 
 
-def test_tts_execution_binding_api_is_authenticated_and_provider_filtered(engine) -> None:
+def test_tts_deployment_api_is_local_unauthenticated_and_provider_filtered(engine) -> None:
     trading = engine.get_system("trading")
     client = TestClient(create_app(engine=engine))
-    headers = _operator_headers(engine)
     instance_id = f"tts-binding-{uuid4().hex}"
     trading.create_instance({
         "instance_id": instance_id,
@@ -66,9 +62,13 @@ def test_tts_execution_binding_api_is_authenticated_and_provider_filtered(engine
         "params": {"short_window": 5, "long_window": 20},
         "universe": ["SH600000"],
         "frequency": "day",
+        "data_policy": {
+            "feature_adjustment": "backward",
+            "history_window": 21,
+            "data_version": "portal-test-v1",
+        },
     })
-    trading.store.record_stage(instance_id, "replay", passed=True)
-    trading.store.promote(instance_id, "paper")
+    assert trading.validate_instance(instance_id)["ok"] is True
     try:
         live_registry.get_broker("tts")
     except ValueError:
@@ -76,35 +76,26 @@ def test_tts_execution_binding_api_is_authenticated_and_provider_filtered(engine
             _tts_contract_spec(), distribution="external-alphapilot-tts", version="test",
         )
 
-    initial = client.get(
-        f"/api/trading/deployments/{instance_id}/execution-binding"
-    )
-    assert initial.status_code == 200
-    assert initial.json()["execution_environment"] == "local_paper"
-
     payload = {
-        "execution_environment": "broker_simulation",
+        "run_mode": "simulation",
         "trade_provider": "tts",
         "quote_provider": "emt",
         "account_profile": "tts-uat-main",
-        "reason": "bind protected TTS simulation account",
     }
-    assert client.put(
-        f"/api/trading/deployments/{instance_id}/execution-binding", json=payload,
-    ).status_code == 401
-    assert client.put(
-        f"/api/trading/deployments/{instance_id}/execution-binding",
-        json={**payload, "reason": ""}, headers=headers,
-    ).status_code == 400
     updated = client.put(
-        f"/api/trading/deployments/{instance_id}/execution-binding",
+        f"/api/trading/deployments/{instance_id}",
         json=payload,
-        headers=headers,
     )
     assert updated.status_code == 200
-    assert updated.json()["trade_provider"] == "tts"
-    assert updated.json()["quote_provider"] == "emt"
-    assert updated.json()["quote_data_kind"] == "realtime"
+    configuration = updated.json()["configuration"]
+    assert configuration["run_mode"] == "simulation"
+    assert configuration["trade_provider"] == "tts"
+    assert configuration["quote_provider"] == "emt"
+    assert configuration["quote_data_kind"] == "realtime"
+    assert client.put(
+        f"/api/trading/deployments/{instance_id}",
+        json={**payload, "account_profile": ""},
+    ).status_code == 400
 
     simulation_brokers = client.get(
         "/api/live/brokers?account_kind=simulation"
@@ -153,7 +144,28 @@ def test_trading_definition_and_instance_api(engine) -> None:
         headers=headers,
     )
     assert updated.status_code == 200
-    assert updated.json()["deployment_level"] == "replay"
+    assert updated.json()["validation_state"] == "created"
+
+
+def test_deployment_configuration_requires_explicit_instance_validation(engine) -> None:
+    trading = engine.get_system("trading")
+    client = TestClient(create_app(engine=engine))
+    instance_id = f"unvalidated-deployment-{uuid4().hex}"
+    created = trading.create_instance({
+        "instance_id": instance_id,
+        "strategy_id": "sma_filter",
+        "params": {"window": 5},
+        "universe": ["600000.SSE"],
+        "data_policy": {"history_window": 6, "data_version": "portal-v10"},
+    })
+    assert created["validation_state"] == "created"
+
+    rejected = client.put(
+        f"/api/trading/deployments/{instance_id}", json={"run_mode": "paper"},
+    )
+    assert rejected.status_code == 400
+    assert "must be validated" in rejected.json()["detail"]
+    assert trading.store.get_instance(instance_id)["validation_state"] == "created"
 
 
 def test_removed_timing_routes_are_absent_but_catalog_remains_auditable(engine) -> None:
@@ -163,7 +175,7 @@ def test_removed_timing_routes_are_absent_but_catalog_remains_auditable(engine) 
     assert client.post("/api/timing/backtest", json={}).status_code == 404
     assert client.get("/api/timing/jobs/missing/detail").status_code == 404
     compatibility = client.get("/api/trading/compatibility").json()
-    assert compatibility["schema_version"] == 9
+    assert compatibility["schema_version"] == 10
     assert compatibility["environment_id"]
     catalog = {
         row["entrypoint"]: row for row in compatibility["entrypoints"]
@@ -212,10 +224,10 @@ def test_broker_uat_http_surface_is_strictly_read_only(engine) -> None:
     assert set(operations) == {"get"}
 
 
-def test_parity_write_is_authenticated_and_qualification_is_runtime_derived(engine) -> None:
+def test_decision_comparison_is_local_diagnostic_and_old_gate_routes_are_absent(engine) -> None:
     client = TestClient(create_app(engine=engine))
     headers = _operator_headers(engine)
-    instance_id = f"qualification-{uuid4().hex}"
+    instance_id = f"diagnostics-{uuid4().hex}"
     created = client.post(
         "/api/trading/strategy-instances",
         json={
@@ -228,26 +240,33 @@ def test_parity_write_is_authenticated_and_qualification_is_runtime_derived(engi
         headers=headers,
     )
     assert created.status_code == 200
-
-    qualification = client.get(
-        f"/api/trading/deployments/{instance_id}/qualification"
-    )
-    assert qualification.status_code == 200
-    assert qualification.json()["eligible_for_live_authorization"] is False
-    assert qualification.json()["paper"]["trading_sessions"] == 0
-
-    unauthenticated = client.post(
-        f"/api/trading/deployments/{instance_id}/parity-runs",
-        json={"replay_run_id": "missing", "shadow_stage_run_id": "missing"},
-    )
-    assert unauthenticated.status_code == 401
-    invalid = client.post(
-        f"/api/trading/deployments/{instance_id}/parity-runs",
-        json={},
+    assert client.post(
+        f"/api/trading/strategy-instances/{instance_id}/validate",
         headers=headers,
+    ).status_code == 200
+
+    diagnostics = client.get(
+        f"/api/trading/deployments/{instance_id}/diagnostics"
     )
-    assert invalid.status_code == 400
-    assert "required" in invalid.json()["detail"]
+    assert diagnostics.status_code == 200
+    assert diagnostics.json()["modes"]["paper"]["trading_sessions"] == 0
+
+    invalid = client.post(
+        f"/api/trading/deployments/{instance_id}/decision-comparisons",
+        json={"left_mode": "replay", "right_mode": "shadow"},
+    )
+    assert invalid.status_code == 422
+    validation_errors = invalid.json()["detail"]
+    assert {item["loc"][-1] for item in validation_errors} == {
+        "left_run_id", "right_run_id",
+    }
+    assert all("required" in item["msg"].lower() for item in validation_errors)
+    assert client.get(
+        f"/api/trading/deployments/{instance_id}/qualification"
+    ).status_code == 404
+    assert client.post(
+        f"/api/trading/deployments/{instance_id}/parity-runs", json={}
+    ).status_code == 404
 
 
 def test_preimported_legacy_timing_job_remains_available_through_formal_detail(
@@ -359,72 +378,51 @@ def test_formal_deployment_and_operator_routes_cover_success_and_validation(
     client = TestClient(create_app(engine=engine))
     headers = _operator_headers(engine)
     instance_id = f"deployment-routes-{uuid4().hex}"
-    created = trading.create_instance({
+    trading.create_instance({
         "instance_id": instance_id,
         "strategy_id": "sma_filter",
         "params": {"window": 5},
         "universe": ["600000.SSE"],
+        "data_policy": {"history_window": 6, "data_version": "portal-v10"},
     })
+    assert trading.validate_instance(instance_id)["ok"] is True
 
-    monkeypatch.setattr(
-        trading,
-        "deployment",
-        lambda requested: {"instance_id": requested, "lifecycle": "validated"},
-    )
-    monkeypatch.setattr(
-        trading,
-        "promote",
-        lambda requested, payload: {
-            "instance_id": requested,
-            "config_hash": created["config_hash"],
-            "deployment_level": payload["to"],
-        },
-    )
-    monkeypatch.setattr(
-        trading,
-        "authorize_live",
-        lambda requested, payload, operator: {
-            "instance_id": requested,
-            "account_id": payload["account_id"],
-            "operator_id": operator.operator_id,
-        },
-    )
     monkeypatch.setattr(
         trading,
         "audit_events",
         lambda limit=200: [{"action": "test", "limit": limit}],
     )
 
+    configured = client.put(
+        f"/api/trading/deployments/{instance_id}",
+        json={"run_mode": "paper"},
+    )
+    assert configured.status_code == 200
+    assert configured.json()["configuration"]["run_mode"] == "paper"
     deployment = client.get(f"/api/trading/deployments/{instance_id}")
-    assert deployment.json()["lifecycle"] == "validated"
-    assert client.post(
-        f"/api/trading/deployments/{instance_id}/promote",
-        json={"to": "paper"},
-        headers=headers,
-    ).status_code == 400
-    promoted = client.post(
-        f"/api/trading/deployments/{instance_id}/promote",
-        json={"to": "paper", "reason": "validated replay"},
-        headers=headers,
-    )
-    assert promoted.json()["deployment_level"] == "paper"
-    authorized = client.post(
-        f"/api/trading/deployments/{instance_id}/authorize-live",
-        json={"account_id": "sim", "broker": "xtp", "reason": "operator approval"},
-        headers=headers,
-    )
-    assert authorized.json()["account_id_hash"] == account_identity_hash("sim")
+    assert deployment.json()["runtime"]["observed_state"] == "ready"
+
     monkeypatch.setattr(
         trading,
-        "authorize_live",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("approval rejected")),
+        "lifecycle_action",
+        lambda requested, action: {
+            "instance_id": requested,
+            "observed_state": action,
+        },
     )
-    rejected = client.post(
+    started = client.post(
+        f"/api/trading/deployments/{instance_id}/start",
+        json={},
+    )
+    assert started.status_code == 200
+    assert started.json()["observed_state"] == "start"
+    assert client.post(
+        f"/api/trading/deployments/{instance_id}/promote", json={"to": "paper"}
+    ).status_code == 404
+    assert client.post(
         f"/api/trading/deployments/{instance_id}/authorize-live",
-        json={"account_id": "sim", "broker": "xtp", "reason": "bad approval"},
-        headers=headers,
-    )
-    assert rejected.status_code == 400
+        json={"account_id": "sim"},
+    ).status_code == 404
     assert client.get("/api/trading/audit-events?limit=7").json()["events"][0]["limit"] == 7
     assert client.post(
         "/api/trading/kill-switches/global/all/invalid",
@@ -472,6 +470,12 @@ def test_removed_migration_write_endpoints_are_not_dispatchable(engine) -> None:
         ("POST", f"/api/trading/stage-runs/{instance_id}/paper/start"),
         ("POST", "/api/trading/stage-runs/missing/finish"),
         ("POST", f"/api/trading/stage-runs/{instance_id}/paper/evaluate"),
+        ("POST", f"/api/trading/deployments/{instance_id}/promote"),
+        ("POST", f"/api/trading/deployments/{instance_id}/authorize-live"),
+        ("GET", f"/api/trading/deployments/{instance_id}/qualification"),
+        ("POST", f"/api/trading/deployments/{instance_id}/parity-runs"),
+        ("GET", f"/api/trading/deployments/{instance_id}/execution-binding"),
+        ("PUT", f"/api/trading/deployments/{instance_id}/execution-binding"),
         ("POST", f"/api/trading/deployments/{instance_id}/unknown-action"),
     )
     for method, path in probes:
@@ -479,8 +483,7 @@ def test_removed_migration_write_endpoints_are_not_dispatchable(engine) -> None:
         assert response.status_code in {404, 405}, (path, response.text)
 
     stage_runs = client.get(f"/api/trading/deployments/{instance_id}/stage-runs")
-    assert stage_runs.status_code == 200
-    assert stage_runs.json()["stage_runs"] == []
+    assert stage_runs.status_code == 404
 
     after = {
         row["entrypoint"]: row["call_count"]
@@ -496,31 +499,46 @@ def test_removed_migration_write_endpoints_are_not_dispatchable(engine) -> None:
     assert removed["POST /api/trading/deployments/{id}/{action}"] == "removed"
 
 
-def test_trading_parity_and_read_only_uat_detail_routes(engine, monkeypatch) -> None:  # noqa: ANN001
+def test_trading_decision_comparison_and_read_only_uat_detail_routes(
+    engine, monkeypatch,
+) -> None:  # noqa: ANN001
     trading = engine.get_system("trading")
-    instance_id = f"parity-api-{uuid4().hex}"
+    instance_id = f"comparison-api-{uuid4().hex}"
     trading.create_instance({
         "instance_id": instance_id,
         "strategy_id": "sma_filter",
         "params": {"window": 5},
         "universe": ["600000.SSE"],
     })
-    parity = {
-        "parity_run_id": "parity-1", "instance_id": instance_id,
+    comparison = {
+        "comparison_id": "comparison-1", "instance_id": instance_id,
         "status": "passed", "results": [],
     }
-    monkeypatch.setattr(trading, "start_parity_run", lambda _instance_id, _payload: parity)
-    monkeypatch.setattr(trading, "get_parity_run", lambda _run_id: parity)
+    monkeypatch.setattr(
+        trading, "compare_decisions", lambda _instance_id, _payload: comparison,
+    )
+    monkeypatch.setattr(
+        trading, "get_decision_comparison", lambda _comparison_id: comparison,
+    )
+    monkeypatch.setattr(
+        trading, "list_decision_comparisons", lambda _instance_id: [comparison],
+    )
     client = TestClient(create_app(engine=engine))
-    headers = _operator_headers(engine)
 
     started = client.post(
-        f"/api/trading/deployments/{instance_id}/parity-runs",
-        json={"replay_run_id": "replay", "shadow_stage_run_id": "shadow"},
-        headers=headers,
+        f"/api/trading/deployments/{instance_id}/decision-comparisons",
+        json={
+            "left_mode": "replay", "left_run_id": "replay",
+            "right_mode": "shadow", "right_run_id": "shadow",
+        },
     )
     assert started.status_code == 200
-    assert client.get("/api/trading/parity-runs/parity-1").json()["status"] == "passed"
+    assert client.get(
+        "/api/trading/decision-comparisons/comparison-1"
+    ).json()["status"] == "passed"
+    assert client.get(
+        f"/api/trading/deployments/{instance_id}/decision-comparisons"
+    ).json()["comparisons"][0]["comparison_id"] == "comparison-1"
     missing_uat = client.get("/api/trading/broker-uat-runs/missing")
     assert missing_uat.status_code == 404
 
@@ -538,14 +556,28 @@ def test_new_read_only_trading_routes_convert_internal_failures_to_http_errors(
     for method, path in (
         ("compatibility_status", "/api/trading/compatibility"),
         ("list_broker_uat_runs", "/api/trading/broker-uat-runs"),
-        ("get_parity_run", "/api/trading/parity-runs/missing"),
-        ("qualification", "/api/trading/deployments/missing/qualification"),
+        ("get_decision_comparison", "/api/trading/decision-comparisons/missing"),
+        ("deployment_diagnostics", "/api/trading/deployments/missing/diagnostics"),
     ):
         original = getattr(trading, method)
         monkeypatch.setattr(trading, method, fail)
         response = client.get(path)
         assert response.status_code == 400
         monkeypatch.setattr(trading, method, original)
+
+
+def test_deployment_routes_require_a_loopback_portal_boundary(
+    engine, monkeypatch,
+) -> None:
+    client = TestClient(create_app(engine=engine, portal_host="0.0.0.0"))
+    assert client.get("/api/trading/deployments").status_code == 401
+    assert client.get(
+        "/api/trading/deployments/missing/diagnostics"
+    ).status_code == 401
+
+    monkeypatch.setenv("ALPHAPILOT_PORTAL_BIND_HOST", "0.0.0.0")
+    reload_client = TestClient(create_app(engine=engine))
+    assert reload_client.get("/api/trading/deployments").status_code == 401
 
 
 def test_portal_startup_does_not_execute_removed_timing_job_importer(

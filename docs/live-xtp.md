@@ -160,15 +160,16 @@ alphapilot live_daemon_order --symbol SH600000 --side buy --volume 100 --price 1
 alphapilot live_daemon_cancel --order_id <order_id> --wait True --event_timeout 10
 alphapilot live_daemon_stop
 
-# 自动策略必须先创建持久化实例并完成 REPLAY 证据，再由正式 deployment 控制
+# 自动策略先创建并验证持久化实例，再独立配置 deployment
 alphapilot trading_instance_create \
   --instance_id=sma20-paper --strategy_id=sma_filter --universe=SH600000 \
   --params='{"window":20}' --frequency=day \
+  --data_policy='{"feature_adjustment":"backward","history_window":21,"data_version":"daily-bars-2026-07"}' \
   --portfolio_policy='{"policy_id":"timing_fixed_exposure","params":{"target_percent":0.5}}'
 alphapilot trading_instance_validate --instance_id=sma20-paper
 alphapilot trading_backtest --instance_id=sma20-paper \
   --options='{"data_dir":"./data","adjust_mode":"none"}' --wait=True
-alphapilot trading_promote --instance_id=sma20-paper --to=paper
+alphapilot trading_deploy --instance_id=sma20-paper --run_mode=paper
 alphapilot trading_start --instance_id=sma20-paper
 alphapilot trading_status --instance_id=sma20-paper
 alphapilot trading_pause --instance_id=sma20-paper
@@ -256,9 +257,10 @@ Portal 前端的“实盘交易”页面已经接入这些能力：runtime 预�
 `AccountSizer` → 可恢复 `ExecutionPlan` → OMS → Risk → Broker。规则择时 v1 会由兼容 provider
 包装进这条链路；v2 provider 直接实现生命周期。策略代码不能访问 Broker，也不能自行发送订单。
 
-日频 A 股/ETF 实例可按 REPLAY → PAPER → SHADOW → LIVE 晋升；分钟实例当前只允许到 SHADOW。
-daemon 只是 `RuntimeControlPort` 的实现细节，只接受已验证实例 ID。重启后 LIVE 固定进入待对账，
-必须由正式 reconcile/resume 流程恢复，不能通过匿名 runner 绕过部署状态。
+REPLAY 只由回测创建。已验证的日频 A 股/ETF 实例可以在 daemon 停止时直接配置为
+PAPER、SIMULATION、SHADOW 或 LIVE；模式切换统一重新 PUT 部署。daemon 只是
+`RuntimeControlPort` 的实现细节，只接受已验证且部署绑定未过期的实例 ID。重启后 LIVE 固定
+进入待对账，必须由 reconcile/resume 流程恢复，不能通过匿名 runner 绕过部署状态。
 
 ## 常见失败
 

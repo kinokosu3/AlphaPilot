@@ -8,8 +8,8 @@ AlphaPilot 把 TTS 作为外部、有服务端资金/持仓/委托/成交状态�
 
 | 维度 | 当前实现 |
 | --- | --- |
-| 策略晋级级别 | 仍为 `REPLAY → PAPER → SHADOW → LIVE`；不新增级别 |
-| PAPER 执行环境 | `local_paper` 或 `broker_simulation`，二者的证据不能混用 |
+| 正式部署模式 | `paper | simulation | shadow | live`；REPLAY 只用于回测 |
+| 执行环境 | `paper` 推导为 `local_paper`；`simulation` 推导为 `broker_simulation` |
 | TTS trade provider | `tts`，只在 `simulation` 中可选 |
 | 行情 | 任意已安装的 `realtime` provider；也可选 `tts_7x24` 回放 |
 | 自动路由 | 仅 `simulation + realtime quote + 完整对账 + 单写者锁` |
@@ -17,10 +17,9 @@ AlphaPilot 把 TTS 作为外部、有服务端资金/持仓/委托/成交状态�
 | 可路由品种 | SSE/SZSE 股票、基金 |
 | 明确拒绝 | 债券、期权、期货、未知合约、非实时行情 |
 
-PAPER 晋级 SHADOW 时会在同一事务内切换为 Live 配置中的交易与行情 provider；
-TTS 的 binding hash 不会被带入 SHADOW。已在晋级事务中验证并消费的 PAPER 证据仍可
-用于后续资格审计，但不能被新 binding 当作本阶段证据。SHADOW 晋级 LIVE 默认沿用该
-阶段已经验证过的独立行情 provider。
+每次 `trading_deploy` 都根据模式与 Provider 元数据原子生成新的 binding hash 和初始 runtime。
+切换到 SHADOW/LIVE 时必须重新提供真实交易账户与实时行情 Provider，不会沿用 TTS 的仿真绑定。
+历史运行会话仅作为诊断保留，不参与新部署的权限判断。
 
 这次接入复用现有 `DecisionPipeline → ExecutionPlanner → ExecutionCoordinator →
 LiveEngine → RiskGate → BrokerGateway` 边界。没有修改策略信号、组合决策、A 股执行
@@ -84,23 +83,23 @@ export ALPHAPILOT_LIVE_TTS_7X24_QUOTE_FRONT='tcp://host:port'
 
 ## 策略绑定与运行
 
-先按正常流程把策略晋级到 PAPER，并确保 daemon 已停止。然后绑定物理执行环境：
+先验证策略实例并确保 daemon 已停止，然后直接配置仿真部署：
 
 ```bash
-alphapilot trading_bind_execution \
-  --instance_id my_strategy \
-  --execution_environment broker_simulation \
+alphapilot trading_deploy \
+  --instance_id=my_strategy \
+  --run_mode=simulation \
   --trade_provider tts \
   --quote_provider xtp \
   --account_profile tts-main
 
-alphapilot trading_execution_binding --instance_id my_strategy
-alphapilot trading_start --instance_id my_strategy --reason 'start TTS simulation'
+alphapilot trading_deployments
+alphapilot trading_start --instance_id=my_strategy
 ```
 
-也可以在 Portal「实盘交易 → 柜台仿真」中选择 PAPER 策略、TTS 交易方、行情源和
-账户配置别名。绑定只在 daemon 停止时可变更；变更会生成新 `binding_hash`，使原
-PAPER 环境的阶段证据失效。
+也可以在 Portal「实盘交易 → 柜台仿真」中选择任意已验证实例、TTS 交易方、行情源和
+账户配置别名。部署只在 daemon 停止时可变更；变更会生成新 `binding_hash` 并重置 runtime，
+原运行诊断仍保留但不会授权新绑定。
 
 正式策略运行时使用：
 

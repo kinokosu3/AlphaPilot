@@ -159,12 +159,12 @@ def validate_campaign_manifest(
         failures.append(f"frozen template is missing: {template_path}")
     elif hashlib.sha256(template_path.read_bytes()).hexdigest() != template.get("sha256"):
         failures.append("frozen template SHA256 changed")
-    promotion = manifest.get("promotion") or {}
-    if (promotion.get("minimum_sessions") or {}) != {"paper": 20, "shadow": 5, "live": 5}:
-        failures.append("promotion evidence must remain 20 PAPER + 5 SHADOW + 5 LIVE")
-    if promotion.get("broker") != "xtp" or promotion.get("uat_scenario_version") != 2:
-        failures.append("the first controlled broker gate must remain XTP UAT v2")
-    if promotion.get("replay_required_checks") != list(REPLAY_ENGINEERING_CHECKS):
+    acceptance = manifest.get("acceptance") or {}
+    if (acceptance.get("minimum_sessions") or {}) != {"paper": 20, "shadow": 5, "live": 5}:
+        failures.append("campaign acceptance must remain 20 PAPER + 5 SHADOW + 5 LIVE")
+    if acceptance.get("broker") != "xtp" or acceptance.get("uat_scenario_version") != 2:
+        failures.append("the first controlled campaign check must remain XTP UAT v2")
+    if acceptance.get("replay_required_checks") != list(REPLAY_ENGINEERING_CHECKS):
         failures.append("formal Replay engineering checks changed")
 
     deployment = manifest.get("deployment") or {}
@@ -712,8 +712,6 @@ class CampaignRunner:
             validation = trading.validate_instance(target_instance)
             if validation.get("ok") is not True:
                 raise RuntimeError(f"formal instance validation failed: {validation.get('errors')}")
-            if created.get("deployment_level") != "replay":
-                raise RuntimeError("new formal instance must start at Replay")
             details = {
                 "champion_name": registered_champion,
                 "source_strategy_name": source_name,
@@ -726,7 +724,7 @@ class CampaignRunner:
                 ),
                 "whitelist_fingerprint": whitelist_check["fingerprint"],
                 "whitelist_path": str(whitelist_path) if whitelist_path else "",
-                "deployment_level": "replay",
+                "validation_state": validation["instance"]["validation_state"],
             }
             self._record(stage, "completed", details)
             return details
@@ -742,7 +740,7 @@ class CampaignRunner:
             raise ValueError(f"stage must be one of {sorted(allowed)}")
         if details.get("passed") is not True:
             self._record(stage, "failed", details)
-            raise ValueError(f"{stage} did not pass; promotion is stopped")
+            raise ValueError(f"{stage} did not pass; campaign acceptance is stopped")
         if stage == "factor_selection":
             research_stages = [
                 *[f"llm:{item['id']}" for item in self.manifest["llm"]["hypotheses"]],
@@ -790,10 +788,9 @@ class CampaignRunner:
     ) -> dict[str, Any]:
         """Synchronise forward gates from immutable trading-system evidence.
 
-        The method never starts a deployment, promotes an instance or routes an
-        order.  It only reads config-bound stage sessions, daily parity and
-        broker-UAT evidence, and can therefore be run repeatedly by an operator
-        or scheduler.  Revoked/expired evidence fails closed on the next sync.
+        The method never starts or reconfigures a deployment and never routes an
+        order. It applies this campaign's own thresholds to neutral runtime
+        diagnostics, decision comparisons and Broker-UAT evidence.
         """
 
         if not self._completed("asset_freeze"):
@@ -832,19 +829,104 @@ class CampaignRunner:
                 "frozen instance config_hash changed; formal Replay evidence must restart"
             )
 
-        selected_broker = str(broker or self.manifest["promotion"]["broker"]).lower()
-        if selected_broker != self.manifest["promotion"]["broker"]:
+        acceptance_policy = self.manifest["acceptance"]
+        selected_broker = str(broker or acceptance_policy["broker"]).lower()
+        if selected_broker != acceptance_policy["broker"]:
             raise ValueError("forward evidence broker must remain the registered XTP broker")
-        qualification = trading.qualification(
-            requested_instance,
-            account_id=str(account_id or ""),
-            broker=selected_broker,
-        )
-        if qualification.get("config_hash") != frozen.get("config_hash"):
-            raise RuntimeError("qualification report is not bound to the frozen config_hash")
+        diagnostics = trading.deployment_diagnostics(requested_instance)
+        if diagnostics.get("config_hash") != frozen.get("config_hash"):
+            raise RuntimeError("runtime diagnostics are not bound to the frozen config_hash")
+        minimums = dict(acceptance_policy["minimum_sessions"])
 
-        paper_ok = bool((qualification.get("paper") or {}).get("passed"))
-        uat = dict(qualification.get("broker_uat") or {})
+        def runtime_gate(mode: str) -> dict[str, Any]:
+            summary = dict((diagnostics.get("modes") or {}).get(mode) or {})
+            failures = dict(summary.get("failures") or {})
+            minimum = int(minimums[mode])
+            return {
+                **summary,
+                "minimum_sessions": minimum,
+                "passed": (
+                    int(summary.get("trading_sessions") or 0) >= minimum
+                    and int(summary.get("completed_runs") or 0) > 0
+                    and not any(int(value or 0) for value in failures.values())
+                ),
+            }
+
+        paper = runtime_gate("paper")
+        shadow = runtime_gate("shadow")
+        live = runtime_gate("live")
+        shadow_sessions = set(trading.store.list_runtime_sessions(
+            requested_instance,
+            "shadow",
+            config_hash=current["config_hash"],
+        ))
+        statuses_by_session: dict[str, set[str]] = {}
+        for comparison in trading.list_decision_comparisons(requested_instance):
+            if comparison.get("config_hash") != current["config_hash"]:
+                continue
+            if {
+                str(comparison.get("left_mode") or ""),
+                str(comparison.get("right_mode") or ""),
+            } != {"replay", "shadow"}:
+                continue
+            for result in comparison.get("results") or []:
+                statuses_by_session.setdefault(str(result["session"]), set()).add(
+                    str(result["status"])
+                )
+        matched_sessions = {
+            session for session, statuses in statuses_by_session.items()
+            if statuses == {"match"}
+        }
+        decision_consistency = {
+            "passed": bool(shadow_sessions) and shadow_sessions <= matched_sessions,
+            "required_sessions": sorted(shadow_sessions),
+            "matched_sessions": sorted(shadow_sessions & matched_sessions),
+            "missing_sessions": sorted(shadow_sessions - matched_sessions),
+        }
+
+        account_hash = (
+            hashlib.sha256(str(account_id).encode("utf-8")).hexdigest()
+            if str(account_id or "") else ""
+        )
+        metadata: dict[str, Any] = {}
+        metadata_error = ""
+        evidence = None
+        try:
+            metadata = trading.broker_uat_harness.plugin_metadata(selected_broker)
+            evidence = trading.store.valid_broker_uat_evidence(
+                selected_broker,
+                account_hash=account_hash,
+                environment=str(os.getenv("ALPHAPILOT_BROKER_UAT_ENVIRONMENT") or ""),
+                plugin_version=str(metadata.get("plugin_version") or ""),
+                plugin_hash=str(metadata.get("plugin_hash") or ""),
+                sdk_version=str(metadata.get("sdk_version") or ""),
+                sdk_hash=str(metadata.get("sdk_hash") or ""),
+                runtime_code_hash=str(metadata.get("runtime_code_hash") or ""),
+                scenario_version=int(acceptance_policy["uat_scenario_version"]),
+            )
+        except Exception as exc:  # noqa: BLE001 - campaign evidence fails closed
+            metadata_error = f"{type(exc).__name__}: {exc}"
+        uat = {
+            "required": True,
+            "passed": evidence is not None,
+            "broker": selected_broker,
+            "account_hash": account_hash,
+            "evidence_id": "" if evidence is None else evidence["evidence_id"],
+            "expires_at": "" if evidence is None else evidence["expires_at"],
+            "plugin_metadata_error": metadata_error,
+        }
+        acceptance = {
+            "config_hash": current["config_hash"],
+            "paper": paper,
+            "shadow": shadow,
+            "live": live,
+            "decision_consistency": decision_consistency,
+            "broker_uat": uat,
+            "runtime_diagnostics": diagnostics,
+        }
+        acceptance["evidence_hash"] = _canonical_hash(acceptance)
+
+        paper_ok = bool(paper["passed"])
         uat_ok = all(
             (
                 uat.get("required") is True,
@@ -855,10 +937,8 @@ class CampaignRunner:
                 not bool(uat.get("plugin_metadata_error")),
             )
         )
-        shadow_ok = bool((qualification.get("shadow") or {}).get("passed")) and bool(
-            (qualification.get("parity") or {}).get("passed")
-        )
-        live_ok = bool((qualification.get("live") or {}).get("passed"))
+        shadow_ok = bool(shadow["passed"]) and bool(decision_consistency["passed"])
+        live_ok = bool(live["passed"])
         current_checks = {
             "paper_20": paper_ok,
             "uat_v2": uat_ok,
@@ -866,7 +946,7 @@ class CampaignRunner:
             "live_5": live_ok,
         }
 
-        # Evidence can be invalidated by a later contradictory parity result or
+        # Evidence can be invalidated by a later contradictory comparison or
         # expired UAT artifact.  Revoke it before considering any new stage.
         prerequisite_ok = self._completed("replay")
         for stage in ("paper_20", "uat_v2", "shadow_5", "live_5"):
@@ -878,14 +958,14 @@ class CampaignRunner:
                     {
                         "revoked": True,
                         "reason": "derived trading evidence no longer passes",
-                        "qualification_evidence_hash": qualification.get("evidence_hash", ""),
+                        "acceptance_evidence_hash": acceptance.get("evidence_hash", ""),
                     },
                 )
             prerequisite_ok = prerequisite_ok and self._completed(stage)
 
         synced: list[str] = []
         if self._completed("replay") and paper_ok and not self._completed("paper_20"):
-            self._record("paper_20", "completed", qualification["paper"])
+            self._record("paper_20", "completed", paper)
             synced.append("paper_20")
         if self._completed("paper_20") and uat_ok and not self._completed("uat_v2"):
             self._record("uat_v2", "completed", uat)
@@ -895,18 +975,18 @@ class CampaignRunner:
                 "shadow_5",
                 "completed",
                 {
-                    "shadow": qualification["shadow"],
-                    "parity": qualification["parity"],
+                    "shadow": shadow,
+                    "decision_consistency": decision_consistency,
                 },
             )
             synced.append("shadow_5")
         if self._completed("shadow_5") and live_ok and not self._completed("live_5"):
-            self._record("live_5", "completed", qualification["live"])
+            self._record("live_5", "completed", live)
             synced.append("live_5")
         return {
             "instance_id": requested_instance,
             "config_hash": frozen["config_hash"],
             "synced": synced,
             "next_required": self.next_required_stage(),
-            "qualification": qualification,
+            "acceptance": acceptance,
         }

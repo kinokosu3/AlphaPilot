@@ -1,4 +1,4 @@
-"""Forward execution-quality evidence for PAPER/SHADOW/LIVE qualification."""
+"""Mode-neutral execution-quality diagnostics for forward runs."""
 
 from __future__ import annotations
 

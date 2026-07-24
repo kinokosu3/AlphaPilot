@@ -36,6 +36,6 @@ def strategy_definitions() -> list[StrategyDefinition]:
             api_version=2,
             provider_api_version=2,
             signal_kind=SignalKind.CROSS_SECTIONAL_SELECTION,
-            deployable_modes=("replay", "paper", "shadow", "live"),
+            supported_run_modes=("paper", "simulation", "shadow", "live"),
         )
     ]

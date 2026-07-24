@@ -10,9 +10,9 @@ from fastapi.testclient import TestClient
 from alphapilot.modules.portal.api import create_app
 
 
-EXPECTED_OPERATION_COUNT = 152
-EXPECTED_PATH_COUNT = 136
-EXPECTED_CONTRACT_SHA256 = "23b645eaa6c1fa98230f16b32994847f19809e2bd7cbdbaa81cabf218443021a"
+EXPECTED_OPERATION_COUNT = 150
+EXPECTED_PATH_COUNT = 133
+EXPECTED_CONTRACT_SHA256 = "5d9edd824f1856c695c0c05cac13bee901f50ad20283052932b0dc5d2193706a"
 HTTP_METHODS = {"get", "post", "put", "patch", "delete"}
 LEGACY_HTTP_OPERATIONS = {
     ("get", "/api/timing/strategies"),
@@ -24,6 +24,13 @@ LEGACY_HTTP_OPERATIONS = {
     ("post", "/api/trading/stage-runs/{instance_id}/{stage}/start"),
     ("post", "/api/trading/stage-runs/{run_id}/finish"),
     ("post", "/api/trading/stage-runs/{instance_id}/{stage}/evaluate"),
+    ("post", "/api/trading/deployments/{instance_id}/promote"),
+    ("post", "/api/trading/deployments/{instance_id}/authorize-live"),
+    ("get", "/api/trading/deployments/{instance_id}/qualification"),
+    ("post", "/api/trading/deployments/{instance_id}/parity-runs"),
+    ("get", "/api/trading/parity-runs/{run_id}"),
+    ("get", "/api/trading/deployments/{instance_id}/execution-binding"),
+    ("put", "/api/trading/deployments/{instance_id}/execution-binding"),
     ("post", "/api/live/daemon/strategy/status"),
     ("post", "/api/live/daemon/strategy/start"),
     ("post", "/api/live/daemon/strategy/pause"),

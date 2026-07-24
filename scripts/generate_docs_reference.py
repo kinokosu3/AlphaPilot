@@ -139,10 +139,12 @@ def _command_effect(name: str) -> str:
         return "交易/运行时写操作"
     if name == "trading_compatibility":
         return "兼容审计（可选写入 cutoff/报告）"
+    if name == "trading_decision_compare":
+        return "诊断写入"
     if name.startswith("trading_") and name not in {
         "trading_definitions", "trading_policies", "trading_instances", "trading_status",
-        "trading_audit", "trading_qualification",
-        "trading_parity_status", "trading_backtest_status", "trading_broker_uat_status",
+        "trading_audit", "trading_deployments", "trading_diagnostics",
+        "trading_decision_comparisons", "trading_backtest_status", "trading_broker_uat_status",
         "trading_broker_uat_preflight", "trading_removal_check",
     }:
         return "策略或部署写操作"
@@ -247,6 +249,8 @@ def _api_domain(path: str) -> str:
 
 
 def _api_auth(method: str, path: str) -> str:
+    if path.startswith("/api/trading/deployments"):
+        return "本机 Portal"
     if method != "GET" and path.startswith("/api/trading/"):
         return "Operator Bearer"
     if path.startswith("/api/live/") and method != "GET":

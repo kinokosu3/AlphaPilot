@@ -21,12 +21,12 @@ ExecutionPlan -> OMS -> Risk -> Broker -> fills/reconcile
 
 - 规则择时用于判断单只股票、ETF、指数或市场在时间序列上的状态。
 - 模型选股用于同一时点在股票池横截面上输出分数和排名。
-- 两者均可独立创建实例、预览、统一回放、PAPER、SHADOW；A 股/ETF 多头日频实例可在
-  通过门禁后进入 LIVE。
+- 两者均可独立创建实例、预览、统一回放，并直接配置 PAPER、SIMULATION、SHADOW 或 LIVE；
+  A 股/ETF 多头日频实例在通过运行时安全检查后可以路由 LIVE。
 - 本轮没有实现“选股 + 择时”的组合算法，也不允许一个实例绑定多个信号源。
   `PortfolioInputs` 已预留并行输入契约，后续组合规则应作为独立
   `PortfolioPolicy` 实现和验证。
-- 分钟级实例只允许 REPLAY、PAPER 和 SHADOW，不允许晋升 LIVE。
+- 分钟级实例可回放并部署到 PAPER、SIMULATION 或 SHADOW，当前不能配置 LIVE。
 
 ## 模块边界
 
@@ -91,10 +91,10 @@ OMS -> Risk -> Broker
 
 因此简单均线策略同样采用“类与实例分离”：一个 `dual_ma` 定义可以产生
 `ma_5_20`、`ma_20_60` 等实例，无需机器学习模型。任何参数、股票池、代码、模型、
-数据政策或组合政策变化都会产生新配置哈希，使旧证据和 LIVE 授权失效。
+数据政策或组合政策变化都会产生新配置哈希，使已有部署标记为 `stale`。
 活动、暂停待对账或异常状态的实例不允许直接修改，必须先通过部署协调器正式停止；修改后
-实例自动回到 REPLAY，不能让旧 runner 与新配置同时存在。
-对已存在实例进行这些变更时，部署级别同时重置为 REPLAY，不能沿用原有晋升级别。
+实例自动回到待验证状态，不能让旧 runner 与新配置同时存在。原部署配置和诊断仍保留；
+重新验证并重新 PUT 部署后才会绑定新 `config_hash`。
 
 注册优先级为内置策略、本地显式清单、pip entry point。重复 ID、错误 Schema、API
 不兼容或导入失败的扩展会进入 quarantine，不阻止主进程发现其他策略。运行期间不热加载
@@ -117,7 +117,7 @@ signal_kind = "instrument_timing"
 required_history = 61
 supported_assets = ["equity", "fund"]
 supported_frequencies = ["day", "min"]
-deployable_modes = ["replay", "paper", "shadow", "live"]
+supported_run_modes = ["paper", "simulation", "shadow", "live"]
 parameter_schema_json = '''
 {"type":"object","properties":{"fast":{"type":"integer","minimum":2,"default":20},"slow":{"type":"integer","minimum":3,"default":60}},"additionalProperties":false}
 '''
@@ -198,14 +198,15 @@ D 日收盘只保存信号和目标权重。D+1 集合竞价读取新的账户�
 首次信号同样与 OMS 实际持仓比较：信号为空仓而账户仍持仓时，会产生平仓目标。目标计算
 包含活动买卖单和部分成交，避免重启或重复决策造成重复补仓、超卖。
 
-## REPLAY、PAPER、SHADOW 与 LIVE
+## REPLAY 操作与独立部署模式
 
 | 模式 | 数据/账户 | 共享决策与执行状态机 | 可路由 Broker |
 |---|---|---|---|
 | REPLAY | 历史 Bar + 模拟账户 | 是 | 仅历史撮合器 |
 | PAPER | 配置的数据源 + 模拟账户 | 是 | 仅模拟 Broker |
+| SIMULATION | 外部仿真柜台 + 配置行情 | 是 | 仿真交易 Provider |
 | SHADOW | 真实行情 + 真实账户只读快照 | 是 | 永远否 |
-| LIVE | 真实行情 + 真实账户 | 是 | 通过全部授权后才是 |
+| LIVE | 真实行情 + 真实账户 | 是 | 通过运行时安全检查后才是 |
 
 `ReplayRuntime` 使用与运行时相同的 provider、policy、sizer、planner、OMS 规则和执行状态机，
 只替换时钟与 Broker。历史撮合支持费用、滑点、整手、T+1、停牌、涨跌停、拒单和部分成交。
@@ -241,32 +242,29 @@ PLANNED
 不明持仓或外部活动订单时会阻断，不会自动卖出。LIVE writer 运行期间禁止普通人工新开仓；
 人工卖出/撤单、kill switch 和受审计的恢复操作保留。
 
-自动子订单必须通过 `AutomatedRouteAuthorizer`，并匹配实例、配置哈希、账户、Broker、部署
-级别、runtime、desired/observed state、心跳和对账状态。实例、账户和全局三级 kill switch
+自动子订单必须通过 `AutomatedRouteAuthorizer`，并匹配实例、配置哈希、账户、Provider、
+run mode、binding hash、runtime、desired/observed state、心跳和对账状态。实例、账户和全局三级 kill switch
 均可阻止新订单，取消委托始终允许。
 
-LIVE 还要求：
-
-1. 当前配置至少 20 个不同交易日 PAPER 通过证据；
-2. 当前配置至少 5 个不同交易日 SHADOW 通过证据；
-3. 操作员确认基准持仓；
-4. 生成并消费一次性、短有效期且绑定实例/配置/账户/Broker 的 LIVE approval；
-5. `ALPHAPILOT_AUTOMATED_LIVE_ENABLED=true`。默认值仍是 `false`。
+LIVE 不要求 PAPER/SHADOW 时长、决策比较、Broker UAT、短期 approval 或人工账户 baseline。
+它仍要求 `ALPHAPILOT_AUTOMATED_LIVE_ENABLED=true`，以及当前账户/Provider/binding、单账户单
+写者、合约/实时行情、对账、心跳、Kill Switch 和逐单 RiskGate 全部通过。
 
 LIVE 重启固定进入 `PAUSED_PENDING_RECONCILE`。对账成功后仍需操作员显式恢复，不会自动
 重新路由。
 
 ## 操作员认证和审计
 
-Portal 默认监听 `127.0.0.1`。`/api/trading` 写操作、LIVE 控制、kill switch 变更和人工
-恢复要求 Bearer token；数据库只保存 token 哈希和 token ID，明文仅在生成时返回一次。
+Portal 默认监听 `127.0.0.1`。部署配置与生命周期接口仅允许 loopback-bound Portal，且不要求
+Bearer token 或必填原因。策略实例写操作、kill switch、Broker UAT 和人工交易仍要求 Bearer
+token；数据库只保存 token 哈希和 token ID，明文仅在生成时返回一次。
 Portal 只在当前浏览器会话内存中保存 token，不写入持久化 localStorage。
 
 为 UAT 和人工恢复保留的旧 `/api/live/*` 写接口也经过同一 Bearer token 边界并写入审计，
 不能通过旧入口绕过正式部署授权；只读状态、行情查询和 preflight 探测不要求令牌。
 
-所有敏感动作记录操作员、原因、请求 ID、实例、配置哈希、账户、Broker 和结果。CLI 的本地
-操作同样写入审计事件，生命周期控制、LIVE 授权和 kill switch 变更必须提供原因。
+所有受保护动作记录操作员、原因、请求 ID、实例、配置哈希、账户、Broker 和结果。CLI 的本地
+生命周期操作仍可写审计事件，但不再要求令牌或原因。
 
 ## 正式 API 和 CLI
 
@@ -276,27 +274,28 @@ Portal 只在当前浏览器会话内存中保存 token，不写入持久化 loc
   `strategy-instances`、`strategy-instances/from-research-asset`；
 - 预览与回测：`strategy-instances/{id}/preview`、
   `strategy-instances/{id}/backtest-runs`、`backtest-runs/{run_id}`；
-- 部署：`deployments/{id}/promote|authorize-live|start|pause|reconcile|resume|stop|status`；
-- 运行证据与控制：`deployments/{id}/stage-runs`、`kill-switches`、`audit-events`。
-- 一致性与资格：`deployments/{id}/parity-runs`、`parity-runs/{run_id}`、
-  `deployments/{id}/qualification`；
+- 部署：`GET deployments`、`GET|PUT deployments/{id}` 和
+  `deployments/{id}/start|pause|reconcile|resume|stop|status`；
+- 运行诊断与控制：`deployments/{id}/diagnostics`、`kill-switches`、`audit-events`；
+- 通用决策比较：`deployments/{id}/decision-comparisons`、
+  `decision-comparisons/{comparison_id}`；
 - 迁移与券商 UAT：`compatibility`、只读 `broker-uat-runs`。
 
-同步 `POST .../{id}/backtest` 和泛化 `POST .../deployments/{id}/{action}` 仅保留兼容，新增
-调用应使用异步 backtest-run 和显式生命周期路由。
+同步 `POST .../{id}/backtest` 和泛化 `POST .../deployments/{id}/{action}` 已删除。调用方必须
+使用异步 backtest-run 和显式生命周期路由，不提供兼容分发。
 
 正式 CLI 使用 `trading_*` 前缀，覆盖定义/政策列表、实例创建、研究资产导入、校验、预览、
-异步回测、晋升、操作员令牌、LIVE approval、start/pause/reconcile/resume/stop、kill switch
-和审计查询。正式部署命令只接受 `instance_id`。
+异步回测、独立部署、运行诊断、通用决策比较、操作员令牌、生命周期、kill switch 和审计
+查询。正式部署命令接受实例、run mode、Provider 和账户绑定。
 
 ## 持久化和恢复
 
-trading runtime SQLite 当前 schema 版本为 v8，使用 WAL 和顺序 migration。升级前创建在线
-备份，迁移在单事务中执行；迁移失败会保留原库并阻止自动路由，不会静默重建。
+trading runtime SQLite 当前 schema 版本为 v10，使用 WAL。v1-v9 数据库会在任何写入前被
+只读拒绝；用户必须配置新的 state/runtime store 路径，系统不会自动迁移或修改旧文件。
 
-数据库保存实例、artifact manifest、信号、决策、异步回测、执行阶段/尝试、子订单、成交
-对账、runtime desired/observed state、stage run、决策观测/parity、路由阻断、操作员 token、
-LIVE approval、Broker UAT、基准持仓、审计事件和逐环境旧入口调用证据。稳定 decision/order
+数据库保存实例、独立部署配置、artifact manifest、信号、决策、异步回测、执行阶段/尝试、
+子订单、成交对账、runtime desired/observed state、运行诊断、决策观测/比较、路由阻断、
+操作员 token、Broker UAT、审计事件和逐环境旧入口调用证据。稳定 decision/order
 引用以及 UAT 的真实委托引用有唯一约束。
 
 启动恢复顺序固定为：读取检查点和执行日志，查询 Broker 账户/持仓/委托/成交，修复本地
@@ -324,8 +323,8 @@ LIVE approval、Broker UAT、基准持仓、审计事件和逐环境旧入口调
    变更行覆盖率和 wheel smoke，并生成不可篡改的 release report；
 5. `trading_removal_check` 的 commit、schema、UAT 和核心代码证据哈希与待发布代码完全一致。
 
-旧入口删除门禁不等待 20 个 PAPER 日或 5 个 SHADOW 日；这两个门槛仍只约束自动策略晋升
-LIVE。任何删除检查失败都必须推迟 0.2.0，不能通过环境变量或人工勾选绕过。详细演练与删除
+旧入口删除门禁属于 0.2.0 的历史发布流程；当前研究 campaign 如需 20 个 PAPER 日、5 个
+SHADOW 日、一致性或 UAT，会自行读取中性诊断并执行阈值，不约束 LIVE。详细演练与删除
 步骤见[《0.2.0 策略链路迁移、券商 UAT 与旧入口删除手册》](strategy-trading-migration-0.2.md)。
 
 研究资产接口与人工恢复入口不能因为名称“旧”就一并删除；它们承担不同职责。
@@ -333,11 +332,11 @@ LIVE。任何删除检查失败都必须推迟 0.2.0，不能通过环境变量�
 ## 验证状态与上线门槛
 
 代码闭环由全量后端测试、Portal coverage/typecheck/build、OpenAPI/CLI 快照、依赖边界、
-两类策略黄金链路、D/D+1、行情口径、部分成交、重启、SHADOW 禁路由、授权、kill switch、
-SQLite v5→v6→v7→v8 迁移和 wheel smoke 共同验证。最终结果必须由固定发布脚本生成并绑定精确
+两类策略黄金链路、D/D+1、行情口径、部分成交、重启、SHADOW 禁路由、账户绑定、kill switch、
+schema v10 空库创建、v1–v9 只读拒绝和 wheel smoke 共同验证。最终结果必须由固定发布脚本生成并绑定精确
 commit，文档中的历史测试数量不能替代发布报告。
 
-仍需在目标环境完成以下外部工作，才能称为“小规模实盘试运行”：
+研究团队可以为某个 campaign 额外采用以下保守验收政策：
 
 - 当前配置真实连续运行 20 个 PAPER 交易日和 5 个 SHADOW 交易日；
 - SHADOW 决策与同数据离线回放一致；
@@ -345,4 +344,6 @@ commit，文档中的历史测试数量不能替代发布报告。
   kill switch UAT；
 - 使用专用账户、受限资金、标的白名单和人工监控。
 
-在这些证据完成前，应保持 `ALPHAPILOT_AUTOMATED_LIVE_ENABLED=false`。
+这些证据属于 campaign 决策，不是系统 LIVE 权限门禁。无论是否采用，正式投入资金前都应先在
+目标环境验证账户、合约、行情、对账、恢复与 Kill Switch；未准备承担真实风险时应保持
+`ALPHAPILOT_AUTOMATED_LIVE_ENABLED=false`。

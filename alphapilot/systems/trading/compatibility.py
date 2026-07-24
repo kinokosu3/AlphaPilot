@@ -298,15 +298,10 @@ class RemovalReadinessService:
         complete_environment_reports = bool(environments) and all(
             str(row.get("evidence_hash") or "") for row in environments
         )
-        from alphapilot.systems.trading.parity import DeploymentQualificationService
-
         try:
-            qualification = DeploymentQualificationService(self.store).evaluate(
-                acceptance_instance_id
-            )
+            runtime_diagnostics = self.store.runtime_diagnostics(acceptance_instance_id)
         except (KeyError, ValueError) as exc:
-            qualification = {
-                "eligible_for_live_authorization": False,
+            runtime_diagnostics = {
                 "error": f"{type(exc).__name__}: {exc}",
             }
         broker_evidence = {
@@ -317,7 +312,7 @@ class RemovalReadinessService:
         runtime_blockers = self.store.legacy_runtime_blockers()
         unmigrated_jobs = self._unmigrated_legacy_jobs()
         checks = {
-            "schema_v8": self.store.schema_version >= 8,
+            "schema_v10": self.store.schema_version >= 10,
             "migration_cutoff_set": cutoff_set and environment_cutoff_set,
             "zero_post_cutoff_calls": (
                 cutoff_set and environment_cutoff_set
@@ -371,7 +366,7 @@ class RemovalReadinessService:
             "environment_post_cutoff_calls": environment_post_cutoff,
             "compatibility": compatibility,
             "environments": environments,
-            "live_qualification": qualification,
+            "runtime_diagnostics": runtime_diagnostics,
             "broker_uat": {
                 key: None if value is None else {
                     "evidence_id": value["evidence_id"],
@@ -390,7 +385,7 @@ class RemovalReadinessService:
         evidence_material = {
             "commit": commit["commit"],
             "schema_version": self.store.schema_version,
-            "qualification_config_hash": qualification.get("config_hash", ""),
+            "acceptance_config_hash": runtime_diagnostics.get("config_hash", ""),
             "release_verification_hash": release_verification.get("report_hash", ""),
             "environment_reports": {
                 str(row["environment_id"]): str(row.get("evidence_hash") or "")

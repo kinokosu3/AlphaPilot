@@ -1,4 +1,4 @@
-"""Kernel service for strategy definitions, instances and promotion gates."""
+"""Kernel service for strategy instances, replay and independent deployments."""
 
 from __future__ import annotations
 
@@ -16,7 +16,14 @@ from typing import TYPE_CHECKING, Any
 
 from alphapilot.kernel.base import BaseSystem
 from alphapilot.kernel.registry import builtin_strategy_definitions
-from alphapilot.systems.trading.domain import LifecycleState, StrategyInstanceConfig
+from alphapilot.systems.trading.domain import (
+    DeploymentMode,
+    DeploymentSpec,
+    ExecutionEnvironment,
+    InstanceValidationState,
+    LifecycleState,
+    StrategyInstanceConfig,
+)
 from alphapilot.systems.trading.artifacts import ResearchArtifactSnapshotter, verify_artifact_binding
 from alphapilot.systems.trading.authorization import AutomatedRouteAuthorizer
 from alphapilot.systems.trading.deployment import DeploymentCoordinator
@@ -51,10 +58,7 @@ from alphapilot.systems.trading.compatibility import (
     register_manifest as register_compatibility_manifest,
     validate_compatibility_environment_report,
 )
-from alphapilot.systems.trading.parity import (
-    DecisionParityService,
-    DeploymentQualificationService,
-)
+from alphapilot.systems.trading.comparison import DecisionComparisonService
 
 if TYPE_CHECKING:
     from alphapilot.kernel.context import Context
@@ -170,8 +174,7 @@ class TradingStrategySystem(BaseSystem):
         )
         self._rebind_definition_hashes()
         self.route_authorizer = AutomatedRouteAuthorizer(self.store)
-        self.parity_service = DecisionParityService(self.store)
-        self.qualification_service = DeploymentQualificationService(self.store)
+        self.decision_comparison_service = DecisionComparisonService(self.store)
         self.removal_readiness_service = RemovalReadinessService(
             self.store,
             repository_root=Path.cwd(),
@@ -302,26 +305,32 @@ class TradingStrategySystem(BaseSystem):
 
     def update_instance(self, instance_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         current = self.store.get_instance(instance_id)
-        runtime = self.store.get_runtime_state(instance_id)
-        editable_states = {
-            LifecycleState.CREATED.value,
-            LifecycleState.VALIDATED.value,
-            LifecycleState.READY.value,
-            LifecycleState.STOPPED.value,
-        }
-        if (
-            runtime["binding_active"]
-            or runtime["desired_state"] not in editable_states
-            or runtime["observed_state"] not in editable_states
-        ):
-            raise ValueError(
-                "a deployed strategy instance must be formally stopped before its "
-                "parameters, universe, data or portfolio policy can change"
-            )
+        try:
+            runtime = self.store.get_runtime_state(instance_id)
+        except KeyError:
+            runtime = None
+        if runtime is not None:
+            editable_states = {
+                LifecycleState.READY.value,
+                LifecycleState.STOPPED.value,
+                LifecycleState.ERROR.value,
+            }
+            if (
+                runtime["binding_active"]
+                or runtime["runtime_id"]
+                or runtime["desired_state"] not in editable_states
+                or runtime["observed_state"] not in editable_states
+            ):
+                raise ValueError(
+                    "stop the strategy daemon before changing instance configuration"
+                )
         definition = self.registry.get(current["strategy_id"])
         safe_payload = {
             key: value for key, value in payload.items()
-            if key in {"params", "universe", "frequency", "data_policy", "portfolio_policy"}
+            if key in {
+                "params", "universe", "frequency", "data_policy", "portfolio_policy",
+                "model_hash", "artifact_binding",
+            }
         }
         next_params = dict(
             safe_payload.get("params")
@@ -390,10 +399,6 @@ class TradingStrategySystem(BaseSystem):
             )
         if not config.universe:
             errors.append("universe must not be empty")
-        if config.deployment_level not in definition.deployable_modes:
-            errors.append(
-                f"deployment mode {config.deployment_level!r} is not supported by this provider"
-            )
         policy_binding = dict(config.portfolio_policy or {})
         policy_id = str(policy_binding.get("policy_id") or "")
         try:
@@ -452,24 +457,9 @@ class TradingStrategySystem(BaseSystem):
         validation = self.validate_instance_config(config)
         if not validation["ok"]:
             return {**validation, "instance": row}
-        if row["lifecycle"] in {
-            LifecycleState.CREATED.value,
-            LifecycleState.VALIDATED.value,
-        }:
-            updated_runtime = self.store.get_runtime_state(instance_id)
-            self.store.transition_runtime(
-                instance_id,
-                lifecycle=LifecycleState.VALIDATED.value,
-                desired_state=LifecycleState.VALIDATED.value,
-                observed_state=LifecycleState.VALIDATED.value,
-                reconcile_required=(
-                    updated_runtime["reconcile_required"]
-                    if updated_runtime["deployment_level"] == "live" else False
-                ),
-            )
-            updated = self.store.get_instance(instance_id)
-        else:
-            updated = row
+        updated = self.store.set_validation_state(
+            instance_id, InstanceValidationState.VALIDATED.value,
+        )
         return {
             **validation,
             "instance": updated,
@@ -711,7 +701,7 @@ class TradingStrategySystem(BaseSystem):
         )
         # A replay has its own journal so that it is reproducible and can be
         # inspected independently.  Publish only its immutable observations to
-        # the control store; deployment parity must never depend on opening an
+        # the control store; comparisons must never depend on opening an
         # arbitrary artifact database supplied by a caller.
         replay_store = StrategyRuntimeStore(Path(result.artifact_dir) / "runtime.sqlite3")
         for observation in replay_store.list_decision_observations(
@@ -723,88 +713,85 @@ class TradingStrategySystem(BaseSystem):
         current = self.store.get_instance(instance_id)
         if current["config_hash"] != config.config_hash:
             raise RuntimeError("strategy instance changed during replay")
-        if current["deployment_level"] == "replay":
-            self.store.record_stage(
-                instance_id,
-                "replay",
-                passed=True,
-                details=result.summary,
-                expected_config_hash=config.config_hash,
-            )
         return result
 
     def deployment(self, instance_id: str) -> dict[str, Any]:
         return self.store.deployment(instance_id)
 
-    def execution_binding(self, instance_id: str) -> dict[str, Any]:
-        return self.store.get_execution_binding(instance_id)
+    def list_deployments(self) -> list[dict[str, Any]]:
+        return self.store.list_deployments()
 
-    def bind_execution(self, instance_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return self.store.set_execution_binding(
-            instance_id,
-            execution_environment=str(payload.get("execution_environment") or "local_paper"),
-            trade_provider=str(payload.get("trade_provider") or "paper"),
-            quote_provider=str(payload.get("quote_provider") or "paper"),
-            account_profile=str(payload.get("account_profile") or ""),
-        )
-
-    def promote(self, instance_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        validation = self.validate_instance(instance_id)
+    def configure_deployment(
+        self,
+        instance_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        current = self.store.get_instance(instance_id)
+        if current["validation_state"] != InstanceValidationState.VALIDATED.value:
+            raise ValueError("strategy instance must be validated before deployment")
+        config = StrategyInstanceConfig.from_dict(current["config"])
+        validation = self.validate_instance_config(config)
         if not validation["ok"]:
             raise ValueError("; ".join(validation["errors"]))
-        config = StrategyInstanceConfig.from_dict(validation["instance"]["config"])
         if bool(config.data_policy.get("compatibility_only")):
-            raise ValueError("legacy compatibility instances are REPLAY-only and cannot be promoted")
+            raise ValueError("legacy compatibility instances are replay-only")
         live = self.context.engine.get_system("live")
         deployment_errors = self._deployment_policy_errors(config, live.config.risk)
         if deployment_errors:
             raise ValueError("; ".join(deployment_errors))
-        current = self.store.get_instance(instance_id)
-        target_level = str(payload.get("to") or "")
-        if target_level == "live" and config.frequency != "day":
+        mode = DeploymentMode(str(payload.get("run_mode") or "").strip().lower()).value
+        if mode == DeploymentMode.LIVE.value and config.frequency != "day":
             raise ValueError("LIVE currently supports A-share/ETF daily strategies only")
         definition = self.registry.get(config.strategy_id)
-        if target_level not in definition.deployable_modes:
-            raise ValueError(f"strategy is not deployable to {target_level!r}")
-        approval = str(payload.get("approval") or "")
-        if target_level == "live" and not approval.startswith("apla_"):
-            raise ValueError("LIVE promotion requires a one-time authorize-live approval")
-        minimums = {"paper": 20, "shadow": 5}
-        if current["deployment_level"] in minimums:
-            evidence = self.store.evaluate_stage(
-                instance_id,
-                current["deployment_level"],
-                minimum_sessions=minimums[current["deployment_level"]],
+        if mode not in definition.supported_run_modes:
+            raise ValueError(f"strategy does not support run mode {mode!r}")
+
+        trade_provider = str(payload.get("trade_provider") or "").strip().lower()
+        quote_provider = str(payload.get("quote_provider") or "").strip().lower()
+        account_profile = str(payload.get("account_profile") or "").strip()
+        account_id = str(payload.get("account_id") or "").strip()
+        if mode == DeploymentMode.PAPER.value:
+            environment = ExecutionEnvironment.LOCAL_PAPER.value
+            trade_provider = quote_provider = "paper"
+            quote_data_kind = "synthetic"
+            account_profile = account_id = ""
+        else:
+            if not trade_provider or not quote_provider:
+                raise ValueError("trade_provider and quote_provider are required")
+            provider_metadata = live.deployment_provider_metadata(
+                mode, trade_provider, quote_provider,
             )
-            if not evidence["passed"]:
-                raise ValueError(
-                    f"{current['deployment_level']} evidence is insufficient: "
-                    f"{evidence['trading_sessions']}/{evidence['minimum_sessions']} trading sessions"
-                )
-        selected_broker = str(payload.get("broker") or "").strip().lower()
-        selected_quote = str(payload.get("quote_provider") or "").strip().lower()
-        if target_level == "shadow":
-            selected_broker = selected_broker or str(
-                live.config.trade_broker or live.config.broker or ""
-            ).strip().lower()
-            selected_quote = selected_quote or str(
-                live.config.quote_provider or selected_broker
-            ).strip().lower()
-        elif target_level == "live":
-            binding = self.store.get_execution_binding(instance_id)
-            selected_quote = selected_quote or (
-                str(binding.get("quote_provider") or "").strip().lower()
-                if str(binding.get("trade_provider") or "").strip().lower() == selected_broker
-                else selected_broker
+            trade_provider = provider_metadata["trade_provider"]
+            quote_provider = provider_metadata["quote_provider"]
+            quote_data_kind = provider_metadata["quote_data_kind"]
+            if mode == DeploymentMode.SIMULATION.value:
+                if not account_profile:
+                    raise ValueError("SIMULATION requires account_profile")
+                environment = ExecutionEnvironment.BROKER_SIMULATION.value
+                account_id = ""
+            else:
+                if not account_id:
+                    raise ValueError("SHADOW/LIVE require account_id")
+                if quote_data_kind != "realtime":
+                    raise ValueError("SHADOW/LIVE require a realtime quote provider")
+                environment = ExecutionEnvironment.LIVE.value
+                account_profile = ""
+        return self.store.configure_deployment(
+            DeploymentSpec(
+                instance_id=instance_id,
+                config_hash=config.config_hash,
+                run_mode=mode,
+                execution_environment=environment,
+                trade_provider=trade_provider,
+                quote_provider=quote_provider,
+                account_profile=account_profile,
+                account_id=account_id,
+                quote_data_kind=quote_data_kind,
             )
-        return self.store.promote(
-            instance_id,
-            target_level,
-            account_id=str(payload.get("account_id") or ""),
-            broker=selected_broker,
-            quote_provider=selected_quote,
-            approval=approval,
         )
+
+    def deployment_diagnostics(self, instance_id: str) -> dict[str, Any]:
+        return self.store.runtime_diagnostics(instance_id)
 
     def lifecycle_action(self, instance_id: str, action: str) -> dict[str, Any]:
         handlers = {
@@ -829,6 +816,8 @@ class TradingStrategySystem(BaseSystem):
     ) -> dict[str, Any]:
         if not str(reason).strip():
             raise ValueError("kill switch changes require an operator reason")
+        if str(scope_type).strip().lower() not in {"global", "account", "instance"}:
+            raise ValueError("kill switch scope_type must be global, account or instance")
         return self.store.set_route_block(
             scope_type,
             scope_id,
@@ -837,7 +826,10 @@ class TradingStrategySystem(BaseSystem):
         )
 
     def list_kill_switches(self) -> list[dict[str, Any]]:
-        return self.store.list_route_blocks()
+        return [
+            row for row in self.store.list_route_blocks()
+            if row["scope_type"] in {"global", "account", "instance"}
+        ]
 
     def create_operator_token(
         self,
@@ -850,63 +842,6 @@ class TradingStrategySystem(BaseSystem):
             operator_id,
             label=label,
             expires_in_days=expires_in_days,
-        )
-
-    def authorize_live(
-        self,
-        instance_id: str,
-        payload: dict[str, Any],
-        operator: Any,
-    ) -> dict[str, Any]:
-        current = self.store.get_instance(instance_id)
-        if current["deployment_level"] != "shadow":
-            raise ValueError("LIVE approval can be issued only from SHADOW")
-        account_id = str(payload.get("account_id") or "")
-        broker = str(payload.get("broker") or "")
-        if not account_id or not broker:
-            raise ValueError("account_id and broker are required")
-        if payload.get("baseline_confirmed") is not True:
-            raise ValueError("baseline_confirmed=true is required for a dedicated LIVE account")
-        raw_baseline = payload.get("baseline_positions")
-        if not isinstance(raw_baseline, dict):
-            raise ValueError("baseline_positions must be the operator-confirmed account holdings")
-        baseline = {
-            canonical_instrument(str(key)): float(value)
-            for key, value in raw_baseline.items() if float(value) != 0
-        }
-        outside = sorted(set(baseline) - set(current["config"].get("universe") or []))
-        if outside:
-            raise ValueError(f"baseline contains holdings outside the instance universe: {outside}")
-        qualification = self._qualification(
-            instance_id,
-            account_id=account_id,
-            broker=broker,
-        )
-        if not qualification["eligible_for_live_authorization"]:
-            failed = [
-                name for name in (
-                    "paper", "shadow", "parity", "broker_uat", "reconcile", "configuration",
-                )
-                if not bool(qualification[name]["passed"])
-            ]
-            raise ValueError(
-                "LIVE qualification is incomplete: " + ", ".join(failed)
-            )
-        self.store.save_account_baseline(
-            instance_id,
-            current["config_hash"],
-            account_id,
-            baseline,
-            confirmed_by=operator.operator_id,
-        )
-        return self.operator_auth.issue_live_approval(
-            operator,
-            instance_id=instance_id,
-            config_hash=current["config_hash"],
-            account_id=account_id,
-            broker=broker,
-            reason=str(payload.get("reason") or operator.reason),
-            ttl_seconds=int(_option(payload, "ttl_seconds", 300)),
         )
 
     def audit_events(self, *, limit: int = 200) -> list[dict[str, Any]]:
@@ -1056,89 +991,46 @@ class TradingStrategySystem(BaseSystem):
         cutoff = self.store.set_compatibility_cutoff()
         return {"migration_cutoff": cutoff, **self.compatibility_status()}
 
-    def start_parity_run(self, instance_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        replay_run_id = str(payload.get("replay_run_id") or "").strip()
-        shadow_stage_run_id = str(payload.get("shadow_stage_run_id") or "").strip()
-        if not replay_run_id or not shadow_stage_run_id:
-            raise ValueError("replay_run_id and shadow_stage_run_id are required")
-        replay = self.store.get_backtest_run(replay_run_id)
-        shadow = self.store.get_stage_run(shadow_stage_run_id)
-        if replay["instance_id"] != instance_id or shadow["instance_id"] != instance_id:
-            raise ValueError("parity inputs must belong to the requested instance")
-        if replay["status"] != "completed" or shadow["status"] != "completed":
-            raise ValueError("parity inputs must be completed runs")
-        if shadow["stage"] != "shadow":
-            raise ValueError("shadow_stage_run_id must identify a SHADOW run")
+    def compare_decisions(self, instance_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        left_mode = str(payload.get("left_mode") or "").strip().lower()
+        right_mode = str(payload.get("right_mode") or "").strip().lower()
+        left_run_id = str(payload.get("left_run_id") or "").strip()
+        right_run_id = str(payload.get("right_run_id") or "").strip()
+        allowed_modes = {"replay", *(mode.value for mode in DeploymentMode)}
+        if left_mode not in allowed_modes or right_mode not in allowed_modes:
+            raise ValueError("comparison modes must be replay, paper, simulation, shadow or live")
+        if not left_run_id or not right_run_id:
+            raise ValueError("left_run_id and right_run_id are required")
         current = self.store.get_instance(instance_id)
-        if (
-            replay["config_hash"] != current["config_hash"]
-            or shadow["config_hash"] != current["config_hash"]
+        for side, mode, run_id in (
+            ("left", left_mode, left_run_id),
+            ("right", right_mode, right_run_id),
         ):
-            raise ValueError("parity input config_hash is stale")
-        return self.parity_service.compare(
+            run = (
+                self.store.get_backtest_run(run_id)
+                if mode == "replay" else self.store.get_runtime_run(run_id)
+            )
+            if run["instance_id"] != instance_id:
+                raise ValueError(f"{side} run belongs to another instance")
+            if run["status"] != "completed":
+                raise ValueError(f"{side} run must be completed")
+            if mode != "replay" and run["run_mode"] != mode:
+                raise ValueError(f"{side} run mode does not match {mode!r}")
+            if run["config_hash"] != current["config_hash"]:
+                raise ValueError(f"{side} run config_hash is stale")
+        return self.decision_comparison_service.compare(
             instance_id,
-            replay_run_id=replay_run_id,
-            shadow_stage_run_id=shadow_stage_run_id,
+            left_mode=left_mode,
+            left_run_id=left_run_id,
+            right_mode=right_mode,
+            right_run_id=right_run_id,
         )
 
-    def get_parity_run(self, run_id: str) -> dict[str, Any]:
-        return self.store.get_parity_run(run_id)
+    def get_decision_comparison(self, comparison_id: str) -> dict[str, Any]:
+        return self.store.get_decision_comparison(comparison_id)
 
-    def qualification(
-        self,
-        instance_id: str,
-        *,
-        account_id: str = "",
-        broker: str = "",
-    ) -> dict[str, Any]:
-        """Return mechanically derived promotion evidence.
-
-        ``account_id`` and ``broker`` are optional because a SHADOW instance is
-        deliberately not account-bound yet.  Supplying them lets the caller
-        validate the exact XTP UAT evidence before asking for LIVE approval;
-        the raw account identifier is never included in the result.
-        """
-
-        return self._qualification(
-            instance_id,
-            account_id=account_id,
-            broker=broker,
-        )
-
-    def _qualification(
-        self,
-        instance_id: str,
-        *,
-        account_id: str = "",
-        broker: str = "",
-    ) -> dict[str, Any]:
-        runtime = self.store.get_runtime_state(instance_id)
-        selected_broker = str(broker or runtime.get("broker") or "").lower()
-        metadata: dict[str, Any] = {}
-        metadata_error = ""
-        if selected_broker in {"xtp", "emt"}:
-            try:
-                metadata = self.broker_uat_harness.plugin_metadata(selected_broker)
-            except Exception as exc:  # noqa: BLE001 - qualification remains fail closed
-                metadata_error = f"{type(exc).__name__}: {exc}"
-        result = self.qualification_service.evaluate(
-            instance_id,
-            account_id=account_id,
-            broker=selected_broker,
-            environment=str(os.getenv("ALPHAPILOT_BROKER_UAT_ENVIRONMENT") or ""),
-            plugin_version=str(metadata.get("plugin_version") or "__unavailable__")
-            if selected_broker in {"xtp", "emt"} else "",
-            plugin_hash=str(metadata.get("plugin_hash") or "__unavailable__")
-            if selected_broker in {"xtp", "emt"} else "",
-            sdk_version=str(metadata.get("sdk_version") or "__unavailable__")
-            if selected_broker in {"xtp", "emt"} else "",
-            sdk_hash=str(metadata.get("sdk_hash") or "__unavailable__")
-            if selected_broker in {"xtp", "emt"} else "",
-            runtime_code_hash=str(metadata.get("runtime_code_hash") or "__unavailable__")
-            if selected_broker in {"xtp", "emt"} else "",
-        )
-        result["broker_uat"]["plugin_metadata_error"] = metadata_error
-        return result
+    def list_decision_comparisons(self, instance_id: str) -> list[dict[str, Any]]:
+        return self.store.list_decision_comparisons(instance_id)
 
     def list_broker_uat_runs(self, broker: str | None = None) -> list[dict[str, Any]]:
         return self.store.list_broker_uat_runs(broker)
@@ -1183,13 +1075,12 @@ class TradingStrategySystem(BaseSystem):
     def removal_check(self, acceptance_instance_id: str) -> dict[str, Any]:
         if not str(acceptance_instance_id).strip():
             raise ValueError("acceptance_instance_id is required")
-        # Removal readiness is deliberately independent from the 20/5-day LIVE
-        # promotion gate.  It proves replacement equivalence and operational
-        # safety; it never grants automated LIVE authority.
+        # Removal readiness may inspect neutral runtime diagnostics, but it
+        # never grants or changes deployment authority.
         self.compatibility_status()
         report = self.removal_readiness_service.evaluate(acceptance_instance_id)
-        live_qualification = self._qualification(acceptance_instance_id)
-        report["live_qualification"] = live_qualification
+        runtime_diagnostics = self.store.runtime_diagnostics(acceptance_instance_id)
+        report["runtime_diagnostics"] = runtime_diagnostics
         equivalence = self._timing_equivalence_status()
         report["timing_equivalence"] = equivalence
         report["checks"]["timing_equivalence_matrix"] = bool(equivalence["passed"])
@@ -1264,7 +1155,7 @@ class TradingStrategySystem(BaseSystem):
         evidence_material = {
             "commit": report.get("code", {}).get("commit", ""),
             "schema_version": self.store.schema_version,
-            "acceptance_config_hash": live_qualification.get("config_hash", ""),
+            "acceptance_config_hash": runtime_diagnostics.get("config_hash", ""),
             "observation_cutoff": observation_cutoff,
             "removal_acceptance_completed_at": completed_at,
             "release_verification_hash": str(

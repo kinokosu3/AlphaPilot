@@ -1,5 +1,5 @@
 import type { Dispatch, SetStateAction } from "react";
-import { AsyncButton } from "../../components";
+import { Alert, AsyncButton } from "../../components";
 import { useI18n } from "../../i18n";
 import type { JsonInputState, LiveDaemonStatus } from "./types";
 
@@ -28,7 +28,7 @@ type Props = {
   target: JsonInputState;
   routeTarget: boolean;
   setRouteTarget: Dispatch<SetStateAction<boolean>>;
-  workspace: "live" | "simulation" | "paper";
+  workspace: "live" | "shadow" | "simulation" | "paper";
   routeDisabled?: boolean;
   onSubmitOrder: () => void | Promise<unknown>;
   onSubmitTarget: () => void | Promise<unknown>;
@@ -46,8 +46,10 @@ export function LiveOrderCard(props: Props) {
           <span className="muted">{t("liveManualWorkspaceHint")}</span>
         </div>
         {props.workspace === "live" ? <span className="live-environment-badge live">{t("liveEnvironmentLive")}</span> : null}
+        {props.workspace === "shadow" ? <span className="live-environment-badge shadow">SHADOW</span> : null}
         {props.workspace === "simulation" ? <span className="live-environment-badge simulation">{t("liveEnvironmentSimulation")}</span> : null}
       </div>
+      {!props.daemon?.running ? <Alert tone="info">{t("liveManualDaemonRequired")}</Alert> : null}
       <div className="live-subtabs" role="tablist" aria-label={t("liveManualWorkspace")}>
         <button type="button" role="tab" aria-selected={props.ticket === "order"} className={props.ticket === "order" ? "active" : ""} onClick={() => props.setTicket("order")}>{t("liveNormalOrder")}</button>
         <button type="button" role="tab" aria-selected={props.ticket === "target"} className={props.ticket === "target" ? "active" : ""} onClick={() => props.setTicket("target")}>{t("liveTargetPosition")}</button>

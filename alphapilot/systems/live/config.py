@@ -19,7 +19,7 @@ from pathlib import Path
 
 
 class RunMode:
-    """Run-mode ladder (see :mod:`alphapilot.systems.live.fsm.runmode_fsm`)."""
+    """Low-level runtime modes (see :mod:`alphapilot.systems.live.fsm.runmode_fsm`)."""
 
     DRY_RUN = "dry_run"   # compute + print intents, submit nothing
     PAPER = "paper"       # route to the in-process PaperBroker

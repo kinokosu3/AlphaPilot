@@ -1,7 +1,9 @@
 """Strategy definitions, instances and deployment control plane."""
 
 from alphapilot.systems.trading.domain import (
-    DeploymentLevel,
+    DeploymentMode,
+    DeploymentSpec,
+    InstanceValidationState,
     LifecycleState,
     SignalRecord,
     StrategyDefinition,
@@ -36,7 +38,9 @@ from alphapilot.systems.trading.policy_registry import PortfolioPolicyRegistry
 from alphapilot.systems.trading.ports import RouteContext, RouteOrigin
 
 __all__ = [
-    "DeploymentLevel",
+    "DeploymentMode",
+    "DeploymentSpec",
+    "InstanceValidationState",
     "LifecycleState",
     "SignalRecord",
     "StrategyDefinition",

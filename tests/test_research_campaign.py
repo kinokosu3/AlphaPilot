@@ -112,7 +112,17 @@ class _StrategySystem:
 class _TradingSystem:
     def __init__(self) -> None:
         self.instances: dict[str, dict] = {}
-        self.qualification_report: dict | None = None
+        self.acceptance_report: dict | None = None
+        self.store = self
+        self.broker_uat_harness = SimpleNamespace(
+            plugin_metadata=lambda _broker: {
+                "plugin_version": "test",
+                "plugin_hash": "plugin-hash",
+                "sdk_version": "test-sdk",
+                "sdk_hash": "sdk-hash",
+                "runtime_code_hash": "runtime-hash",
+            }
+        )
 
     def list_instances(self):  # noqa: ANN201
         return list(self.instances.values())
@@ -128,20 +138,75 @@ class _TradingSystem:
         row = {
             "instance_id": payload["instance_id"],
             "config_hash": "config-hash",
-            "deployment_level": "replay",
+            "validation_state": "created",
             "config": config,
         }
         self.instances[row["instance_id"]] = row
         return row
 
-    def validate_instance(self, _instance_id):  # noqa: ANN001, ANN201
-        return {"ok": True}
+    def validate_instance(self, instance_id):  # noqa: ANN001, ANN201
+        self.instances[instance_id]["validation_state"] = "validated"
+        return {"ok": True, "instance": self.instances[instance_id]}
 
-    def qualification(self, instance_id, **_kwargs):  # noqa: ANN001, ANN201
-        if self.qualification_report is None:
-            raise AssertionError("qualification report was not configured")
+    def deployment_diagnostics(self, instance_id):  # noqa: ANN001, ANN201
+        if self.acceptance_report is None:
+            raise AssertionError("runtime diagnostics were not configured")
         assert instance_id in self.instances
-        return dict(self.qualification_report)
+        report = self.acceptance_report
+        return {
+            "instance_id": instance_id,
+            "config_hash": report["config_hash"],
+            "modes": {
+                mode: {
+                    "completed_runs": 1 if report[mode]["passed"] else 0,
+                    "trading_sessions": report[mode]["trading_sessions"],
+                    "failures": {
+                        "unresolved_errors": 0,
+                        "duplicate_routes": 0,
+                        "position_breaches": 0,
+                        "reconciliation_warnings": 0,
+                    },
+                    "execution_quality": (
+                        [report[mode].get("execution_quality", {})]
+                        if mode == "live" else []
+                    ),
+                }
+                for mode in ("paper", "shadow", "live")
+            },
+            "runs": [],
+        }
+
+    def list_runtime_sessions(self, _instance_id, mode, **_kwargs):  # noqa: ANN001, ANN201
+        if mode != "shadow" or self.acceptance_report is None:
+            return []
+        return list(
+            self.acceptance_report["decision_consistency"].get("passed_sessions") or []
+        )
+
+    def list_decision_comparisons(self, _instance_id):  # noqa: ANN001, ANN201
+        if self.acceptance_report is None:
+            return []
+        consistency = self.acceptance_report["decision_consistency"]
+        return [{
+            "config_hash": self.acceptance_report["config_hash"],
+            "left_mode": "replay",
+            "right_mode": "shadow",
+            "results": [
+                {"session": session, "status": "match"}
+                for session in consistency.get("passed_sessions") or []
+            ] if consistency.get("passed") else [],
+        }]
+
+    def valid_broker_uat_evidence(self, _broker, **_kwargs):  # noqa: ANN001, ANN201
+        if self.acceptance_report is None:
+            return None
+        uat = self.acceptance_report["broker_uat"]
+        if not uat.get("passed"):
+            return None
+        return {
+            "evidence_id": uat["evidence_id"],
+            "expires_at": "2026-12-31T00:00:00+00:00",
+        }
 
 
 class _DeploymentEngine(_Engine):
@@ -261,13 +326,13 @@ def test_campaign_rejects_an_llm_round_with_incomplete_persistence(
     assert runner.status()["stages"][first_stage]["status"] == "failed"
 
 
-def test_campaign_gate_failure_is_recorded_and_stops_promotion(tmp_path: Path) -> None:
+def test_campaign_gate_failure_is_recorded_and_stops_acceptance(tmp_path: Path) -> None:
     runner = CampaignRunner(DEFAULT_MANIFEST, state_root=tmp_path / "state")
 
     try:
         runner.record_gate("sealed_blind", {"passed": False, "failures": ["IR"]})
     except ValueError as exc:
-        assert "promotion is stopped" in str(exc)
+        assert "campaign acceptance is stopped" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("failed blind gate was accepted")
 
@@ -305,7 +370,7 @@ def test_campaign_freezes_champion_and_creates_replay_only_instance(
         whitelist=_whitelist(),
     )
 
-    assert result["deployment_level"] == "replay"
+    assert result["validation_state"] == "validated"
     assert result["config_hash"] == "config-hash"
     assert result["whitelist_fingerprint"]
     # A retry after completion returns the immutable recorded evidence.
@@ -399,7 +464,7 @@ def test_campaign_syncs_only_derived_forward_evidence_and_revokes_it(
     engine.trading.instances["canary"] = {
         "instance_id": "canary",
         "config_hash": "frozen-config",
-        "deployment_level": "live",
+        "validation_state": "validated",
         "config": {},
     }
     for stage in (
@@ -432,7 +497,7 @@ def test_campaign_syncs_only_derived_forward_evidence_and_revokes_it(
     )
     report = {
         "config_hash": "frozen-config",
-        "evidence_hash": "qualification-hash",
+        "evidence_hash": "acceptance-hash",
         "paper": {"passed": True, "trading_sessions": 20},
         "broker_uat": {
             "required": True,
@@ -443,14 +508,16 @@ def test_campaign_syncs_only_derived_forward_evidence_and_revokes_it(
             "plugin_metadata_error": "",
         },
         "shadow": {"passed": True, "trading_sessions": 5},
-        "parity": {"passed": True, "passed_sessions": ["2026-07-01"]},
+        "decision_consistency": {
+            "passed": True, "passed_sessions": ["2026-07-01"],
+        },
         "live": {
             "passed": True,
             "trading_sessions": 5,
             "execution_quality": {"passed": True},
         },
     }
-    engine.trading.qualification_report = report
+    engine.trading.acceptance_report = report
 
     synced = runner.sync_forward_evidence(
         instance_id="canary", account_id="dedicated-account"
@@ -458,7 +525,7 @@ def test_campaign_syncs_only_derived_forward_evidence_and_revokes_it(
     assert synced["synced"] == ["paper_20", "uat_v2", "shadow_5", "live_5"]
     assert synced["next_required"] == "complete"
 
-    engine.trading.qualification_report = {
+    engine.trading.acceptance_report = {
         **report,
         "broker_uat": {**report["broker_uat"], "passed": False},
     }

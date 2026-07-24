@@ -43,6 +43,6 @@
     "deprecated": ["ui", "backtest_ui"],
     "fallback": ["data_viz", "backtest_viz"],
     "local_uat": ["trading_broker_uat_start", "trading_broker_uat_resume", "trading_broker_uat_abort", "trading_broker_uat_preflight", "trading_broker_uat_status"],
-    "removed": ["trading_stage_start", "trading_stage_finish", "trading_stage_evaluate", "timing_strategies", "timing_signal", "timing_backtest", "live_daemon_strategy_status", "live_daemon_strategy_start", "live_daemon_strategy_pause", "live_daemon_strategy_resume", "live_daemon_strategy_stop"]
+    "removed": ["trading_stage_start", "trading_stage_finish", "trading_stage_evaluate", "trading_promote", "trading_authorize_live", "trading_qualification", "trading_parity_start", "trading_parity_status", "trading_bind_execution", "trading_execution_binding", "timing_strategies", "timing_signal", "timing_backtest", "live_daemon_strategy_status", "live_daemon_strategy_start", "live_daemon_strategy_pause", "live_daemon_strategy_resume", "live_daemon_strategy_stop"]
   }
 }

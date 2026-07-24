@@ -197,7 +197,7 @@ describe("TimingPage merged-parameter validation", () => {
       if (path === "/api/trading/strategy-definitions") return Response.json({
         definitions: [{ strategy_id: "dual_ma", version: "1.0.0", signal_kind: "instrument_timing", description: "Dual MA", parameter_schema: { properties: { short_window: { default: 5 }, long_window: { default: 20 } } } }],
       });
-      if (path === "/api/trading/strategy-instances") return Response.json({ instances: [{ instance_id: "dual_ma_demo", strategy_id: "dual_ma", lifecycle: "validated", deployment_level: "replay", config_hash: "abc" }] });
+      if (path === "/api/trading/strategy-instances") return Response.json({ instances: [{ instance_id: "dual_ma_demo", strategy_id: "dual_ma", validation_state: "validated", config_hash: "abc" }] });
       if (path === "/api/jobs") return Response.json([]);
       return Response.json({}, { status: 404 });
     });

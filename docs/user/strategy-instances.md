@@ -2,7 +2,7 @@
 
 ## 适用场景与前置条件
 
-用于把一个版本明确的规则策略或模型选股资产变成可验证、可回放和可部署的实例。创建前需要相应 `StrategyDefinition`、股票池/数据、组合政策以及可信 artifact；进入 PAPER 以上模式前还要通过实例校验。
+用于把一个版本明确的规则策略或模型选股资产变成可验证、可回放和可部署的实例。创建前需要相应 `StrategyDefinition`、股票池/数据、组合政策以及可信 artifact；任何正式运行模式都先通过实例校验。
 
 ## 核心流程
 
@@ -40,7 +40,8 @@ alphapilot trading_instance_create \
   --universe=600000.SSE,510300.SSE \
   --params='{"short_window":5,"long_window":20}' \
   --frequency=day \
-  --portfolio_policy='{"policy_id":"timing_fixed_exposure","version":"1.0.0","params":{"target_exposure":0.2}}'
+  --data_policy='{"feature_adjustment":"backward","history_window":21,"data_version":"daily-bars-2026-07"}' \
+  --portfolio_policy='{"policy_id":"timing_fixed_exposure","version":"1.0.0","params":{"target_percent":0.2}}'
 
 alphapilot trading_instance_validate --instance_id=ma_5_20
 ```
@@ -55,7 +56,7 @@ alphapilot trading_instance_from_research \
   --portfolio_policy='{"policy_id":"selection_topk_dropout_equal_weight","version":"1.0.0","params":{"topk":2,"n_drop":1}}'
 ```
 
-系统会复制模型、因子和必要模板到不可变 artifact，自动实例不能引用任意 pickle 路径。
+系统会复制模型、因子和必要模板到不可变 artifact，自动实例不能引用任意 pickle 路径。不同模型或因子集合建议创建不同实例 ID；替换绑定后实例会回到待验证状态，并使已有部署变为 `stale`。
 
 ## Preview 与异步回放
 
@@ -70,29 +71,39 @@ alphapilot trading_backtest \
 
 回放产物绑定 `instance_id`、`config_hash`、代码/模型/数据/政策版本，包含 signals、weights、targets、plans、orders、fills、positions、equity 和 summary。
 
-## 生命周期和模式
+## 实例验证与独立部署
 
 ```mermaid
-stateDiagram-v2
-    [*] --> CREATED
-    CREATED --> VALIDATED
-    VALIDATED --> WARMING_UP
-    WARMING_UP --> READY
-    READY --> REPLAY
-    REPLAY --> PAPER
-    PAPER --> SHADOW
-    SHADOW --> LIVE
-    LIVE --> PAUSED_PENDING_RECONCILE
-    PAUSED_PENDING_RECONCILE --> LIVE: 对账成功且人工恢复
-    LIVE --> STOPPED
+flowchart LR
+    I[实例 CREATED] --> V[实例 VALIDATED]
+    V --> R[REPLAY 回测操作]
+    V --> D{PUT 独立部署}
+    D --> P[PAPER]
+    D --> S[SIMULATION]
+    D --> H[SHADOW]
+    D --> L[LIVE]
+    P --> X[STOPPED 后可重新 PUT]
+    S --> X
+    H --> X
+    L --> X
 ```
 
-- REPLAY：历史时钟和模拟 Broker。
+- REPLAY：历史时钟和模拟 Broker，只由 `trading_backtest` 创建，不是部署模式。
 - PAPER：本地账户与撮合，不连接真实账户。
+- SIMULATION：券商仿真账户，要求仿真交易 Provider 和 `account_profile`。
 - SHADOW：真实行情和账户只读，强制不能路由。
-- LIVE：仅 A 股/ETF 多头日频进入首期范围，仍需 PAPER/SHADOW、parity、Broker UAT 和一次性人工授权。
+- LIVE：真实交易，可从已验证实例直接配置，不依赖 PAPER/SHADOW/UAT/一致性记录。
 
-参数、代码、模型、政策或股票池变化会改变 `config_hash`，旧证据和 LIVE approval 自动失效。
+```bash
+alphapilot trading_deploy --instance_id=ma_5_20 --run_mode=paper
+alphapilot trading_start --instance_id=ma_5_20
+alphapilot trading_deployments
+alphapilot trading_diagnostics --instance_id=ma_5_20
+```
+
+切换模式或 Provider 前必须停止 daemon，再重新调用 `trading_deploy`。参数、代码、模型、因子、政策或股票池变化会改变 `config_hash`；原部署保留但标记 `stale`，重新验证并再次部署后才能启动。LIVE 仍要求环境开关、真实账户和实时行情 Provider；启动后先对账，再显式 `trading_resume`。SHADOW 永久禁止路由。
+
+运行会话、异常计数和决策比较只是中性诊断。研究 campaign 可以自行要求 20 个 PAPER 日、5 个 SHADOW 日、比较结果或 Broker UAT，但这些条件不会改变部署权限。
 
 ## 自定义策略
 
@@ -111,4 +122,5 @@ stateDiagram-v2
 - `WARMING_UP` 不结束：历史窗口不足、最后时间或数据版本未对齐。
 - preview 被拒绝：检查已完成 Bar、artifact/code hash 和策略参数 Schema。
 - 回放无法成交：检查 D+1 原始报价、合约单位、停牌/涨跌停和现金。
-- 无法晋升：查看 `trading_qualification` 中缺失的 stage、parity、UAT、对账或 approval。
+- 无法部署：确认实例为 `validated`、daemon 已停止、`data_version` 存在，并检查运行模式与 Provider 元数据是否匹配。
+- LIVE 无法路由：检查环境开关、账户/Provider/binding hash、单账户 writer lock、对账、心跳、Kill Switch 和逐单 RiskGate；诊断会话不会解除这些阻断。
