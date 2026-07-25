@@ -754,7 +754,7 @@ export const en: Dict = {
   liveObserverDaemonUpgradeRequired: "This daemon was started by an older AlphaPilot version. Restart it once, then add symbols without reconnecting.",
   liveObserverDeploymentTarget: "Deployment daemon",
   liveObserverStandaloneTarget: "Standalone daemon",
-  liveTimingStrategy: "Timing strategy",
+  liveStrategyInstance: "Strategy instance",
   liveTimingFreq: "Strategy freq",
   liveTimingParams: "Strategy params JSON",
   livePreflight: "Preflight",

@@ -54,7 +54,7 @@ export function LiveStatusBar({
         <span><small>{t("liveConnection")}</small><StatusPill status={daemon?.running ? engine?.connection || "connected" : "disconnected"} /></span>
         <span><small>daemon</small><StatusPill status={daemon?.alive ? daemon.status || "running" : "stopped"} /></span>
         <span><small>{t("liveSession")}</small><StatusPill status={engine?.session || "closed"} /></span>
-        <span><small>{t("liveTimingStrategy")}</small><strong>{daemon?.runner?.strategy || "—"}</strong></span>
+        <span><small>{t("liveStrategyInstance")}</small><strong>{daemon?.runner?.strategy || "—"}</strong></span>
         <span><small>{t("liveKillState")}</small><StatusPill status={halted ? "halted" : daemon?.running ? "ready" : "stopped"} /></span>
       </div>
       <div className="live-account-strip">

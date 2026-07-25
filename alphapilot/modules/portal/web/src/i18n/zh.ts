@@ -754,7 +754,7 @@ export const zh: Dict = {
   liveObserverDaemonUpgradeRequired: "当前 daemon 由旧版 AlphaPilot 启动，请先重启一次；之后新增标的不再需要重连。",
   liveObserverDeploymentTarget: "正式部署 daemon",
   liveObserverStandaloneTarget: "独立 daemon",
-  liveTimingStrategy: "择时策略",
+  liveStrategyInstance: "策略实例",
   liveTimingFreq: "策略频率",
   liveTimingParams: "策略参数 JSON",
   livePreflight: "预检",

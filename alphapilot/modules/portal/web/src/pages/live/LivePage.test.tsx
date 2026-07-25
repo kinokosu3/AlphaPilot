@@ -548,7 +548,7 @@ describe("LivePage", () => {
     await waitFor(() => expect(postedJson(fetchMock, "/api/live/daemon/submit-target")?.confirm_live).toBe(true));
     expect(postedJson(fetchMock, "/api/live/daemon/submit-target")?.route).toBe(true);
 
-    fireEvent.change(screen.getByLabelText("择时策略"), { target: { value: "live_sma" } });
+    fireEvent.change(screen.getByLabelText("策略实例"), { target: { value: "live_sma" } });
     fireEvent.click(screen.getByRole("button", { name: "暂停策略" }));
     await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input) === "/api/trading/deployments/live_sma/pause")).toBe(true));
     fireEvent.click(screen.getByRole("button", { name: "重连" }));
@@ -618,7 +618,7 @@ describe("LivePage", () => {
     const fetchMock = mockLiveFetch({ activeDeployment: true });
     renderLivePage();
 
-    fireEvent.change(await screen.findByLabelText("择时策略"), {
+    fireEvent.change(await screen.findByLabelText("策略实例"), {
       target: { value: "live_sma" },
     });
     await screen.findByText(/正式部署 daemon: live_sma/);

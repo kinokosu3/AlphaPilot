@@ -31,7 +31,7 @@ export function LiveStrategyCard(props: Props) {
       </div>
       {!props.strategyNames.length ? <Alert tone="info">{t("liveNoValidatedStrategies")}</Alert> : null}
       <div className="live-form-grid">
-        <label className="field live-field-wide"><span>{t("liveTimingStrategy")}</span>
+        <label className="field live-field-wide"><span>{t("liveStrategyInstance")}</span>
           <select value={props.strategy} onChange={(event) => props.setStrategy(event.target.value)}>
             <option value="">{t("liveSelectStrategy")}</option>
             {props.strategyNames.map((name) => <option value={name} key={name}>{name}</option>)}
