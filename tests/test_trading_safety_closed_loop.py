@@ -255,6 +255,29 @@ class FakeRuntimeControl:
         del instance
         return self._call("stop")
 
+    def subscribe_observer(
+        self,
+        instance: dict,
+        symbols: list[str],
+    ) -> RuntimeCommandResult:
+        del instance, symbols
+        return self._call("subscribe_observer")
+
+    def market_snapshot(self, instance: dict, symbols=None) -> dict:
+        del instance, symbols
+        return {"subscribed_symbols": []}
+
+    def market_bars(
+        self,
+        instance: dict,
+        symbol: str,
+        interval: int,
+        *,
+        limit: int = 300,
+    ) -> dict:
+        del instance, symbol, interval, limit
+        return {"rows": []}
+
 
 class InspectingRuntimeControl(FakeRuntimeControl):
     def __init__(self, store: StrategyRuntimeStore) -> None:
@@ -418,6 +441,53 @@ def test_runtime_command_timeout_never_becomes_observed_success(tmp_path: Path) 
     assert result["runtime"]["observed_state"] == "error"
     assert result["runtime"]["reconcile_required"] is True
     assert store.active_route_blocks(instance_id="alpha", account_id="account-1")
+
+
+def test_observer_subscription_failure_does_not_change_deployment_lifecycle(
+    tmp_path: Path,
+) -> None:
+    store = StrategyRuntimeStore(tmp_path / "runtime.sqlite3")
+    _configure_live(store)
+    store.transition_runtime(
+        "alpha",
+        lifecycle="running",
+        desired_state="running",
+        observed_state="running",
+        runtime_id="runtime-1",
+        runner_heartbeat_at=datetime.now(timezone.utc).isoformat(),
+        reconcile_required=False,
+        reconciled=True,
+        binding_active=True,
+    )
+    control = FakeRuntimeControl()
+    control.results["subscribe_observer"] = RuntimeCommandResult(
+        False,
+        command_id="observer-failed",
+        runtime_id="runtime-1",
+        error="provider rejected observer",
+        raw={
+            "last_command": {
+                "id": "observer-failed",
+                "ok": False,
+                "failed": [{"symbol": "000001.SZSE", "error": "rejected"}],
+            },
+        },
+    )
+    before = store.get_runtime_state("alpha")
+
+    result = DeploymentCoordinator(store, control).subscribe_observer(
+        "alpha",
+        ["000001.SZ"],
+    )
+
+    after = store.get_runtime_state("alpha")
+    assert result["ok"] is False
+    assert result["failed"][0]["symbol"] == "000001.SZSE"
+    assert after == before
+    assert store.active_route_blocks(
+        instance_id="alpha",
+        account_id="account-1",
+    ) == []
 
 
 def test_coordinator_does_not_publish_observed_state_before_daemon_confirmation(

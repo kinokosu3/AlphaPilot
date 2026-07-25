@@ -46,6 +46,36 @@ alphapilot live_daemon_status --mode=paper
 alphapilot live_daemon_stop --mode=paper
 ```
 
+## 运行时动态行情订阅
+
+daemon 启动后可以显式添加观察标的，不需要停止进程或重新登录券商：
+
+```bash
+# 未绑定策略的独立 daemon
+alphapilot live_daemon_subscribe \
+  --symbols=000001.SZ,600519.SSE --wait=True --timeout=5
+
+# 已启动的正式策略部署
+alphapilot trading_deployment_subscribe \
+  --instance_id=ma_5_20 --symbols=000001.SZ
+```
+
+Portal「实盘交易」页在 daemon 运行时会单独启用“添加观察订阅”。它不会因为切换 K 线下拉框而自动订阅；正式部署运行时使用该部署的隔离接口，否则使用独立 daemon 接口。
+
+| 字段 | 来源 | 进入策略计算 | 生命周期 |
+|---|---|---:|---|
+| `strategy_symbols` | 正式实例 universe | 是 | 随正式部署 daemon |
+| `observer_symbols` | Portal/CLI 显式添加；独立 daemon 启动参数也归此类 | 否 | 停止 daemon 后清空 |
+| `subscribed_symbols` / `symbols` | 前两者并集，供旧客户端兼容 | 不直接决定 | 随 daemon |
+
+一次请求会返回 `requested`、`added`、`already_subscribed`、`failed` 和 `awaiting_first_tick`。其中 `added` 只表示 Provider 的同步订阅调用已接受；非交易时段、7×24 回放尚未轮到该标的或 Provider 后续异步拒绝时，仍可能没有 Tick。Portal 会保留该标的并显示“等待首个 Tick”或陈旧状态，不会把它误报成实时行情已就绪。
+
+动态 observer 最多 50 个。请求会先整体完成代码规范化、未知交易所和 Provider 交易所能力校验；超过上限会整批拒绝。通过校验后逐标的调用 Provider，所以同步失败允许部分成功。与 strategy 重复的 observer 不会重复订阅，并保留 strategy 来源。本版本不提供取消订阅；需要清空时停止 daemon，历史 Tick/K 线文件仍会保留。
+
+Bar 服务会对两类标的的并集生成 Tick 快照、1/5 分钟和日 K，并写入同一个行情 Provider 数据目录。策略 Runner 在 Bar listener 和消费入口各按固定 universe 过滤一次，因此 observer Bar 不会进入 `_pending_session`、因子、模型或订单决策，也不会修改部署状态、`config_hash`、`binding_hash`、stale、Kill Switch 或路由权限。显式 reconnect 会先恢复 strategy，再恢复 observer；strategy 恢复失败继续按交易安全规则阻断，observer 恢复失败只写诊断。
+
+升级前已经在运行的旧 daemon 不认识 `subscribe_observer` 命令。Portal 遇到 `unsupported daemon command` 会提示版本不一致；升级后先重启一次 daemon，此后新增标的不再需要重启。
+
 ## 人工订单和目标组合
 
 人工订单与自动策略授权分离，并记录 `origin=manual`：
@@ -123,3 +153,5 @@ Broker 断线、账户未同步、行情过期、合约缺失、停牌、状态�
 - 重启后不能恢复：这是预期的 fail-closed 行为，应先 reconcile 再人工 resume。
 - SHADOW 有计划但无委托：SHADOW 永久 `can_route=False`，不是故障。
 - optional 模式仍返回 401：请求主动携带了无效或过期令牌；清除该令牌，或换成有效令牌以保留真实操作员身份。
+- 添加观察标的后一直无行情：先确认返回中的 `failed`、`awaiting_first_tick`、交易时段和 Provider 日志；SDK 接受订阅不等于已经收到 Tick。
+- 动态订阅提示版本不一致：停止并重启升级前已经运行的 daemon 一次。

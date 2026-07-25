@@ -151,6 +151,7 @@ alphapilot live_run --symbols 600000,000001 --interval 2
 # 后台 daemon：启动 / 查看 / 停止一个长驻 LiveRuntime（不自动下单，可接收显式命令）
 ALPHAPILOT_LIVE_MODE=live ALPHAPILOT_LIVE_BROKER=xtp \
 alphapilot live_daemon_start --symbols 600000,000001 --interval 2
+alphapilot live_daemon_subscribe --symbols 600519.SSE,510300.SSE --wait True
 alphapilot live_daemon_status
 alphapilot live_daemon_halt --reason manual --wait True
 alphapilot live_daemon_resume --wait True
@@ -171,6 +172,8 @@ alphapilot trading_backtest --instance_id=sma20-paper \
   --options='{"data_dir":"./data","adjust_mode":"none"}' --wait=True
 alphapilot trading_deploy --instance_id=sma20-paper --run_mode=paper
 alphapilot trading_start --instance_id=sma20-paper
+alphapilot trading_deployment_subscribe \
+  --instance_id=sma20-paper --symbols=600519.SSE
 alphapilot trading_status --instance_id=sma20-paper
 alphapilot trading_pause --instance_id=sma20-paper
 alphapilot trading_reconcile --instance_id=sma20-paper
@@ -205,6 +208,10 @@ no-UI/daemon 模式在 AlphaPilot 里的对应层：子进程持有 gateway/OMS/
 周期写 `runtime_state.json`，Portal 和 CLI 都可以读取它。`live_daemon_halt/resume/refresh/order/submit_target`
 以及 `live_daemon_cancel/reconnect` 通过 `runtime_commands.jsonl` 发进程内控制命令，由 daemon 心跳消费并回写
 `last_command`，适合做急停、恢复、账户/持仓刷新，以及显式人工/策略目标路由。
+`live_daemon_subscribe` 使用相同命令通道增量添加 observer 行情；它不触发下单或路由授权，
+也不要求 `confirm_live`。正式 deployment 使用 `trading_deployment_subscribe`，由
+`instance_id` 定位隔离 runtime。SDK 接受订阅后仍要通过 `awaiting_first_tick` 区分是否
+真正收到 Tick。
 撤单默认只撤 OMS 中仍处于 active 的委托；恢复时确实需要直发券商撤单时可传
 `--force True --symbol <symbol>`。重连默认 `auto_resume=False`：连接、查询和 recovery
 完成后仍保持 halted，需要人工检查后再 `live_daemon_resume`。路由结果会报告 `planned/submitted/unrouted/fully_routed`，风控拒单会留在 ledger
@@ -240,10 +247,13 @@ Portal 后端也暴露同一套控制面：
 - `POST /api/live/runtime/preflight`：检查 broker 注册、SDK、env、可选网络；
 - `POST /api/live/runtime/connect`：一次性连接验证，只登录和查询，不下单；
 - `GET/POST /api/live/daemon/{status,start,stop}`：管理长驻 runtime daemon；
+- `POST /api/live/daemon/subscribe`：为独立 daemon 增量添加 observer 标的；
 - `POST /api/live/daemon/{halt,resume,refresh,reconnect,cancel}`：向长驻 daemon 发送进程内控制命令；
 - `POST /api/live/daemon/{order,submit-target}`：显式向长驻 daemon 发送下单/目标组合命令；
 - `/api/live/paper/*`：纸面账户演练，内部同样复用 `LiveRuntime`。
 - `/api/trading/deployments/{id}/{start,pause,reconcile,resume,stop,status}`：正式自动策略生命周期。
+- `POST /api/trading/deployments/{id}/observer-subscriptions` 与对应 market snapshot/bars：
+  为正式部署添加和查看隔离的 observer 行情。
 
 Portal 前端的“实盘交易”页面已经接入这些能力：runtime 预检/连接、daemon 启停、
 急停/恢复/刷新/保守重连、活动委托撤单、正式 deployment 生命周期、风控/恢复摘要、

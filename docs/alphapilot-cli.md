@@ -1,6 +1,6 @@
 # AlphaPilot CLI 使用与参考
 
-AlphaPilot 当前有 118 个第一方公共 CLI 命令。完整参数表由运行时代码生成，请查看 [CLI 完整参考](reference/cli.md)；本页保留原公开链接，并说明最常用的使用方式。
+AlphaPilot 当前有 120 个第一方公共 CLI 命令。完整参数表由运行时代码生成，请查看 [CLI 完整参考](reference/cli.md)；本页保留原公开链接，并说明最常用的使用方式。
 
 ```mermaid
 flowchart LR
@@ -42,8 +42,14 @@ alphapilot trading_backtest --instance_id=ma_5_20 --wait=True
 
 # PAPER 运行时
 alphapilot live_daemon_start --mode=paper --symbols=600000.SSE --cash=100000
+alphapilot live_daemon_subscribe \
+  --symbols=000001.SZ,600519.SSE --wait=True
 alphapilot live_daemon_status --mode=paper
 alphapilot live_daemon_stop --mode=paper
+
+# 正式部署运行期间，只增加观察行情，不修改策略 universe
+alphapilot trading_deployment_subscribe \
+  --instance_id=ma_5_20 --symbols=000001.SZ
 ```
 
 对应说明：

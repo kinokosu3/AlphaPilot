@@ -81,6 +81,12 @@ class _TradingCLISystem:
     def deployment_diagnostics(self, instance_id):  # noqa: ANN001, ANN201
         return self._result("diagnostics", instance_id)
 
+    def deployment_subscribe_observer(self, instance_id, symbols):  # noqa: ANN001, ANN201
+        return self._result(
+            "deployment-subscribe",
+            {"instance_id": instance_id, "symbols": symbols},
+        )
+
     def create_operator_token(self, operator_id, **payload):  # noqa: ANN001, ANN201
         return self._result("token", {"operator_id": operator_id, **payload})
 
@@ -212,6 +218,10 @@ def test_trading_cli_formal_surface_and_file_outputs(
     )
     module.trading_deployments()
     module.trading_diagnostics("alpha")
+    subscribed = module.trading_deployment_subscribe(
+        "alpha", "600000.SSE,510300.SSE",
+    )
+    assert subscribed["payload"]["symbols"] == ["600000.SSE", "510300.SSE"]
     module.trading_operator_token("operator", label="release", expires_in_days=1)
     for action in ("start", "pause", "reconcile", "resume", "stop"):
         getattr(module, f"trading_{action}")("alpha")
@@ -261,7 +271,8 @@ def test_trading_cli_formal_surface_and_file_outputs(
         "trading_preview", "trading_backtest", "trading_broker_uat_start",
         "trading_broker_uat_preflight",
         "trading_removal_check", "trading_deploy", "trading_deployments",
-        "trading_diagnostics", "trading_decision_compare",
+        "trading_diagnostics", "trading_deployment_subscribe",
+        "trading_decision_compare",
     }
     for removed in (
         "trading_promote", "trading_authorize_live", "trading_qualification",

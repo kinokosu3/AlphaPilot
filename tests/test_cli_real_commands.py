@@ -60,6 +60,7 @@ EXPECTED_COMMANDS = {
     "live_quote_providers",
     "live_connect",
     "live_daemon_start",
+    "live_daemon_subscribe",
     "live_daemon_status",
     "live_daemon_stop",
     "live_daemon_halt",
@@ -119,6 +120,7 @@ EXPECTED_COMMANDS = {
     "trading_decision_comparisons",
     "trading_definitions",
     "trading_deploy",
+    "trading_deployment_subscribe",
     "trading_deployments",
     "trading_diagnostics",
     "trading_instance_create",
@@ -547,6 +549,14 @@ def test_real_cli_command_smoke(cli_ctx: CliContext) -> None:
         )
         started_daemon = True
         time.sleep(1)
+        _run_ok(
+            ctx,
+            "live_daemon_subscribe",
+            "--symbols=000001.SZ",
+            "--wait=True",
+            "--timeout=5",
+            f"--state_dir={daemon_state}",
+        )
         _run_ok(
             ctx,
             "live_daemon_halt",

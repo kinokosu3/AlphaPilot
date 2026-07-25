@@ -11,6 +11,7 @@ type Props = {
   tradeBroker: string;
   quoteProvider: string;
   daemonRunning: boolean;
+  deploymentInstanceId?: string;
   embedded?: boolean;
 };
 
@@ -57,20 +58,63 @@ function normalizeRows(payload: LiveMarketBars | null): ChartRow[] {
   });
 }
 
-export function LiveMarketPanel({ mode, tradeBroker, quoteProvider, daemonRunning, embedded = false }: Props) {
+export function LiveMarketPanel({
+  mode,
+  tradeBroker,
+  quoteProvider,
+  daemonRunning,
+  deploymentInstanceId,
+  embedded = false,
+}: Props) {
   const { t } = useI18n();
   const query = { mode, broker: tradeBroker, trade_broker: tradeBroker, quote_provider: quoteProvider };
+  const deploymentBase = deploymentInstanceId
+    ? `/api/trading/deployments/${encodeURIComponent(deploymentInstanceId)}/market`
+    : "";
   const snapshot = useSerialPolling(
-    () => api.get<LiveMarketSnapshot>(`/api/live/market/snapshot${qs(query)}`),
-    [mode, tradeBroker, quoteProvider],
+    () => api.get<LiveMarketSnapshot>(
+      deploymentBase
+        ? `${deploymentBase}/snapshot`
+        : `/api/live/market/snapshot${qs(query)}`,
+    ),
+    [mode, tradeBroker, quoteProvider, deploymentBase],
     { enabled: daemonRunning, intervalMs: 1000 },
   );
   const [selectedSymbol, setSelectedSymbol] = useState("");
   const [interval, setIntervalSeconds] = useState(60);
   const availableSymbols = useMemo(
-    () => snapshot.data?.ticks.map((row) => row.key) || snapshot.data?.subscribed_symbols || [],
-    [snapshot.data],
+    () => daemonRunning
+      ? Array.from(new Set([
+          ...(snapshot.data?.subscribed_symbols || []),
+          ...(snapshot.data?.ticks || []).map((row) => row.key),
+        ])).sort()
+      : [],
+    [daemonRunning, snapshot.data],
   );
+  const awaitingFirstTick = useMemo(
+    () => new Set(snapshot.data?.awaiting_first_tick || []),
+    [snapshot.data?.awaiting_first_tick],
+  );
+  const marketRows = useMemo(() => {
+    const ticks = new Map((snapshot.data?.ticks || []).map((row) => [row.key, row]));
+    return availableSymbols.map((symbol): LiveMarketTick => ticks.get(symbol) || {
+      key: symbol,
+      code: symbol.split(".", 1)[0],
+      exchange: symbol.includes(".") ? symbol.split(".").slice(-1)[0] || "" : "",
+      last_price: 0,
+      pre_close: 0,
+      change: 0,
+      change_pct: 0,
+      bid_price_1: 0,
+      ask_price_1: 0,
+      bid_volume_1: 0,
+      ask_volume_1: 0,
+      volume: 0,
+      turnover: 0,
+      stale: true,
+      awaiting_first_tick: true,
+    });
+  }, [availableSymbols, snapshot.data?.ticks]);
 
   useEffect(() => {
     if (!availableSymbols.length) {
@@ -82,9 +126,13 @@ export function LiveMarketPanel({ mode, tradeBroker, quoteProvider, daemonRunnin
 
   const bars = useSerialPolling(
     () => selectedSymbol
-      ? api.get<LiveMarketBars>(`/api/live/market/bars${qs({ ...query, symbol: selectedSymbol, interval, limit: 300 })}`)
+      ? api.get<LiveMarketBars>(
+          deploymentBase
+            ? `${deploymentBase}/bars${qs({ symbol: selectedSymbol, interval, limit: 300 })}`
+            : `/api/live/market/bars${qs({ ...query, symbol: selectedSymbol, interval, limit: 300 })}`,
+        )
       : Promise.resolve({ symbol: "", interval, date_range: [], rows: [] }),
-    [mode, tradeBroker, quoteProvider, selectedSymbol, interval],
+    [mode, tradeBroker, quoteProvider, deploymentBase, selectedSymbol, interval],
     { enabled: daemonRunning && Boolean(selectedSymbol), intervalMs: 1000 },
   );
   const chartRows = useMemo(() => normalizeRows(bars.data), [bars.data]);
@@ -118,17 +166,24 @@ export function LiveMarketPanel({ mode, tradeBroker, quoteProvider, daemonRunnin
         </button>
       ),
     },
-    { key: "last_price", label: t("liveMarketLast"), align: "right" as const, render: (row: LiveMarketTick) => <strong>{price(row.last_price)}</strong> },
+    { key: "last_price", label: t("liveMarketLast"), align: "right" as const, render: (row: LiveMarketTick) => <strong>{row.awaiting_first_tick ? "—" : price(row.last_price)}</strong> },
     {
       key: "change_pct", label: t("liveMarketChange"), align: "right" as const,
-      render: (row: LiveMarketTick) => <span className={row.change_pct >= 0 ? "market-up" : "market-down"}>{row.change_pct >= 0 ? "+" : ""}{row.change_pct.toFixed(2)}%</span>,
+      render: (row: LiveMarketTick) => row.awaiting_first_tick
+        ? "—"
+        : <span className={row.change_pct >= 0 ? "market-up" : "market-down"}>{row.change_pct >= 0 ? "+" : ""}{row.change_pct.toFixed(2)}%</span>,
     },
-    { key: "bid_price_1", label: t("liveMarketBid"), align: "right" as const, render: (row: LiveMarketTick) => price(row.bid_price_1) },
-    { key: "ask_price_1", label: t("liveMarketAsk"), align: "right" as const, render: (row: LiveMarketTick) => price(row.ask_price_1) },
-    { key: "volume", label: t("klineMetricVolume"), align: "right" as const, render: (row: LiveMarketTick) => compact(row.volume) },
-    { key: "turnover", label: t("klineMetricAmount"), align: "right" as const, render: (row: LiveMarketTick) => compact(row.turnover) },
+    { key: "bid_price_1", label: t("liveMarketBid"), align: "right" as const, render: (row: LiveMarketTick) => row.awaiting_first_tick ? "—" : price(row.bid_price_1) },
+    { key: "ask_price_1", label: t("liveMarketAsk"), align: "right" as const, render: (row: LiveMarketTick) => row.awaiting_first_tick ? "—" : price(row.ask_price_1) },
+    { key: "volume", label: t("klineMetricVolume"), align: "right" as const, render: (row: LiveMarketTick) => row.awaiting_first_tick ? "—" : compact(row.volume) },
+    { key: "turnover", label: t("klineMetricAmount"), align: "right" as const, render: (row: LiveMarketTick) => row.awaiting_first_tick ? "—" : compact(row.turnover) },
     { key: "datetime", label: t("liveMarketTime"), render: (row: LiveMarketTick) => timeLabel(row.datetime) },
-    { key: "stale", label: t("status"), render: (row: LiveMarketTick) => <StatusPill status={row.stale ? "stale" : "live"} /> },
+    {
+      key: "stale", label: t("status"),
+      render: (row: LiveMarketTick) => (
+        <StatusPill status={row.awaiting_first_tick || awaitingFirstTick.has(row.key) ? "waiting" : row.stale ? "stale" : "live"} />
+      ),
+    },
   ];
 
   return (
@@ -148,7 +203,29 @@ export function LiveMarketPanel({ mode, tradeBroker, quoteProvider, daemonRunnin
         <div className="metric"><span className="metric-label">{t("liveRecorderQueue")}</span><strong>{recorder?.queue_depth ?? 0}</strong></div>
         <div className="metric"><span className="metric-label">{t("liveDroppedTicks")}</span><strong>{recorder?.dropped_ticks ?? 0}</strong></div>
       </div>
-      <DataTable rows={snapshot.data?.ticks || []} columns={columns} loading={snapshot.loading} empty={t("liveMarketEmpty")} />
+      <div className="live-subscription-groups">
+        <div>
+          <span>{t("liveStrategySubscriptions")}</span>
+          <div className="live-subscription-list">
+            {(daemonRunning ? snapshot.data?.strategy_symbols || [] : []).map((symbol) => (
+              <button type="button" key={symbol} onClick={() => setSelectedSymbol(symbol)}>{symbol}</button>
+            ))}
+            {!(daemonRunning && snapshot.data?.strategy_symbols?.length) ? <em>—</em> : null}
+          </div>
+        </div>
+        <div>
+          <span>{t("liveObserverSubscriptions")}</span>
+          <div className="live-subscription-list">
+            {(daemonRunning ? snapshot.data?.observer_symbols || [] : []).map((symbol) => (
+              <button type="button" key={symbol} onClick={() => setSelectedSymbol(symbol)}>
+                {symbol}{awaitingFirstTick.has(symbol) ? ` · ${t("liveAwaitingFirstTick")}` : ""}
+              </button>
+            ))}
+            {!(daemonRunning && snapshot.data?.observer_symbols?.length) ? <em>—</em> : null}
+          </div>
+        </div>
+      </div>
+      <DataTable rows={marketRows} columns={columns} loading={snapshot.loading} empty={t("liveMarketEmpty")} />
       <div className="live-market-chart-head">
         <div>
           <h3>{selectedSymbol || t("kline")}</h3>

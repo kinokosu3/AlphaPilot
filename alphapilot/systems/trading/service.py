@@ -793,6 +793,35 @@ class TradingStrategySystem(BaseSystem):
     def deployment_diagnostics(self, instance_id: str) -> dict[str, Any]:
         return self.store.runtime_diagnostics(instance_id)
 
+    def deployment_subscribe_observer(
+        self,
+        instance_id: str,
+        symbols: list[str],
+    ) -> dict[str, Any]:
+        return self.deployment_coordinator.subscribe_observer(instance_id, symbols)
+
+    def deployment_market_snapshot(
+        self,
+        instance_id: str,
+        symbols: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return self.deployment_coordinator.market_snapshot(instance_id, symbols)
+
+    def deployment_market_bars(
+        self,
+        instance_id: str,
+        symbol: str,
+        interval: int,
+        *,
+        limit: int = 300,
+    ) -> dict[str, Any]:
+        return self.deployment_coordinator.market_bars(
+            instance_id,
+            symbol,
+            interval,
+            limit=limit,
+        )
+
     def lifecycle_action(self, instance_id: str, action: str) -> dict[str, Any]:
         handlers = {
             "status": self.deployment_coordinator.status,

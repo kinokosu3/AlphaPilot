@@ -12,6 +12,8 @@ type Props = {
   mode: string;
   tradeBroker: string;
   quoteProvider: string;
+  marketDaemonRunning?: boolean;
+  marketDeploymentInstanceId?: string;
   ledger: AsyncResource<LiveLedgerEvents>;
   ledgerKind: string;
   setLedgerKind: (value: string) => void;
@@ -96,7 +98,16 @@ export function LiveActivityTabs(props: Props) {
           { key: "price", label: t("livePrice"), align: "right", render: (row) => value(row.price) },
           { key: "volume", label: t("liveVolume"), align: "right" },
         ]} /> : null}
-        {tab === "market" ? <LiveMarketPanel mode={props.mode} tradeBroker={props.tradeBroker} quoteProvider={props.quoteProvider} daemonRunning={Boolean(props.daemon?.running)} embedded /> : null}
+        {tab === "market" ? (
+          <LiveMarketPanel
+            mode={props.mode}
+            tradeBroker={props.tradeBroker}
+            quoteProvider={props.quoteProvider}
+            daemonRunning={props.marketDaemonRunning ?? Boolean(props.daemon?.running)}
+            deploymentInstanceId={props.marketDeploymentInstanceId}
+            embedded
+          />
+        ) : null}
         {tab === "audit" ? (
           <div className="stack compact">
             <div className="live-filter-row">

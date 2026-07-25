@@ -23,6 +23,12 @@ from alphapilot.systems.trading.account_identity import (
     account_identities_match,
 )
 from alphapilot.systems.live.runtime import clone_config
+from alphapilot.systems.live.market_data import (
+    load_market_bars,
+    read_market_snapshot,
+    refresh_snapshot_ages,
+)
+from alphapilot.systems.live.types import normalize_symbol
 
 
 class DaemonRuntimeControl:
@@ -223,6 +229,121 @@ class DaemonRuntimeControl:
                 raw=stopped,
             )
         return result
+
+    def subscribe_observer(
+        self,
+        instance: dict[str, Any],
+        symbols: list[str] | tuple[str, ...],
+    ) -> RuntimeCommandResult:
+        """Add display-only subscriptions without touching deployment state."""
+        return self._owned_command(
+            instance,
+            "subscribe_observer",
+            {"symbols": [str(symbol) for symbol in symbols]},
+        )
+
+    def market_snapshot(
+        self,
+        instance: dict[str, Any],
+        symbols: list[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, Any]:
+        """Read one deployment's isolated market projection."""
+        config = self._config_for(instance)
+        daemon = daemon_status(config)
+        self._validate_active_market_binding(daemon, instance)
+        snapshot = refresh_snapshot_ages(
+            read_market_snapshot(config.state_dir),
+            symbols=list(symbols or []),
+            stale_after_seconds=config.market_data.stale_after_seconds,
+        )
+        running = bool(daemon.get("running"))
+        historical = list(
+            snapshot.get("subscribed_symbols") or snapshot.get("symbols") or []
+        )
+        snapshot.update({
+            "daemon_running": running,
+            "daemon_status": str(daemon.get("status") or "stopped"),
+            "historical_subscribed_symbols": historical,
+        })
+        if running:
+            subscribed = list(
+                daemon.get("subscribed_symbols")
+                or daemon.get("symbols")
+                or historical
+            )
+            snapshot.update({
+                "strategy_symbols": list(daemon.get("strategy_symbols") or []),
+                "observer_symbols": list(daemon.get("observer_symbols") or []),
+                "subscribed_symbols": subscribed,
+                "symbols": subscribed,
+            })
+            tick_keys = {
+                str(row.get("key"))
+                for row in snapshot.get("ticks") or []
+                if isinstance(row, dict) and row.get("key")
+            }
+            snapshot["awaiting_first_tick"] = sorted(
+                symbol for symbol in subscribed if symbol not in tick_keys
+            )
+        else:
+            snapshot.update({
+                "strategy_symbols": [],
+                "observer_symbols": [],
+                "subscribed_symbols": [],
+                "symbols": [],
+                "awaiting_first_tick": [],
+            })
+        return snapshot
+
+    def market_bars(
+        self,
+        instance: dict[str, Any],
+        symbol: str,
+        interval: int,
+        *,
+        limit: int = 300,
+    ) -> dict[str, Any]:
+        """Read persisted/current bars from an isolated deployment namespace."""
+        config = self._config_for(instance)
+        daemon = daemon_status(config)
+        self._validate_active_market_binding(daemon, instance)
+        code, exchange = normalize_symbol(symbol)
+        key = f"{code}.{exchange.value}"
+        snapshot = read_market_snapshot(config.state_dir)
+        provider = str(
+            snapshot.get("quote_provider")
+            or config.quote_provider
+            or "quote"
+        )
+        rows = load_market_bars(
+            config.market_data.data_dir,
+            provider,
+            key,
+            int(interval),
+            limit=max(1, min(int(limit), 2000)),
+            current=snapshot.get("current_bars"),
+        )
+        return {
+            "symbol": key,
+            "label": key,
+            "interval": int(interval),
+            "date_range": [rows[0]["date"], rows[-1]["date"]] if rows else [],
+            "rows": rows,
+            "daemon_running": bool(daemon.get("running")),
+        }
+
+    def _validate_active_market_binding(
+        self,
+        status: dict[str, Any],
+        instance: dict[str, Any],
+    ) -> None:
+        """Reject a running daemon that does not own this exact deployment."""
+        if not status.get("running"):
+            return
+        observed = self._from_status(status, status_only=True)
+        error = self._binding_error(observed, instance)
+        if not observed.ok or error:
+            raise RuntimeError(error or observed.error or "deployment daemon is unavailable")
 
     def _owned_command(
         self,

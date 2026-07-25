@@ -41,6 +41,9 @@ from alphapilot.systems.live.types import (
     normalize_symbol,
 )
 
+STRATEGY_SUBSCRIPTION = "strategy"
+OBSERVER_SUBSCRIPTION = "observer"
+
 
 class LiveEngine:
     """Coordinates gateway, OMS, audit ledger and the safety state machines."""
@@ -84,6 +87,10 @@ class LiveEngine:
         self._event_now = getattr(self.ledger, "_now_fn", datetime.now)
         self.risk = risk  # installed in Phase 3; None => no pre-trade checks
         self._tick_listeners: list[Callable[[TickData], None]] = []
+        self._strategy_symbols: set[str] = set()
+        self._observer_symbols: set[str] = set()
+        # Compatibility union retained for callers which inspect this private
+        # attribute and for the long-standing snapshot field below.
         self._subscribed_symbols: set[str] = set()
         self.trade_gateway.register_callback(self)
         if self.quote_gateway is not self.trade_gateway:
@@ -364,6 +371,7 @@ class LiveEngine:
         self._connect_gateways(setting)
         self.connection.transition(ConnectionState.CONNECTED)
         self.connection.transition(ConnectionState.LOGGED_IN)
+        subscription_recovery = self._restore_market_data_subscriptions()
         self.trade_gateway.query_account()
         self.trade_gateway.query_position()
         if auto_resume:
@@ -382,21 +390,151 @@ class LiveEngine:
             "resumed": not self.runmode.halted,
             "active_orders": len(self.oms.get_active_orders()),
             "positions": len(self.oms.get_positions()),
+            "subscription_recovery": subscription_recovery,
         }
         self._audit("reconciled", report, source=self.trade_gateway.name)
         return report
 
-    def subscribe_market_data(self, symbols: list[str]) -> None:
-        """Subscribe through the quote channel, not the trade channel."""
-        pending: list[str] = []
+    def subscribe_market_data(
+        self,
+        symbols: list[str],
+        *,
+        subscription_type: str = OBSERVER_SUBSCRIPTION,
+    ) -> dict[str, Any]:
+        """Add classified quote subscriptions without changing routing state.
+
+        The historical one-argument call remains valid and is intentionally
+        classified as an observer subscription. Strategy runners must opt into
+        ``subscription_type="strategy"`` so additional Portal symbols can
+        never become part of their decision universe.
+        """
+        kind = str(subscription_type or "").strip().lower()
+        if kind not in {STRATEGY_SUBSCRIPTION, OBSERVER_SUBSCRIPTION}:
+            raise ValueError("subscription_type must be 'strategy' or 'observer'")
+
+        requested: list[str] = []
+        seen: set[str] = set()
         for raw in symbols:
-            code, exchange = normalize_symbol(raw)
+            code, exchange = normalize_symbol(str(raw))
             key = f"{code}.{exchange.value}"
-            if key not in self._subscribed_symbols:
-                self._subscribed_symbols.add(key)
-                pending.append(key)
-        if pending:
-            self.quote_gateway.subscribe(pending)
+            if key not in seen:
+                seen.add(key)
+                requested.append(key)
+
+        added: list[str] = []
+        already_subscribed: list[str] = []
+        failed: list[dict[str, str]] = []
+        for key in requested:
+            if key in self._subscribed_symbols:
+                already_subscribed.append(key)
+                if kind == STRATEGY_SUBSCRIPTION:
+                    # Strategy ownership takes precedence in the public
+                    # classification; the gateway subscription is unchanged.
+                    self._observer_symbols.discard(key)
+                    self._strategy_symbols.add(key)
+                continue
+            try:
+                # Per-symbol calls allow a synchronous provider rejection to be
+                # reported without losing successful additions in the batch.
+                self.quote_gateway.subscribe([key])
+            except Exception as exc:  # noqa: BLE001 - partial success is intentional
+                failed.append({
+                    "symbol": key,
+                    "error": redact_secrets(f"{type(exc).__name__}: {exc}"),
+                })
+                continue
+            self._subscribed_symbols.add(key)
+            if kind == STRATEGY_SUBSCRIPTION:
+                self._strategy_symbols.add(key)
+            else:
+                self._observer_symbols.add(key)
+            added.append(key)
+
+        result = self.subscription_snapshot(requested=requested)
+        result.update({
+            "subscription_type": kind,
+            "requested": requested,
+            "added": added,
+            "already_subscribed": already_subscribed,
+            "failed": failed,
+        })
+        self._audit(
+            "market_subscription",
+            {
+                key: value
+                for key, value in result.items()
+                if key != "awaiting_first_tick"
+            },
+            source=self.quote_gateway.name,
+        )
+        return result
+
+    def subscription_snapshot(
+        self,
+        *,
+        requested: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Return the active subscription classes and first-tick state."""
+        active = sorted(self._subscribed_symbols)
+        waiting_candidates = requested if requested is not None else active
+        awaiting = sorted(
+            symbol
+            for symbol in waiting_candidates
+            if symbol in self._subscribed_symbols and symbol not in self.oms.ticks
+        )
+        return {
+            "strategy_symbols": sorted(self._strategy_symbols),
+            "observer_symbols": sorted(self._observer_symbols),
+            "subscribed_symbols": active,
+            # ``symbols`` is another compatibility name used by daemon status.
+            "symbols": active,
+            "awaiting_first_tick": awaiting,
+            "subscription_sources": {
+                symbol: (
+                    STRATEGY_SUBSCRIPTION
+                    if symbol in self._strategy_symbols
+                    else OBSERVER_SUBSCRIPTION
+                )
+                for symbol in active
+            },
+        }
+
+    def _restore_market_data_subscriptions(self) -> dict[str, Any]:
+        """Replay desired subscriptions after an explicit gateway reconnect."""
+        restored_strategy: list[str] = []
+        restored_observer: list[str] = []
+        observer_failed: list[dict[str, str]] = []
+        for symbol in sorted(self._strategy_symbols):
+            try:
+                self.quote_gateway.subscribe([symbol])
+            except Exception as exc:  # noqa: BLE001 - strategy recovery fails closed
+                error = redact_secrets(f"{type(exc).__name__}: {exc}")
+                self._audit(
+                    "market_subscription_restore_failed",
+                    {"subscription_type": STRATEGY_SUBSCRIPTION, "symbol": symbol, "error": error},
+                    source=self.quote_gateway.name,
+                )
+                raise RuntimeError(
+                    f"strategy market subscription recovery failed for {symbol}: {error}"
+                ) from exc
+            restored_strategy.append(symbol)
+        for symbol in sorted(self._observer_symbols):
+            try:
+                self.quote_gateway.subscribe([symbol])
+            except Exception as exc:  # noqa: BLE001 - observer recovery is diagnostic only
+                observer_failed.append({
+                    "symbol": symbol,
+                    "error": redact_secrets(f"{type(exc).__name__}: {exc}"),
+                })
+            else:
+                restored_observer.append(symbol)
+        report = {
+            "strategy_restored": restored_strategy,
+            "observer_restored": restored_observer,
+            "observer_failed": observer_failed,
+        }
+        self._audit("market_subscription_restored", report, source=self.quote_gateway.name)
+        return report
 
     def reconcile_and_resume(self) -> dict[str, Any]:
         """Backward-compatible reconnect helper that resumes after reconciliation."""
@@ -418,7 +556,7 @@ class LiveEngine:
             "positions": len(self.oms.get_positions()),
             "contracts": len(self.oms.contracts),
             "ticks": len(self.oms.ticks),
-            "subscribed_symbols": sorted(self._subscribed_symbols),
+            **self.subscription_snapshot(),
             "risk": self.risk.snapshot() if self.risk is not None and hasattr(self.risk, "snapshot") else None,
         }
 

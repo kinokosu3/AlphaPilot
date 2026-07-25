@@ -19,6 +19,7 @@ from alphapilot.systems.live.market_data import market_snapshot_path
 from alphapilot.systems.live.runtime import clone_config, require_live_confirmation
 from alphapilot.systems.live.state_io import atomic_write_json
 from alphapilot.systems.live.targets import TargetPortfolio, parse_target_positions
+from alphapilot.systems.live.types import Exchange, normalize_symbol
 from alphapilot.systems.trading.account_identity import account_identity_hash
 from alphapilot.systems.trading.ports import RouteContext, RouteOrigin
 
@@ -53,6 +54,11 @@ def load_daemon(state_dir: str | Path | None = None) -> dict[str, Any]:
     data["alive"] = alive
     data["starting"] = alive and status in {"starting", "connecting"}
     data["running"] = alive and status == "running"
+    subscribed = list(data.get("subscribed_symbols") or data.get("symbols") or [])
+    data.setdefault("strategy_symbols", [])
+    data.setdefault("observer_symbols", [])
+    data["subscribed_symbols"] = subscribed
+    data.setdefault("symbols", subscribed)
     return data
 
 
@@ -347,6 +353,8 @@ def start_daemon(
             start_new_session=True,
         )
 
+    strategy_symbols = symbols if strategy_instance_id else []
+    observer_symbols = [] if strategy_instance_id else symbols
     meta = {
         "pid": proc.pid,
         "status": "starting",
@@ -360,6 +368,9 @@ def start_daemon(
         "quote_provider": cfg.quote_provider,
         "plugins": plugin_selection,
         "symbols": symbols or [],
+        "subscribed_symbols": symbols or [],
+        "strategy_symbols": strategy_symbols,
+        "observer_symbols": observer_symbols,
         "record_market_data": cfg.market_data.enabled if record_market_data is None else bool(record_market_data),
         "interval": float(interval),
         "timeout": float(timeout),
@@ -644,6 +655,25 @@ def _apply_command(
             })
             if route and not routed.get("fully_routed", False):
                 result["ok"] = False
+        elif action == "subscribe_observer":
+            symbols = _validate_observer_subscription_batch(
+                runtime,
+                _split_symbols_payload(payload.get("symbols")),
+            )
+            subscription = runtime.engine.subscribe_market_data(
+                symbols,
+                subscription_type="observer",
+            )
+            result.update({
+                "message": (
+                    "observer_subscription_partially_accepted"
+                    if subscription.get("failed")
+                    else "observer_subscription_accepted"
+                ),
+                **subscription,
+            })
+            if subscription.get("failed"):
+                result["ok"] = False
         elif action == "snapshot":
             result["message"] = "snapshotted"
         elif action == "strategy_status":
@@ -802,6 +832,57 @@ def _split_symbols_payload(raw: Any) -> list[str]:
     if isinstance(raw, (list, tuple, set)):
         return [str(item).strip() for item in raw if str(item).strip()]
     return [part.strip() for part in str(raw).replace("，", ",").split(",") if part.strip()]
+
+
+def _validate_observer_subscription_batch(
+    runtime: Any,
+    symbols: list[str],
+    *,
+    limit: int = 50,
+) -> list[str]:
+    """Validate an observer batch completely before touching the provider."""
+    if not symbols:
+        raise ValueError("symbols are required")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in symbols:
+        code, exchange = normalize_symbol(str(raw))
+        if not code or exchange == Exchange.UNKNOWN:
+            raise ValueError(f"unknown exchange for observer symbol {raw!r}")
+        key = f"{code}.{exchange.value}"
+        if key not in seen:
+            seen.add(key)
+            normalized.append(key)
+
+    from alphapilot.systems.live.brokers.registry import get_quote_provider
+
+    spec = get_quote_provider(
+        runtime.config.quote_provider
+        or runtime.config.trade_broker
+        or runtime.config.broker
+    )
+    supported = {
+        str(getattr(exchange, "value", exchange)).upper()
+        for exchange in spec.capabilities.exchanges
+    }
+    unsupported = sorted(
+        symbol for symbol in normalized if symbol.rsplit(".", 1)[-1] not in supported
+    )
+    if supported and unsupported:
+        raise ValueError(
+            f"quote provider {spec.name!r} does not support exchanges for: "
+            + ", ".join(unsupported)
+        )
+
+    current = runtime.engine.subscription_snapshot()
+    strategy = set(current.get("strategy_symbols") or [])
+    observers = set(current.get("observer_symbols") or [])
+    new_observers = {symbol for symbol in normalized if symbol not in strategy | observers}
+    if new_observers and len(observers | new_observers) > int(limit):
+        raise ValueError(
+            f"dynamic observer subscription limit is {int(limit)} symbols"
+        )
+    return normalized
 
 
 def _event_timeout(payload: dict[str, Any], default: float = 3.0) -> float:
@@ -987,6 +1068,8 @@ def run_daemon(
         runtime_id=runtime_id,
         require_exchange_calendar=bool(strategy_instance_id),
     )
+    strategy_symbols = symbols if strategy_instance_id else []
+    observer_symbols = [] if strategy_instance_id else symbols
     meta = {
         "pid": os.getpid(),
         "status": "connecting",
@@ -997,6 +1080,9 @@ def run_daemon(
         "quote_provider": cfg.quote_provider,
         "plugins": plugin_selection,
         "symbols": symbols or [],
+        "subscribed_symbols": symbols or [],
+        "strategy_symbols": strategy_symbols,
+        "observer_symbols": observer_symbols,
         "record_market_data": cfg.market_data.enabled if record_market_data is None else bool(record_market_data),
         "commands_processed": 0,
         "recovery": None,
@@ -1053,6 +1139,7 @@ def run_daemon(
             ready=ready,
             recovery=runtime.recovery,
             started_at=datetime.now().isoformat(timespec="seconds"),
+            **runtime.engine.subscription_snapshot(),
         )
         started = time.time()
         command_path = commands_path(cfg.state_dir)
@@ -1069,7 +1156,10 @@ def run_daemon(
                 runner = runner_holder.get("runner")
                 meta["runner"] = runner_holder.get("config") or meta.get("runner")
                 meta["commands_processed"] = int(meta.get("commands_processed") or 0) + 1
-                _write_status(last_command=result)
+                _write_status(
+                    last_command=result,
+                    **runtime.engine.subscription_snapshot(),
+                )
             if runner is not None:
                 runner_status = runner.step()
             else:
@@ -1083,6 +1173,7 @@ def run_daemon(
                 heartbeat_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 runner_status=runner_status,
                 halted=runtime.engine.runmode.halted,
+                **runtime.engine.subscription_snapshot(),
             )
             if duration is not None and time.time() - started >= float(duration):
                 break
@@ -1098,7 +1189,15 @@ def run_daemon(
         try:
             runtime.close()
         finally:
-            _write_status(status="stopped", stopped_at=datetime.now().isoformat(timespec="seconds"))
+            _write_status(
+                status="stopped",
+                stopped_at=datetime.now().isoformat(timespec="seconds"),
+                strategy_symbols=[],
+                observer_symbols=[],
+                subscribed_symbols=[],
+                symbols=[],
+                awaiting_first_tick=[],
+            )
             try:
                 engine.shutdown()
             except Exception:

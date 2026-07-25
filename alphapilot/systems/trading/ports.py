@@ -162,3 +162,21 @@ class RuntimeControlPort(Protocol):
     def reconcile(self, instance: dict[str, Any]) -> RuntimeCommandResult: ...
     def resume(self, instance: dict[str, Any]) -> RuntimeCommandResult: ...
     def stop(self, instance: dict[str, Any]) -> RuntimeCommandResult: ...
+    def subscribe_observer(
+        self,
+        instance: dict[str, Any],
+        symbols: Sequence[str],
+    ) -> RuntimeCommandResult: ...
+    def market_snapshot(
+        self,
+        instance: dict[str, Any],
+        symbols: Sequence[str] | None = None,
+    ) -> dict[str, Any]: ...
+    def market_bars(
+        self,
+        instance: dict[str, Any],
+        symbol: str,
+        interval: int,
+        *,
+        limit: int = 300,
+    ) -> dict[str, Any]: ...

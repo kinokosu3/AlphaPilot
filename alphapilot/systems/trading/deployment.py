@@ -317,6 +317,73 @@ class DeploymentCoordinator:
                 )
         return self._response(instance_id, "status", result, self.store.get_runtime_state(instance_id))
 
+    def subscribe_observer(
+        self,
+        instance_id: str,
+        symbols: list[str],
+    ) -> dict[str, Any]:
+        """Send a neutral observer command without changing lifecycle truth."""
+        instance = self._instance(instance_id)
+        result = self.control.subscribe_observer(instance, symbols)
+        last = (
+            result.raw.get("last_command")
+            if isinstance(result.raw.get("last_command"), dict)
+            else {}
+        )
+        details = {
+            key: value
+            for key, value in last.items()
+            if key not in {"id", "ts", "action"}
+        }
+        self._record_runtime_event(
+            instance,
+            "observer_subscription",
+            count=max(len(details.get("added") or []), 1),
+            details={
+                "ok": result.ok,
+                "command_id": result.command_id,
+                "error": result.error,
+                **details,
+            },
+        )
+        error = result.error or str(details.get("error") or "")
+        return {
+            "ok": result.ok,
+            "action": "observer_subscribe",
+            "instance_id": instance_id,
+            "command_id": result.command_id,
+            "runtime": self.store.get_runtime_state(instance_id),
+            "runner_status": result.runner_status,
+            "error": error,
+            "upgrade_required": "unsupported daemon command" in error.lower(),
+            **details,
+            "deployment": self.store.deployment(instance_id),
+        }
+
+    def market_snapshot(
+        self,
+        instance_id: str,
+        symbols: list[str] | None = None,
+    ) -> dict[str, Any]:
+        instance = self._instance(instance_id)
+        return self.control.market_snapshot(instance, symbols)
+
+    def market_bars(
+        self,
+        instance_id: str,
+        symbol: str,
+        interval: int,
+        *,
+        limit: int = 300,
+    ) -> dict[str, Any]:
+        instance = self._instance(instance_id)
+        return self.control.market_bars(
+            instance,
+            symbol,
+            interval,
+            limit=limit,
+        )
+
     def _command_failed(
         self,
         instance_id: str,

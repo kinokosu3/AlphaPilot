@@ -95,15 +95,19 @@ AlphaPilot 的主线能力是自动化因子研究。你可以用自然语言启
 - 所有订单统一经过交易时段、整手、价格、资金、持仓、集中度、单笔和日累计限额检查
 - 维护 OMS 状态、追加式审计账本、运行时快照和恢复对账；交易通道断线会触发 halt，恢复后仍需人工检查再继续
 - XTP Pro、EMT 和 OpenCTP TTS 接入已从核心解耦为可安装、可卸载的 pip 插件，交易通道和行情源可分别配置
-- Portal「实盘交易」页面提供预检、连接、daemon 运维、正式策略部署、风控状态、委托与 ledger 查询
+- daemon 运行期间可从 Portal 或 CLI 增量添加最多 50 个观察标的，无需重连；观察行情只用于展示、K 线和录制，不进入策略决策
+- Portal「实盘交易」页面提供预检、连接、daemon 运维、动态行情订阅、正式策略部署、风控状态、委托与 ledger 查询
 
 最安全的体验路径是先从 paper daemon 开始：
 
 ```bash
 alphapilot live_daemon_start --mode paper --symbols 600000,000001 --cash 100000
+alphapilot live_daemon_subscribe --symbols 600519.SSE,510300.SSE --wait=True
 alphapilot live_daemon_status --mode paper
 alphapilot live_daemon_stop --mode paper
 ```
+
+启动参数中的 `symbols` 和后来添加的标的都属于独立 daemon 的 `observer_symbols`。正式策略部署则把实例 universe 归入 `strategy_symbols`，额外查看的标的仍归入 observer；兼容字段 `subscribed_symbols` 是两者并集。`added` 只表示行情 SDK 已接受请求，标的仍出现在 `awaiting_first_tick` 时应继续等待首个 Tick。停止 daemon 会清空活动 observer，已经录制的 Tick/K 线不会删除。
 
 > **实盘风险提示：** 该功能仍在持续开发和券商环境验证中。接入真实账户前，请先完成 paper 演练、插件与网络预检、小额柜台测试，并逐项确认风控限额和恢复结果。不要在未理解 `--confirm_live`、daemon 状态和 ledger 的情况下启用真实路由。
 
@@ -431,11 +435,13 @@ alphapilot trading_deploy --instance_id=sma_20_demo --run_mode=live \
   --trade_provider=xtp --quote_provider=xtp --account_id=YOUR_ACCOUNT_ID
 
 alphapilot trading_start --instance_id=sma_20_demo
+alphapilot trading_deployment_subscribe \
+  --instance_id=sma_20_demo --symbols=600519.SSE,510300.SSE
 alphapilot trading_deployments
 alphapilot trading_diagnostics --instance_id=sma_20_demo
 ```
 
-LIVE 启动后先停在待对账状态；运行 `trading_reconcile` 成功后，再显式运行 `trading_resume`。即使不再有晋级门禁，LIVE 仍会逐单检查环境开关、账户与 Provider 绑定、单账户单写者、合约/行情、心跳、对账、Kill Switch 和 RiskGate。PAPER/SHADOW 会话与 `trading_decision_compare` 只提供诊断，不改变部署权限。
+`trading_deployment_subscribe` 只扩展该运行实例的观察行情，不修改实例 universe、`config_hash`、`binding_hash`、stale 状态或路由权限。LIVE 启动后先停在待对账状态；运行 `trading_reconcile` 成功后，再显式运行 `trading_resume`。即使不再有晋级门禁，LIVE 仍会逐单检查环境开关、账户与 Provider 绑定、单账户单写者、合约/行情、心跳、对账、Kill Switch 和 RiskGate。PAPER/SHADOW 会话与 `trading_decision_compare` 只提供诊断，不改变部署权限。
 
 Portal 对所有 `/api/live`、`/api/trading` 写操作统一使用操作员鉴权，默认模式是 `required`，包括策略实例、部署配置与生命周期、Kill Switch、daemon 和手工交易。先在本机生成令牌，明文只返回一次：
 

@@ -95,6 +95,7 @@ def test_removed_promotion_surfaces_are_absent() -> None:
     assert REMOVED_COMMANDS.isdisjoint(commands)
     assert {
         "trading_deploy", "trading_deployments", "trading_diagnostics",
+        "trading_deployment_subscribe",
         "trading_decision_compare", "trading_decision_comparisons",
     } <= set(commands)
 
@@ -104,8 +105,12 @@ def test_removed_promotion_surfaces_are_absent() -> None:
         "/api/trading/deployments",
         "/api/trading/deployments/{instance_id}",
         "/api/trading/deployments/{instance_id}/diagnostics",
+        "/api/trading/deployments/{instance_id}/observer-subscriptions",
+        "/api/trading/deployments/{instance_id}/market/snapshot",
+        "/api/trading/deployments/{instance_id}/market/bars",
         "/api/trading/deployments/{instance_id}/decision-comparisons",
         "/api/trading/decision-comparisons/{comparison_id}",
+        "/api/live/daemon/subscribe",
     } <= paths
 
 

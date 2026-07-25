@@ -12,7 +12,7 @@ flowchart LR
     Jobs --> Workers[隔离后台进程]
 ```
 
-前端有 11 个正式路由。`pages.tsx` 承担研究与管理页面，复杂 live 页面拆为独立组件。FastAPI 提供 134 条路径、151 个操作，完整索引见 [HTTP API](../reference/http-api.md)。
+前端有 11 个正式路由。`pages.tsx` 承担研究与管理页面，复杂 live 页面拆为独立组件。FastAPI 提供 138 条路径、155 个操作，完整索引见 [HTTP API](../reference/http-api.md)。
 
 ## Handler 约束
 
@@ -22,11 +22,12 @@ flowchart LR
 - 每个交易写请求记录 transport requested/outcome 审计，只含 request ID、路径、方法、状态、客户端地址、Origin 和 User-Agent；禁止写入 Authorization、Cookie 或请求载荷。领域审计继续记录实例、部署、生命周期和比较语义。
 - 非 loopback 监听不再阻断部署或 automated LIVE。`optional + 0.0.0.0 + wildcard CORS` 是显式支持但极高风险的组合，不能在 middleware 中悄悄恢复同源或本机限制。
 - Broker UAT HTTP 端点只读，真实 UAT 只能由本地 CLI 发起。
+- 动态 observer 写请求仍走 operator-auth 和 transport/domain 审计，但不要求 LIVE 确认。正式部署通过 `instance_id` 定位隔离 runtime，Portal 不提交内部 `state_dir`。
 - 后台任务的 Portal job manager 只负责进程和状态；trading backtest 的领域状态源是 runtime SQLite。
 
 ## 前端状态
 
-普通资源通过 `useAsync` 加载；交易 token 只存在模块内存，不写浏览器持久化存储。实盘和策略实例页读取安全状态：`required` 显示 token，`optional` 隐藏输入并持续警告，加载失败按 `required` 展示。页面切换不能隐式触发路由订单。确认弹窗、错误 toast 和运行状态刷新属于 UI 层，安全授权仍由服务端判断。
+普通资源通过 `useAsync` 加载；交易 token 只存在模块内存，不写浏览器持久化存储。实盘和策略实例页读取安全状态：`required` 显示 token，`optional` 隐藏输入并持续警告，加载失败按 `required` 展示。页面切换不能隐式触发路由订单或行情订阅；observer 只能由“添加订阅”按钮显式提交。行情列表合并活动订阅和已收到 Tick 的 key，使等待首 Tick 的标的仍可见。确认弹窗、错误 toast 和运行状态刷新属于 UI 层，安全授权仍由服务端判断。
 
 ## 增加接口或页面
 

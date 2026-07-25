@@ -173,6 +173,85 @@ def test_deployment_configuration_requires_explicit_instance_validation(engine) 
     assert trading.store.get_instance(instance_id)["validation_state"] == "created"
 
 
+def test_deployment_observer_and_isolated_market_api(
+    engine,
+    monkeypatch,
+) -> None:
+    trading = engine.get_system("trading")
+    client = TestClient(create_app(engine=engine))
+    headers = _operator_headers(engine)
+    instance_id = f"observer-api-{uuid4().hex}"
+    trading.create_instance({
+        "instance_id": instance_id,
+        "strategy_id": "sma_filter",
+        "params": {"window": 5},
+        "universe": ["600000.SSE"],
+        "data_policy": {"history_window": 6, "data_version": "observer-api-v1"},
+    })
+    assert trading.validate_instance(instance_id)["ok"] is True
+
+    monkeypatch.setattr(
+        trading,
+        "deployment_subscribe_observer",
+        lambda selected, symbols: {
+            "ok": True,
+            "instance_id": selected,
+            "requested": symbols,
+            "added": ["000001.SZSE"],
+            "already_subscribed": ["600000.SSE"],
+            "failed": [],
+            "awaiting_first_tick": ["000001.SZSE"],
+        },
+    )
+    monkeypatch.setattr(
+        trading,
+        "deployment_market_snapshot",
+        lambda selected, symbols=None: {
+            "instance_id": selected,
+            "strategy_symbols": ["600000.SSE"],
+            "observer_symbols": ["000001.SZSE"],
+            "subscribed_symbols": ["000001.SZSE", "600000.SSE"],
+            "ticks": [],
+        },
+    )
+    monkeypatch.setattr(
+        trading,
+        "deployment_market_bars",
+        lambda selected, symbol, interval, limit=300: {
+            "instance_id": selected,
+            "symbol": symbol,
+            "interval": interval,
+            "limit": limit,
+            "rows": [],
+        },
+    )
+
+    denied = client.post(
+        f"/api/trading/deployments/{instance_id}/observer-subscriptions",
+        json={"symbols": ["000001.SZ"]},
+    )
+    assert denied.status_code == 401
+    subscribed = client.post(
+        f"/api/trading/deployments/{instance_id}/observer-subscriptions",
+        json={"symbols": ["000001.SZ", "600000.SSE"]},
+        headers=headers,
+    )
+    assert subscribed.status_code == 200
+    assert subscribed.json()["added"] == ["000001.SZSE"]
+
+    snapshot = client.get(
+        f"/api/trading/deployments/{instance_id}/market/snapshot"
+    )
+    assert snapshot.status_code == 200
+    assert snapshot.json()["observer_symbols"] == ["000001.SZSE"]
+    bars = client.get(
+        f"/api/trading/deployments/{instance_id}/market/bars",
+        params={"symbol": "000001.SZSE", "interval": 300, "limit": 25},
+    )
+    assert bars.status_code == 200
+    assert bars.json()["limit"] == 25
+
+
 def test_removed_timing_routes_are_absent_but_catalog_remains_auditable(engine) -> None:
     client = TestClient(create_app(engine=engine))
     assert client.get("/api/timing/strategies").status_code == 404

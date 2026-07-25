@@ -52,7 +52,7 @@ def test_first_party_component_and_cli_documentation_surface(isolated_env) -> No
         assert set(engine.modules) == set(CATALOG["modules"])
         assert len(engine.systems) == 7
         assert len(engine.modules) == 15
-        assert len(engine.collect_commands()) == 118
+        assert len(engine.collect_commands()) == 120
         assert REMOVED_STAGE_COMMANDS.isdisjoint(engine.collect_commands())
         trading = engine.get_system("trading")
         assert not hasattr(trading, "start_stage_run")
@@ -119,8 +119,8 @@ def test_catalog_covers_portal_routes_and_openapi(isolated_env) -> None:  # noqa
         for method in item
         if method in methods
     }
-    assert len(spec["paths"]) == 134
-    assert len(operations) == 151
+    assert len(spec["paths"]) == 138
+    assert len(operations) == 155
     assert not any(path.startswith("/api/timing/") for path in spec["paths"])
     assert not any(path.startswith("/api/live/daemon/strategy/") for path in spec["paths"])
     removed_fragments = {

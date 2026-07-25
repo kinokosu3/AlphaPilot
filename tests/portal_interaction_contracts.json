@@ -20,6 +20,8 @@
   {"id":"notify.save","page":"/notifications","action":"save masked configuration","method":"PATCH","path":"/api/notify","request_keys":[],"states":["success","400","error"]},
   {"id":"notify.plan","page":"/notifications","action":"plan natural language command","method":"POST","path":"/api/notify/commands/plan","request_keys":["text"],"states":["success","unauthorized","error"]},
   {"id":"live.daemon.start","page":"/live","action":"start daemon","method":"POST","path":"/api/live/daemon/start","request_keys":["mode","trade_broker","quote_provider"],"states":["success","blocked","error"]},
+  {"id":"live.daemon.subscribe","page":"/live","action":"add standalone observer symbols","method":"POST","path":"/api/live/daemon/subscribe","request_keys":["symbols","wait","timeout"],"states":["accepted","awaiting_first_tick","partial_failure","error"]},
+  {"id":"live.deployment.subscribe","page":"/live","action":"add deployment observer symbols","method":"POST","path":"/api/trading/deployments/{instance_id}/observer-subscriptions","request_keys":["symbols"],"states":["accepted","awaiting_first_tick","partial_failure","error"]},
   {"id":"live.order","page":"/live","action":"submit manual order","method":"POST","path":"/api/live/daemon/order","request_keys":["symbol","side","volume","confirm_live"],"states":["accepted","rejected","halted"]},
   {"id":"live.target","page":"/live","action":"submit target plan","method":"POST","path":"/api/live/daemon/submit-target","request_keys":["holdings","route","confirm_live"],"states":["accepted","planned","rejected"]},
   {"id":"live.cancel","page":"/live","action":"cancel active order","method":"POST","path":"/api/live/daemon/cancel","request_keys":["order_id"],"states":["accepted","not_found","terminal"]},

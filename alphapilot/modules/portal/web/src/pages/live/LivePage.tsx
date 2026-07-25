@@ -178,6 +178,7 @@ export function LivePage() {
   );
 
   const [daemonSymbols, setDaemonSymbols] = useState("600000");
+  const [observerSymbols, setObserverSymbols] = useState("");
   const [daemonTimingStrategy, setDaemonTimingStrategy] = useState("");
   const [operatorToken, setOperatorTokenValue] = useState(getOperatorToken());
   const [killReason, setKillReason] = useState("");
@@ -187,6 +188,14 @@ export function LivePage() {
       : Promise.resolve({} as DeploymentPackage),
     [daemonTimingStrategy],
   );
+  const deploymentRuntimeActive = Boolean(
+    daemonTimingStrategy.trim()
+    && deploymentEvidence.data?.runtime?.runtime_id
+    && deploymentEvidence.data?.runtime?.observed_state !== "stopped",
+  );
+  const marketDeploymentInstanceId = deploymentRuntimeActive
+    ? daemonTimingStrategy.trim()
+    : "";
   const [accountProfile, setAccountProfile] = useState("");
   const [deploymentAccountId, setDeploymentAccountId] = useState("");
   const [deploymentReason, setDeploymentReason] = useState("");
@@ -343,6 +352,34 @@ export function LivePage() {
     if (workspace === "live" && !(await confirm({ message: t("liveDaemonReconnectConfirm"), danger: true }))) return;
     await command("/api/live/daemon/reconnect", t("liveDaemonReconnected"), { timeout: 20, auto_resume: false });
   };
+  const subscribeObserver = () => run(async () => {
+    const symbols = observerSymbols
+      .split(/[,，\s]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+    if (!symbols.length) throw new Error(t("liveObserverSymbolsRequired"));
+    const path = marketDeploymentInstanceId
+      ? `/api/trading/deployments/${encodeURIComponent(marketDeploymentInstanceId)}/observer-subscriptions`
+      : "/api/live/daemon/subscribe";
+    const result = await api.post<LiveDaemonCommandResult & {
+      upgrade_required?: boolean;
+    }>(path, {
+      symbols,
+      wait: true,
+      timeout: 5,
+      ...(marketDeploymentInstanceId ? {} : query),
+    });
+    const failed = result.ok === false || (!marketDeploymentInstanceId && !result.accepted);
+    if (failed) {
+      const detail = result.error || result.reason || "";
+      if (result.upgrade_required || detail.toLowerCase().includes("unsupported daemon command")) {
+        throw new Error(t("liveObserverDaemonUpgradeRequired"));
+      }
+      throw new Error(detail || t("liveObserverSubscribeFailed"));
+    }
+    setObserverSymbols("");
+    await Promise.all([daemonStatus.refresh(), deploymentEvidence.refresh()]);
+  }, t("liveObserverSubscribeDone"));
   const deploymentCommand = (action: string, message: string) => run(async () => {
     if (!daemonTimingStrategy.trim()) throw new Error(t("liveStrategyRequired"));
     await api.post(`/api/trading/deployments/${daemonTimingStrategy.trim()}/${action}`, {});
@@ -461,7 +498,8 @@ export function LivePage() {
   };
 
   const daemon = daemonStatus.data;
-  const canStartDaemon = providerReady && (workspace === "paper" || Boolean(selectedBrokerSpec?.gateway_importable && selectedQuoteProviderSpec?.gateway_importable));
+  const runtimeSelectionLocked = Boolean(daemon?.alive) || deploymentRuntimeActive;
+  const canStartDaemon = !deploymentRuntimeActive && providerReady && (workspace === "paper" || Boolean(selectedBrokerSpec?.gateway_importable && selectedQuoteProviderSpec?.gateway_importable));
   const bindingLocked = Boolean(deploymentEvidence.data?.runtime?.runtime_id);
   // Security status failures deliberately fail closed in the UI. The backend
   // remains authoritative for every request.
@@ -504,8 +542,8 @@ export function LivePage() {
       </div>
       {workspace === "paper" ? (
         <div className="live-simulation-switch" role="group" aria-label={t("liveSimulationMode")}>
-          <button type="button" className={simulationMode === "paper" ? "active" : ""} disabled={Boolean(daemon?.alive)} onClick={() => { setSimulationMode("paper"); setTargetRoute(false); }}>Paper</button>
-          <button type="button" className={simulationMode === "dry_run" ? "active" : ""} disabled={Boolean(daemon?.alive)} onClick={() => { setSimulationMode("dry_run"); setTargetRoute(false); }}>Dry-run</button>
+          <button type="button" className={simulationMode === "paper" ? "active" : ""} disabled={runtimeSelectionLocked} onClick={() => { setSimulationMode("paper"); setTargetRoute(false); }}>Paper</button>
+          <button type="button" className={simulationMode === "dry_run" ? "active" : ""} disabled={runtimeSelectionLocked} onClick={() => { setSimulationMode("dry_run"); setTargetRoute(false); }}>Dry-run</button>
         </div>
       ) : null}
       {brokerCatalog.error || quoteProviderCatalog.error ? <Alert tone="error">{brokerCatalog.error || quoteProviderCatalog.error}</Alert> : null}
@@ -525,7 +563,7 @@ export function LivePage() {
         initialCash={initialCash}
         setInitialCash={setInitialCash}
         providerReady={providerReady}
-        providerSelectionLocked={Boolean(daemon?.alive)}
+        providerSelectionLocked={runtimeSelectionLocked}
         canStartDaemon={canStartDaemon}
         preflight={preflight}
         preflightNetwork={preflightNetwork}
@@ -536,6 +574,15 @@ export function LivePage() {
         onRefreshDaemon={refreshDaemon}
         onReconnectDaemon={reconnectDaemon}
         onStopDaemon={stopDaemon}
+        observerSymbols={observerSymbols}
+        setObserverSymbols={setObserverSymbols}
+        observerSubscriptionEnabled={deploymentRuntimeActive || Boolean(daemon?.running)}
+        observerTargetLabel={
+          marketDeploymentInstanceId
+            ? `${t("liveObserverDeploymentTarget")}: ${marketDeploymentInstanceId}`
+            : t("liveObserverStandaloneTarget")
+        }
+        onSubscribeObserver={subscribeObserver}
       />
       {daemonTimingStrategy.trim() ? (
         <section className="panel inset" aria-label={t("liveExecutionBinding")}>
@@ -682,6 +729,8 @@ export function LivePage() {
         mode={runtimeMode}
         tradeBroker={selectedRuntimeBroker}
         quoteProvider={selectedRuntimeQuoteProvider}
+        marketDaemonRunning={deploymentRuntimeActive || Boolean(daemon?.running)}
+        marketDeploymentInstanceId={marketDeploymentInstanceId || undefined}
         ledger={ledgerEvents}
         ledgerKind={ledgerKind}
         setLedgerKind={setLedgerKind}
@@ -701,7 +750,7 @@ export function LivePage() {
         setRuntimeQuoteProvider={setRuntimeQuoteProvider}
         brokers={liveBrokerOptions}
         quoteProviders={quoteProviderOptions}
-        providerSelectionLocked={Boolean(daemon?.alive)}
+        providerSelectionLocked={runtimeSelectionLocked}
         providerReady={providerReady}
         cfg={cfg}
         daemon={daemon}

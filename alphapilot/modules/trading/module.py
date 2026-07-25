@@ -210,6 +210,19 @@ class TradingModule(BaseModule):
         """Read neutral runtime diagnostics; results never change deployment authority."""
         return self._print(self._system().deployment_diagnostics(instance_id))
 
+    def trading_deployment_subscribe(
+        self,
+        instance_id: str,
+        symbols: Any,
+    ) -> dict[str, Any]:
+        """Add display-only symbols to a running isolated deployment daemon."""
+        return self._print(public_account_state(
+            self._system().deployment_subscribe_observer(
+                instance_id,
+                _symbols(symbols),
+            )
+        ))
+
     def trading_operator_token(
         self,
         operator_id: str,
@@ -478,6 +491,7 @@ class TradingModule(BaseModule):
             "trading_deploy": self.trading_deploy,
             "trading_deployments": self.trading_deployments,
             "trading_diagnostics": self.trading_diagnostics,
+            "trading_deployment_subscribe": self.trading_deployment_subscribe,
             "trading_operator_token": self.trading_operator_token,
             "trading_start": self.trading_start,
             "trading_pause": self.trading_pause,

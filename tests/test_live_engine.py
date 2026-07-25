@@ -121,13 +121,72 @@ def test_engine_separates_trade_and_quote_gateways(tmp_path: Path) -> None:
 
     assert trade.connected == 2
     assert quote.connected == 2
-    assert quote.subscribed == [["600000.SSE"]]
+    # Explicit reconnect restores the desired quote subscriptions.
+    assert quote.subscribed == [["600000.SSE"], ["600000.SSE"]]
     assert trade.subscribed == []
     assert len(trade.orders) == 1
     assert len(quote.orders) == 0
     assert len(trade.cancels) == 1
     assert trade.account_queries == 1
     assert trade.position_queries == 1
+
+
+def test_market_subscriptions_are_classified_idempotent_and_replayed_in_order(
+    tmp_path: Path,
+) -> None:
+    trade = TrackingGateway("trade")
+    quote = TrackingGateway("quote")
+    engine = LiveEngine(
+        LiveConfig(mode=RunMode.PAPER, ledger_dir=tmp_path / "ledger"),
+        trade,
+        quote_gateway=quote,
+        ledger=Ledger(tmp_path / "ledger"),
+    )
+    engine.connect({})
+
+    strategy = engine.subscribe_market_data(
+        ["SH600000"],
+        subscription_type="strategy",
+    )
+    observer = engine.subscribe_market_data(["000001.SZ"])
+    duplicate = engine.subscribe_market_data(["600000.SSE"])
+
+    assert strategy["strategy_symbols"] == ["600000.SSE"]
+    assert observer["observer_symbols"] == ["000001.SZSE"]
+    assert duplicate["already_subscribed"] == ["600000.SSE"]
+    assert duplicate["observer_symbols"] == ["000001.SZSE"]
+    assert duplicate["subscription_sources"]["600000.SSE"] == "strategy"
+    assert duplicate["awaiting_first_tick"] == []
+    assert engine.snapshot()["subscribed_symbols"] == [
+        "000001.SZSE",
+        "600000.SSE",
+    ]
+
+    quote.subscribed.clear()
+    engine.reconcile_after_reconnect()
+    assert quote.subscribed == [["600000.SSE"], ["000001.SZSE"]]
+
+
+def test_market_subscription_reports_partial_provider_failure(tmp_path: Path) -> None:
+    class PartiallyFailingGateway(TrackingGateway):
+        def subscribe(self, codes: list[str]) -> None:
+            if codes == ["000001.SZSE"]:
+                raise RuntimeError("provider rejected symbol")
+            super().subscribe(codes)
+
+    gateway = PartiallyFailingGateway("quote")
+    engine = LiveEngine(
+        LiveConfig(mode=RunMode.PAPER, ledger_dir=tmp_path / "ledger"),
+        gateway,
+        ledger=Ledger(tmp_path / "ledger"),
+    )
+    engine.connect({})
+
+    result = engine.subscribe_market_data(["600000.SSE", "000001.SZ"])
+
+    assert result["added"] == ["600000.SSE"]
+    assert result["failed"][0]["symbol"] == "000001.SZSE"
+    assert result["subscribed_symbols"] == ["600000.SSE"]
     assert engine.oms.get_tick(KEY).last_price == 10.0
 
 

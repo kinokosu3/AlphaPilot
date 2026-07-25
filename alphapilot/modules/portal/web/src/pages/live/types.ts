@@ -87,6 +87,8 @@ export type LiveEngineSnapshot = {
   positions: number;
   contracts?: number;
   ticks?: number;
+  strategy_symbols?: string[];
+  observer_symbols?: string[];
   subscribed_symbols?: string[];
 };
 
@@ -230,6 +232,7 @@ export type LiveMarketTick = {
   received_at?: string | null;
   age_seconds?: number | null;
   stale: boolean;
+  awaiting_first_tick?: boolean;
   gateway?: string;
 };
 
@@ -252,7 +255,12 @@ export type LiveMarketSnapshot = {
   quote_provider?: string;
   daemon_running?: boolean;
   daemon_status?: string;
+  strategy_symbols?: string[];
+  observer_symbols?: string[];
   subscribed_symbols: string[];
+  symbols?: string[];
+  awaiting_first_tick?: string[];
+  historical_subscribed_symbols?: string[];
   stale_after_seconds: number;
   ticks: LiveMarketTick[];
   recorder?: LiveMarketRecorder;
@@ -281,6 +289,11 @@ export type LiveDaemonStatus = {
   broker?: string;
   trade_broker?: string;
   quote_provider?: string;
+  symbols?: string[];
+  strategy_symbols?: string[];
+  observer_symbols?: string[];
+  subscribed_symbols?: string[];
+  awaiting_first_tick?: string[];
   commands_processed?: number;
   runner?: { enabled?: boolean; strategy?: string; freq?: string };
   runner_status?: LiveRunnerStatus | null;
@@ -306,6 +319,16 @@ export type LiveDaemonCommandResult = {
   command?: { id: string; action: string };
   daemon?: LiveDaemonStatus;
   reason?: string;
+  ok?: boolean;
+  error?: string;
+  requested?: string[];
+  added?: string[];
+  already_subscribed?: string[];
+  failed?: Array<{ symbol: string; error: string }>;
+  awaiting_first_tick?: string[];
+  strategy_symbols?: string[];
+  observer_symbols?: string[];
+  subscribed_symbols?: string[];
 };
 
 export type LiveRunnerStatus = {

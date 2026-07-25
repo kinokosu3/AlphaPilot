@@ -31,8 +31,8 @@
 | `alphaforge_search` | 2 | [打开](../user/factor-mining-and-library.md) | [打开](../developer/modules/alphaforge-search.md) |
 | `stock_pool` | 10 | [打开](../user/data-and-pools.md) | [打开](../developer/modules/stock-pool.md) |
 | `strategy_backtest` | 3 | [打开](../user/strategy-assets-and-backtests.md) | [打开](../developer/modules/strategy-backtest.md) |
-| `live` | 26 | [打开](../user/live-trading.md) | [打开](../developer/modules/live.md) |
-| `trading_cli` | 31 | [打开](../user/strategy-instances.md) | [打开](../developer/modules/trading-cli.md) |
+| `live` | 27 | [打开](../user/live-trading.md) | [打开](../developer/modules/live.md) |
+| `trading_cli` | 32 | [打开](../user/strategy-instances.md) | [打开](../developer/modules/trading-cli.md) |
 
 ## 非注册策略子系统
 

@@ -29,15 +29,41 @@ def market_snapshot_path(state_dir: str | Path) -> Path:
 def read_market_snapshot(state_dir: str | Path) -> dict[str, Any]:
     path = market_snapshot_path(state_dir)
     if not path.exists():
-        return {"exists": False, "path": str(path), "ticks": [], "current_bars": {}}
+        return {
+            "exists": False,
+            "path": str(path),
+            "strategy_symbols": [],
+            "observer_symbols": [],
+            "subscribed_symbols": [],
+            "symbols": [],
+            "ticks": [],
+            "current_bars": {},
+        }
     try:
         import json
 
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:  # noqa: BLE001 - status endpoints remain available
-        return {"exists": True, "path": str(path), "ticks": [], "current_bars": {}, "error": str(exc)}
+        return {
+            "exists": True,
+            "path": str(path),
+            "strategy_symbols": [],
+            "observer_symbols": [],
+            "subscribed_symbols": [],
+            "symbols": [],
+            "ticks": [],
+            "current_bars": {},
+            "error": str(exc),
+        }
     data["exists"] = True
     data["path"] = str(path)
+    subscribed = list(data.get("subscribed_symbols") or data.get("symbols") or [])
+    # Pre-classification snapshots remain readable without guessing whether
+    # their legacy union originated from a strategy or an observer.
+    data.setdefault("strategy_symbols", [])
+    data.setdefault("observer_symbols", [])
+    data["subscribed_symbols"] = subscribed
+    data.setdefault("symbols", subscribed)
     return data
 
 
@@ -351,7 +377,10 @@ class LiveMarketDataService:
             interval: BarAggregator(interval, on_bar=lambda bar, i=interval: self._on_bar(i, bar))
             for interval in (*BAR_INTERVALS, DAY_INTERVAL)
         }
-        self._bar_listeners: dict[int, list[Callable[[Bar], None]]] = {}
+        self._bar_listeners: dict[
+            int,
+            list[tuple[Callable[[Bar], None], frozenset[str] | None]],
+        ] = {}
         self._engine: Any = None
         self._last_session: str | None = None
 
@@ -373,15 +402,23 @@ class LiveMarketDataService:
         except Exception as exc:  # noqa: BLE001 - observability cannot break trading
             self.recorder._mark_error(f"market projection error: {type(exc).__name__}: {exc}")
 
-    def add_bar_listener(self, interval: int, listener: Callable[[Bar], None]) -> None:
+    def add_bar_listener(
+        self,
+        interval: int,
+        listener: Callable[[Bar], None],
+        *,
+        symbols: list[str] | tuple[str, ...] | set[str] | frozenset[str] | None = None,
+    ) -> None:
         if int(interval) not in self._bars:
             raise ValueError(f"unsupported live bar interval {interval}")
-        self._bar_listeners.setdefault(int(interval), []).append(listener)
+        selected = None if symbols is None else frozenset(_canonical_symbols(list(symbols)))
+        self._bar_listeners.setdefault(int(interval), []).append((listener, selected))
 
     def remove_bar_listener(self, interval: int, listener: Callable[[Bar], None]) -> None:
         listeners = self._bar_listeners.get(int(interval), [])
-        if listener in listeners:
-            listeners.remove(listener)
+        self._bar_listeners[int(interval)] = [
+            item for item in listeners if item[0] != listener
+        ]
 
     def step(self, session: Any) -> None:
         value = str(getattr(session, "value", session))
@@ -404,6 +441,7 @@ class LiveMarketDataService:
         now = self._now()
         with self._lock:
             ticks = [tick_to_dict(tick, now=now) for tick in self._latest.values()]
+            latest_symbols = set(self._latest)
             current_bars = {
                 str(interval): {
                     bar.instrument: bar_to_dict(bar, interval=interval, complete=False)
@@ -416,11 +454,25 @@ class LiveMarketDataService:
         for row in ticks:
             age = row.get("age_seconds")
             row["stale"] = age is None or (stale_after > 0 and float(age) > stale_after)
+        subscriptions = (
+            self._engine.subscription_snapshot()
+            if self._engine is not None
+            and hasattr(self._engine, "subscription_snapshot")
+            else {
+                "strategy_symbols": [],
+                "observer_symbols": list(self.symbols),
+                "subscribed_symbols": list(self.symbols),
+                "symbols": list(self.symbols),
+                "awaiting_first_tick": sorted(
+                    symbol for symbol in self.symbols if symbol not in latest_symbols
+                ),
+            }
+        )
         return {
             "exists": True,
             "generated_at": now.isoformat(),
             "quote_provider": self.provider,
-            "subscribed_symbols": list(self.symbols),
+            **subscriptions,
             "stale_after_seconds": stale_after,
             "ticks": ticks,
             "current_bars": current_bars,
@@ -444,8 +496,9 @@ class LiveMarketDataService:
 
     def _on_bar(self, interval: int, bar: Bar) -> None:
         self.recorder.record_bar(bar, interval, complete=True)
-        for listener in list(self._bar_listeners.get(interval, [])):
-            listener(bar)
+        for listener, symbols in list(self._bar_listeners.get(interval, [])):
+            if symbols is None or bar.instrument in symbols:
+                listener(bar)
 
 
 def load_market_bars(

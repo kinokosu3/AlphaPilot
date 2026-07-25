@@ -446,6 +446,61 @@ class LiveModule(BaseModule):
             record_market_data=record_market_data,
         )
 
+    def live_daemon_subscribe(
+        self,
+        symbols: str | list[str],
+        mode: str | None = None,
+        broker: str | None = None,
+        trade_broker: str | None = None,
+        quote_provider: str | None = None,
+        state_dir: str | None = None,
+        wait: bool = False,
+        timeout: float = 5.0,
+    ) -> dict[str, Any]:
+        """Add display-only symbols to a running standalone daemon."""
+        from alphapilot.systems.live.daemon import send_daemon_command
+
+        cfg = self._standalone_config(
+            mode=mode,
+            broker=broker,
+            trade_broker=trade_broker,
+            quote_provider=quote_provider,
+            state_dir=state_dir,
+        )
+        result = send_daemon_command(
+            cfg,
+            "subscribe_observer",
+            payload={"symbols": _split_symbols(symbols)},
+            wait=wait,
+            timeout=timeout,
+        )
+        completed = (
+            (result.get("daemon") or {}).get("last_command")
+            if wait and isinstance(result.get("daemon"), dict)
+            else None
+        )
+        if isinstance(completed, dict) and completed.get("id") == (
+            (result.get("command") or {}).get("id")
+        ):
+            for key in (
+                "ok",
+                "message",
+                "requested",
+                "added",
+                "already_subscribed",
+                "failed",
+                "awaiting_first_tick",
+                "strategy_symbols",
+                "observer_symbols",
+                "subscribed_symbols",
+                "symbols",
+                "subscription_sources",
+                "error",
+            ):
+                if key in completed:
+                    result[key] = completed[key]
+        return result
+
     def live_market_snapshot(
         self,
         mode: str | None = None,
@@ -476,8 +531,36 @@ class LiveModule(BaseModule):
         daemon_status = str(daemon.get("status") or "stopped")
         if not daemon_running and daemon_status in {"running", "starting"}:
             daemon_status = "stopped"
+        historical = list(
+            snapshot.get("subscribed_symbols") or snapshot.get("symbols") or []
+        )
         snapshot["daemon_running"] = daemon_running
         snapshot["daemon_status"] = daemon_status
+        snapshot["historical_subscribed_symbols"] = historical
+        if daemon_running:
+            subscribed = list(
+                daemon.get("subscribed_symbols")
+                or daemon.get("symbols")
+                or historical
+            )
+            snapshot["strategy_symbols"] = list(daemon.get("strategy_symbols") or [])
+            snapshot["observer_symbols"] = list(daemon.get("observer_symbols") or [])
+            snapshot["subscribed_symbols"] = subscribed
+            snapshot["symbols"] = subscribed
+            tick_keys = {
+                str(row.get("key"))
+                for row in snapshot.get("ticks") or []
+                if isinstance(row, dict) and row.get("key")
+            }
+            snapshot["awaiting_first_tick"] = sorted(
+                symbol for symbol in subscribed if symbol not in tick_keys
+            )
+        else:
+            snapshot["strategy_symbols"] = []
+            snapshot["observer_symbols"] = []
+            snapshot["subscribed_symbols"] = []
+            snapshot["symbols"] = []
+            snapshot["awaiting_first_tick"] = []
         if not daemon.get("exists") and not snapshot.get("exists"):
             snapshot["exists"] = False
         return snapshot
@@ -1094,6 +1177,7 @@ class LiveModule(BaseModule):
             "live_run": self.live_run,
             "live_daemon_status": self.live_daemon_status,
             "live_daemon_start": self.live_daemon_start,
+            "live_daemon_subscribe": self.live_daemon_subscribe,
             "live_market_snapshot": self.live_market_snapshot,
             "live_market_bars": self.live_market_bars,
             "live_daemon_stop": self.live_daemon_stop,

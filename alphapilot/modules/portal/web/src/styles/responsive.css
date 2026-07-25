@@ -23,6 +23,7 @@
   .panel-help .help-popover { width: min(420px, calc(100vw - 32px)); }
   .kline-chart-head, .kline-controls { align-items: stretch; flex-direction: column; }
   .live-market-panel .panel-head, .live-market-chart-head { align-items: stretch; flex-direction: column; }
+  .live-observer-subscribe, .live-subscription-groups { grid-template-columns: 1fr; }
   .kline-controls select, .kline-range-buttons { width: 100%; }
   .kline-range-buttons { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); }
   .kline-range-buttons button { min-width: 0; }

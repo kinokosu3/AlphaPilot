@@ -225,6 +225,33 @@ def test_min_mode_submits_on_bar_close(tmp_path: Path) -> None:
     assert engine.oms.get_position(KEY).volume == pos.volume           # unchanged
 
 
+def test_observer_ticks_never_enter_strategy_bar_aggregation(tmp_path: Path) -> None:
+    clock = SimulatedClock(datetime(2026, 7, 6, 9, 31))
+    engine = make_engine(tmp_path, clock)
+    runner = LiveTimingRunner(
+        engine,
+        BatchStrategyAdapter(MomentumToy(), min_bars=2),
+        ["600000"],
+        freq="min",
+    )
+    runner.start()
+    engine.subscribe_market_data(["000001.SZ"], subscription_type="observer")
+
+    engine.on_tick(TickData(
+        code="000001",
+        exchange=Exchange.SZSE,
+        datetime=datetime(2026, 7, 6, 9, 31, 10),
+        last_price=12.0,
+        volume=100,
+        turnover=1_200,
+    ))
+
+    assert "000001.SZSE" in engine.oms.ticks
+    assert runner.bars.current() == []
+    assert engine.snapshot()["strategy_symbols"] == ["600000.SSE"]
+    assert engine.snapshot()["observer_symbols"] == ["000001.SZSE"]
+
+
 def test_min_mode_flushes_last_bar_at_lunch(tmp_path: Path) -> None:
     clock = SimulatedClock(datetime(2026, 7, 6, 11, 28))
     engine = make_engine(tmp_path, clock)

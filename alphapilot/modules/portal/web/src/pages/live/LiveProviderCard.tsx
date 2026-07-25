@@ -35,6 +35,11 @@ type Props = {
   onRefreshDaemon: () => void | Promise<unknown>;
   onReconnectDaemon: () => void | Promise<unknown>;
   onStopDaemon: () => void | Promise<unknown>;
+  observerSymbols: string;
+  setObserverSymbols: Dispatch<SetStateAction<string>>;
+  observerSubscriptionEnabled: boolean;
+  observerTargetLabel: string;
+  onSubscribeObserver: () => void | Promise<unknown>;
 };
 
 export function LiveProviderCard(props: Props) {
@@ -111,7 +116,7 @@ export function LiveProviderCard(props: Props) {
           </>
         )}
         <label className="field live-field-wide">
-          <span>{t("liveSymbols")}</span>
+          <span>{t("liveStartupObserverSymbols")}</span>
           <input
             value={props.symbols}
             onChange={(event) => props.setSymbols(event.target.value)}
@@ -135,6 +140,32 @@ export function LiveProviderCard(props: Props) {
       {props.providerSelectionLocked ? <Alert tone="info">{t("liveProviderLocked")}</Alert> : null}
       {!props.providerSelectionLocked && missingEnv.length ? (
         <Alert tone="error">{t("liveMissingEnv")}: {missingEnv.join(", ")}</Alert>
+      ) : null}
+
+      {props.observerSubscriptionEnabled ? (
+        <div className="live-observer-subscribe">
+          <div>
+            <strong>{t("liveObserverSubscribe")}</strong>
+            <span className="muted">
+              {t("liveObserverSubscribeHint")} · {props.observerTargetLabel}
+            </span>
+          </div>
+          <div className="row-actions">
+            <input
+              aria-label={t("liveObserverSymbols")}
+              value={props.observerSymbols}
+              onChange={(event) => props.setObserverSymbols(event.target.value)}
+              placeholder="000001.SZ, 600519.SSE"
+            />
+            <AsyncButton
+              className="button small"
+              onClick={props.onSubscribeObserver}
+              disabled={!props.observerSymbols.trim()}
+            >
+              {t("liveObserverAdd")}
+            </AsyncButton>
+          </div>
+        </div>
       ) : null}
 
       <div className="live-runner-summary">

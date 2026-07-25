@@ -28,6 +28,7 @@ from alphapilot.systems.trading.contracts import (
     PriceAdjustment,
 )
 from alphapilot.systems.live.fsm.session_fsm import SessionState
+from alphapilot.systems.live.types import normalize_symbol
 from alphapilot.systems.trading.domain import LifecycleState, StrategyInstanceConfig
 from alphapilot.systems.trading.execution import ExecutionCoordinator
 from alphapilot.systems.trading.planning import ExecutionPlanner
@@ -118,6 +119,12 @@ class StrategyInstanceRunner:
         self.engine = runtime.engine
         self.trading = trading
         self.instance = instance
+        self._universe = frozenset(
+            f"{code}.{exchange.value}"
+            for code, exchange in (
+                normalize_symbol(symbol) for symbol in instance.universe
+            )
+        )
         self.historical_data = historical_data
         self.bar_source = bar_source
         self.store = store if store is not None else trading.store
@@ -196,8 +203,21 @@ class StrategyInstanceRunner:
         if self.instance.frequency != "day" and self.mode in {"simulation", "live"}:
             raise ValueError("minute strategy instances cannot run against external A-share accounts")
         self._load_history()
-        self.bar_source.add_bar_listener(self.interval, self._on_bar)
-        self.engine.subscribe_market_data(list(self.instance.universe))
+        try:
+            self.bar_source.add_bar_listener(
+                self.interval,
+                self._on_bar,
+                symbols=self._universe,
+            )
+        except TypeError:
+            self.bar_source.add_bar_listener(self.interval, self._on_bar)
+        try:
+            self.engine.subscribe_market_data(
+                list(self.instance.universe),
+                subscription_type="strategy",
+            )
+        except TypeError:
+            self.engine.subscribe_market_data(list(self.instance.universe))
         self._started = True
         self._stopped = False
         self._heartbeat()
@@ -506,7 +526,11 @@ class StrategyInstanceRunner:
         self.history.extend(sorted(selected, key=lambda item: (item.datetime, item.instrument)))
 
     def _on_bar(self, bar: Bar) -> None:
-        if self._paused or self._stopped:
+        if (
+            self._paused
+            or self._stopped
+            or bar.instrument not in self._universe
+        ):
             return
         expected = PriceAdjustment(str(self.instance.data_policy.get("feature_adjustment") or "none"))
         if expected == PriceAdjustment.NONE:
@@ -567,7 +591,7 @@ class StrategyInstanceRunner:
             self._pending_session.clear()
         self._last_bar_session = session
         self._pending_session[completed.instrument] = completed
-        if set(self._pending_session) != set(self.instance.universe):
+        if set(self._pending_session) != self._universe:
             return
         self.history.extend(self._pending_session.values())
         self._pending_session.clear()

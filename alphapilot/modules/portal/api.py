@@ -461,6 +461,17 @@ class TradingDecisionComparisonCreate(BaseModel):
     right_run_id: str
 
 
+class ObserverSubscriptionCreate(BaseModel):
+    symbols: list[str] = Field(default_factory=list)
+    wait: bool = True
+    timeout: float = Field(default=5.0, ge=0.1, le=60.0)
+    mode: str | None = None
+    broker: str | None = None
+    trade_broker: str | None = None
+    quote_provider: str | None = None
+    state_dir: str | None = None
+
+
 # The generic Advanced-page dispatcher must never bypass the dedicated job,
 # filesystem, or live-trading API guards. CLI commands remain unchanged.
 PORTAL_MODULE_RUN_ALLOWLIST: dict[str, set[str]] = {
@@ -1467,6 +1478,82 @@ def create_app(
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 
+    @app.post("/api/trading/deployments/{instance_id}/observer-subscriptions")
+    def trading_deployment_observer_subscriptions(
+        instance_id: str,
+        payload: ObserverSubscriptionCreate,
+        request: Request,
+    ) -> dict[str, Any]:
+        try:
+            trading = _engine(app).get_system("trading")
+            result = trading.deployment_subscribe_observer(
+                instance_id,
+                payload.symbols,
+            )
+            current = trading.store.get_instance(instance_id)
+            operator = _trading_operator(
+                app,
+                request,
+                request.headers.get("authorization"),
+                reason="add deployment observer subscriptions",
+            )
+            trading.operator_auth.audit(
+                operator,
+                action="deployment_observer_subscribe",
+                result="ok" if result.get("ok") else "failed",
+                instance_id=instance_id,
+                config_hash=str(current.get("config_hash") or ""),
+                details={
+                    "command_id": result.get("command_id"),
+                    "requested": result.get("requested") or [],
+                    "added": result.get("added") or [],
+                    "already_subscribed": result.get("already_subscribed") or [],
+                    "failed": result.get("failed") or [],
+                },
+            )
+            return _jsonable(public_account_state(result))
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.get("/api/trading/deployments/{instance_id}/market/snapshot")
+    def trading_deployment_market_snapshot(
+        instance_id: str,
+        symbols: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        try:
+            selected = [
+                item.strip()
+                for item in str(symbols or "").replace("，", ",").split(",")
+                if item.strip()
+            ]
+            return _jsonable(
+                _engine(app).get_system("trading").deployment_market_snapshot(
+                    instance_id,
+                    selected,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.get("/api/trading/deployments/{instance_id}/market/bars")
+    def trading_deployment_market_bars(
+        instance_id: str,
+        symbol: str,
+        interval: int = Query(default=60),
+        limit: int = Query(default=300, ge=1, le=2000),
+    ) -> dict[str, Any]:
+        try:
+            return _jsonable(
+                _engine(app).get_system("trading").deployment_market_bars(
+                    instance_id,
+                    symbol,
+                    interval,
+                    limit=limit,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
     @app.post("/api/trading/deployments/{instance_id}/decision-comparisons")
     def trading_decision_comparison_create(
         instance_id: str,
@@ -2466,6 +2553,49 @@ def create_app(
                     record_market_data=payload.get("record_market_data"),
                 )
             )
+        except Exception as exc:  # noqa: BLE001
+            raise _api_error(exc) from exc
+
+    @app.post("/api/live/daemon/subscribe")
+    def live_daemon_subscribe(
+        payload: ObserverSubscriptionCreate,
+        request: Request,
+    ) -> dict[str, Any]:
+        try:
+            result = _live_module().live_daemon_subscribe(
+                symbols=payload.symbols,
+                mode=payload.mode,
+                broker=payload.broker,
+                trade_broker=payload.trade_broker,
+                quote_provider=payload.quote_provider,
+                state_dir=payload.state_dir,
+                wait=payload.wait,
+                timeout=payload.timeout,
+            )
+            trading = _engine(app).get_system("trading")
+            operator = _trading_operator(
+                app,
+                request,
+                request.headers.get("authorization"),
+                reason="add standalone observer subscriptions",
+            )
+            trading.operator_auth.audit(
+                operator,
+                action="live_daemon_observer_subscribe",
+                result=(
+                    "ok"
+                    if result.get("accepted") and result.get("ok", True)
+                    else "failed"
+                ),
+                details={
+                    "command_id": (result.get("command") or {}).get("id"),
+                    "requested": result.get("requested") or payload.symbols,
+                    "added": result.get("added") or [],
+                    "already_subscribed": result.get("already_subscribed") or [],
+                    "failed": result.get("failed") or [],
+                },
+            )
+            return _jsonable(result)
         except Exception as exc:  # noqa: BLE001
             raise _api_error(exc) from exc
 

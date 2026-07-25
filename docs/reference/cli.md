@@ -2,7 +2,7 @@
 
 > 本文件由 `scripts/generate_docs_reference.py` 生成，请勿手工编辑。
 
-当前内置公共命令共 **118** 个。第三方模块命令不计入此清单。
+当前内置公共命令共 **120** 个。第三方模块命令不计入此清单。
 
 通用帮助：`alphapilot <command> -- --help`。参数由 Python Fire 解析，布尔值建议显式写成 `--flag=True|False`。
 
@@ -142,6 +142,7 @@
 | `live_daemon_status` | Show the long-lived live runtime daemon status and latest state. | `(mode: 'str \| None' = None, broker: 'str \| None' = None, trade_broker: 'str \| None' = None, quote_provider: 'str \| None' = None, state_dir: 'str \| None' = None) -> 'dict[str, Any]'` | `dict[str, Any]` | 只读、诊断或本地计算 | 正式 | 模拟与实盘 | `/api/live` |
 | `live_daemon_stop` | Stop the detached live runtime daemon if one is running. | `(mode: 'str \| None' = None, broker: 'str \| None' = None, trade_broker: 'str \| None' = None, quote_provider: 'str \| None' = None, state_dir: 'str \| None' = None, timeout: 'float' = 5.0) -> 'dict[str, Any]'` | `dict[str, Any]` | 交易/运行时写操作 | 正式 | 模拟与实盘 | `/api/live` |
 | `live_daemon_submit_target` | Ask the running daemon to plan or route a target portfolio. | `(target_path: 'str \| None' = None, holdings: 'str \| dict \| None' = None, prices: 'str \| dict \| None' = None, positions: 'list[dict[str, Any]] \| None' = None, date: 'str \| None' = None, source: 'str \| None' = None, session: 'str \| None' = None, strategy_name: 'str \| None' = None, factor_path: 'str \| None' = None, model_pickle_path: 'str \| None' = None, yaml_params: 'str \| None' = None, refresh_data: 'bool' = False, route: 'bool' = False, mode: 'str \| None' = None, broker: 'str \| None' = None, trade_broker: 'str \| None' = None, quote_provider: 'str \| None' = None, state_dir: 'str \| None' = None, wait: 'bool' = False, timeout: 'float' = 5.0, confirm_live: 'bool' = False) -> 'dict[str, Any]'` | `dict[str, Any]` | 交易/运行时写操作 | 正式 | 模拟与实盘 | `/api/live` |
+| `live_daemon_subscribe` | Add display-only symbols to a running standalone daemon. | `(symbols: 'str \| list[str]', mode: 'str \| None' = None, broker: 'str \| None' = None, trade_broker: 'str \| None' = None, quote_provider: 'str \| None' = None, state_dir: 'str \| None' = None, wait: 'bool' = False, timeout: 'float' = 5.0) -> 'dict[str, Any]'` | `dict[str, Any]` | 交易/运行时写操作 | 正式 | 模拟与实盘 | `/api/live` |
 | `live_ledger_events` | Query live audit ledger events by common correlation fields. | `(kind: 'str \| None' = None, command_id: 'str \| None' = None, order_id: 'str \| None' = None, reference: 'str \| None' = None, day: 'str \| None' = None, limit: 'int' = 50, mode: 'str \| None' = None, broker: 'str \| None' = None, trade_broker: 'str \| None' = None, quote_provider: 'str \| None' = None, ledger_dir: 'str \| None' = None, state_dir: 'str \| None' = None) -> 'dict[str, Any]'` | `dict[str, Any]` | 只读、诊断或本地计算 | 正式 | 模拟与实盘 | `/api/live` |
 | `live_market_bars` | Read recent persisted and current live bars for one subscribed symbol. | `(symbol: 'str', interval: 'int' = 60, limit: 'int' = 300, mode: 'str \| None' = None, broker: 'str \| None' = None, trade_broker: 'str \| None' = None, quote_provider: 'str \| None' = None, state_dir: 'str \| None' = None) -> 'dict[str, Any]'` | `dict[str, Any]` | 只读、诊断或本地计算 | 正式 | 模拟与实盘 | `/api/live` |
 | `live_market_snapshot` | Read the daemon's latest quote projection without touching a gateway. | `(mode: 'str \| None' = None, broker: 'str \| None' = None, trade_broker: 'str \| None' = None, quote_provider: 'str \| None' = None, state_dir: 'str \| None' = None, symbols: 'str \| list[str] \| None' = None) -> 'dict[str, Any]'` | `dict[str, Any]` | 只读、诊断或本地计算 | 正式 | 模拟与实盘 | `/api/live` |
@@ -174,6 +175,7 @@
 | `trading_decision_comparisons` | Read one decision comparison or list comparisons for an instance. | `(instance_id: 'str', comparison_id: 'str' = '') -> 'Any'` | `Any` | 只读、诊断或本地计算 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
 | `trading_definitions` | List installed strategy definitions and their parameter contracts. | `() -> 'dict[str, Any]'` | `dict[str, Any]` | 只读、诊断或本地计算 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
 | `trading_deploy` | Configure or replace an independent deployment while its daemon is stopped. | `(instance_id: 'str', run_mode: 'str', trade_provider: 'str' = '', quote_provider: 'str' = '', account_profile: 'str' = '', account_id: 'str' = '', reason: 'str' = '') -> 'dict[str, Any]'` | `dict[str, Any]` | 策略或部署写操作 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
+| `trading_deployment_subscribe` | Add display-only symbols to a running isolated deployment daemon. | `(instance_id: 'str', symbols: 'Any') -> 'dict[str, Any]'` | `dict[str, Any]` | 策略或部署写操作 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
 | `trading_deployments` | List independent strategy deployment configurations and runtime state. | `() -> 'list[dict[str, Any]]'` | `list[dict[str, Any]]` | 只读、诊断或本地计算 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
 | `trading_diagnostics` | Read neutral runtime diagnostics; results never change deployment authority. | `(instance_id: 'str') -> 'dict[str, Any]'` | `dict[str, Any]` | 只读、诊断或本地计算 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
 | `trading_instance_create` | Create a strategy instance from a registered definition. | `(instance_id: 'str', strategy_id: 'str', universe: 'Any', params: 'Any' = None, frequency: 'str' = 'day', data_policy: 'Any' = None, portfolio_policy: 'Any' = None) -> 'dict[str, Any]'` | `dict[str, Any]` | 策略或部署写操作 | 正式 | 策略实例/模拟与实盘 | `/api/trading` |
@@ -194,7 +196,7 @@
 
 ## 已弃用命令附录
 
-这些命令仍计入 118 个公共命令，但只输出迁移提示，不应由新脚本继续采用。
+这些命令仍计入 120 个公共命令，但只输出迁移提示，不应由新脚本继续采用。
 
 | 命令 | 用途 | 参数签名 | 返回 | 影响 | 状态 | Portal | HTTP |
 |---|---|---|---|---|---|---|---|

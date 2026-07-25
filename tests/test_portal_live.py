@@ -54,6 +54,11 @@ def test_live_mutations_require_operator_token(engine) -> None:
             "/api/trading/kill-switches/global/all/engage",
             {"reason": "test"},
         ),
+        (
+            "POST",
+            "/api/live/daemon/subscribe",
+            {"symbols": ["600000.SSE"]},
+        ),
     )
     for method, path, payload in protected:
         denied = client.request(method, path, json=payload)
@@ -331,7 +336,32 @@ def test_live_daemon_control_endpoints(engine, isolated_env) -> None:
         ).json()
         assert market["exists"] is True
         assert market["subscribed_symbols"] == ["600000.SSE"]
+        assert market["observer_symbols"] == ["600000.SSE"]
         assert market["recorder"]["enabled"] is True
+
+        subscribed = client.post(
+            "/api/live/daemon/subscribe",
+            json={
+                "mode": "paper",
+                "state_dir": str(state_dir),
+                "symbols": ["000001.SZ", "600000.SSE"],
+                "wait": True,
+                "timeout": 5,
+            },
+        ).json()
+        assert subscribed["accepted"] is True
+        assert subscribed["ok"] is True
+        assert subscribed["added"] == ["000001.SZSE"]
+        assert subscribed["already_subscribed"] == ["600000.SSE"]
+        assert subscribed["awaiting_first_tick"] == ["000001.SZSE", "600000.SSE"]
+        assert subscribed["observer_symbols"] == ["000001.SZSE", "600000.SSE"]
+
+        market = client.get(
+            "/api/live/market/snapshot",
+            params={"mode": "paper", "state_dir": str(state_dir)},
+        ).json()
+        assert market["subscribed_symbols"] == ["000001.SZSE", "600000.SSE"]
+        assert market["awaiting_first_tick"] == ["000001.SZSE", "600000.SSE"]
 
         for action in ("status", "start", "pause", "resume", "stop"):
             removed = client.post(
@@ -423,3 +453,12 @@ def test_live_daemon_control_endpoints(engine, isolated_env) -> None:
     finally:
         stopped = client.post("/api/live/daemon/stop", json={"state_dir": str(state_dir), "timeout": 5}).json()
     assert stopped["running"] is False
+    stopped_market = client.get(
+        "/api/live/market/snapshot",
+        params={"mode": "paper", "state_dir": str(state_dir)},
+    ).json()
+    assert stopped_market["observer_symbols"] == []
+    assert stopped_market["subscribed_symbols"] == []
+    assert set(stopped_market["historical_subscribed_symbols"]) == {
+        "000001.SZSE", "600000.SSE",
+    }

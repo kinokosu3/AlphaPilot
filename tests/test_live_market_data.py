@@ -107,6 +107,27 @@ def test_market_service_builds_live_bars_and_snapshot(tmp_path):
     assert rows[0]["volume"] == 80
 
 
+def test_market_bar_listeners_can_filter_observer_symbols(tmp_path):
+    service = LiveMarketDataService(
+        _config(tmp_path, enabled=False),
+        "paper",
+        ["600000", "000001"],
+        state_dir=tmp_path / "state",
+    )
+    received: list[str] = []
+    service.add_bar_listener(
+        60,
+        lambda bar: received.append(bar.instrument),
+        symbols={"600000.SSE"},
+    )
+
+    at = datetime(2026, 7, 10, 9, 30)
+    service._on_bar(60, Bar(at, "000001.SZSE", 10, 10, 10, 10, 1, 10))
+    service._on_bar(60, Bar(at, "600000.SSE", 10, 10, 10, 10, 1, 10))
+
+    assert received == ["600000.SSE"]
+
+
 def test_recorder_queue_overflow_is_degraded_and_non_blocking(tmp_path):
     now = datetime(2026, 7, 10, 9, 30)
     recorder = SQLiteTickRecorder(_config(tmp_path, queue_size=1), "emt", now_fn=lambda: now)

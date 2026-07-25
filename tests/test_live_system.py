@@ -363,6 +363,50 @@ def test_daemon_order_cancel_records_async_confirmations(tmp_path) -> None:
     runtime.close()
 
 
+def test_daemon_observer_subscription_validates_batch_and_limit(tmp_path) -> None:
+    from alphapilot.systems.live.config import LiveConfig, RunMode
+    from alphapilot.systems.live.daemon import _apply_command
+    from alphapilot.systems.live.runtime import LiveRuntime
+
+    cfg = LiveConfig(
+        mode=RunMode.PAPER,
+        broker="paper",
+        state_dir=tmp_path / "state",
+        ledger_dir=tmp_path / "ledger",
+    )
+    runtime = LiveRuntime.create(cfg)
+    runtime.connect(paper_cash=100_000)
+
+    invalid = _apply_command(runtime, {
+        "id": "observer-invalid",
+        "action": "subscribe_observer",
+        "payload": {"symbols": ["not-a-symbol"]},
+    })
+    assert invalid["ok"] is False
+    assert "unknown exchange" in invalid["error"]
+    assert runtime.engine.snapshot()["observer_symbols"] == []
+
+    too_many = _apply_command(runtime, {
+        "id": "observer-limit",
+        "action": "subscribe_observer",
+        "payload": {"symbols": [f"{600000 + index}.SSE" for index in range(51)]},
+    })
+    assert too_many["ok"] is False
+    assert "limit is 50" in too_many["error"]
+    assert runtime.engine.snapshot()["observer_symbols"] == []
+
+    accepted = _apply_command(runtime, {
+        "id": "observer-ok",
+        "action": "subscribe_observer",
+        "payload": {"symbols": ["600000.SSE", "600000.SSE"]},
+    })
+    assert accepted["ok"] is True
+    assert accepted["requested"] == ["600000.SSE"]
+    assert accepted["added"] == ["600000.SSE"]
+    assert accepted["awaiting_first_tick"] == ["600000.SSE"]
+    runtime.close()
+
+
 def test_live_module_submit_inline_target_plans_only(engine) -> None:
     live = engine.get_module("live")
     result = live.live_submit_target(

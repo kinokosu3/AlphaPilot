@@ -35,7 +35,7 @@ from alphapilot.systems.live.algos import AlgoState, CallAuctionAlgo
 from alphapilot.systems.live.bars import Bar, BarAggregator, DAY_INTERVAL
 from alphapilot.systems.live.executor import orders_from_intents
 from alphapilot.systems.live.fsm.session_fsm import SessionState
-from alphapilot.systems.live.types import OrderRequest, TickData
+from alphapilot.systems.live.types import OrderRequest, TickData, normalize_symbol
 from alphapilot.systems.live.state_io import atomic_write_json
 from alphapilot.systems.live.journal import InMemoryExecutionJournal
 from alphapilot.systems.live.routing import AutomatedOrderRouter, utc_now_iso
@@ -77,6 +77,10 @@ class LiveTimingRunner:
         self.engine = engine
         self.strategy = strategy
         self.symbols = list(symbols)
+        self._symbol_keys = frozenset(
+            f"{code}.{exchange.value}"
+            for code, exchange in (normalize_symbol(symbol) for symbol in symbols)
+        )
         self.freq = freq
         self.lot_size = int(lot_size)
         self.auction_window = auction_window
@@ -130,8 +134,25 @@ class LiveTimingRunner:
         if self.bar_source is None:
             self.engine.add_tick_listener(self.on_tick)
         else:
-            self.bar_source.add_bar_listener(self.interval, self._enqueue_bar)
-        self.engine.subscribe_market_data(self.symbols)
+            try:
+                self.bar_source.add_bar_listener(
+                    self.interval,
+                    self._enqueue_bar,
+                    symbols=self._symbol_keys,
+                )
+            except TypeError:
+                # Compatibility for third-party bar sources implementing the
+                # pre-filter listener port. Consumer-side filtering below is
+                # still authoritative.
+                self.bar_source.add_bar_listener(self.interval, self._enqueue_bar)
+        try:
+            self.engine.subscribe_market_data(
+                self.symbols,
+                subscription_type="strategy",
+            )
+        except TypeError:
+            # Older engine test doubles may expose only the original port.
+            self.engine.subscribe_market_data(self.symbols)
         initialize = getattr(self.strategy, "initialize", None)
         if callable(initialize):
             initialize()
@@ -210,7 +231,7 @@ class LiveTimingRunner:
 
     # ---- event inputs -------------------------------------------------------- #
     def on_tick(self, tick: TickData) -> None:
-        if self._paused or self._stopped:
+        if self._paused or self._stopped or tick.key not in self._symbol_keys:
             return
         self.bars.on_tick(tick)
 
@@ -255,7 +276,11 @@ class LiveTimingRunner:
 
     # ---- internals ------------------------------------------------------------ #
     def _on_bar_closed(self, bar: Bar) -> None:
-        if self._paused or self._stopped:
+        if (
+            self._paused
+            or self._stopped
+            or bar.instrument not in self._symbol_keys
+        ):
             return
         try:
             intents = self.strategy.on_bar(bar)
@@ -283,7 +308,11 @@ class LiveTimingRunner:
         self._checkpoint()
 
     def _enqueue_bar(self, bar: Bar) -> None:
-        if not self._paused and not self._stopped:
+        if (
+            not self._paused
+            and not self._stopped
+            and bar.instrument in self._symbol_keys
+        ):
             self._bar_queue.append(bar)
 
     def _finalize_day(self) -> None:

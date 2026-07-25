@@ -135,6 +135,79 @@
   font-size: 18px;
 }
 
+.live-observer-subscribe {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(320px, 1.35fr);
+  align-items: end;
+  gap: 12px;
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.live-observer-subscribe > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.live-observer-subscribe input {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.live-subscription-groups {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 10px 0;
+}
+
+.live-subscription-groups > div {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.live-subscription-groups > div > span {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.live-subscription-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.live-subscription-list button {
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.live-subscription-list button:hover {
+  border-color: var(--accent-600);
+  color: var(--accent-700);
+}
+
+.live-subscription-list em {
+  color: var(--text-muted);
+  font-style: normal;
+}
+
 .live-symbol-button {
   border: 0;
   padding: 0;

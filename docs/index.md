@@ -35,7 +35,7 @@ flowchart LR
 
 ## 自动生成参考
 
-- [118 个内置 CLI 命令](reference/cli.md)
+- [120 个内置 CLI 命令](reference/cli.md)
 - [Portal 页面功能矩阵](reference/portal-capabilities.md)
 - [HTTP API 完整索引](reference/http-api.md)
 - [系统、模块与文档映射](reference/components.md)

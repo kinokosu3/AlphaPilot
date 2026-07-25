@@ -20,6 +20,7 @@ function mockLiveFetch(options: {
   daemonMode?: "paper" | "live";
   noStrategies?: boolean;
   optionalAuth?: boolean;
+  activeDeployment?: boolean;
 } = {}) {
   const alive = options.alive ?? true;
   const daemonState = {
@@ -241,6 +242,7 @@ function mockLiveFetch(options: {
           desired_state: "running", observed_state: "running", account_id_hash: "sha256:live-account-hash",
           run_mode: "live", trade_provider: "emt", quote_provider: "emt",
           runner_heartbeat_at: "2026-07-06T10:02:03+08:00", reconcile_required: false,
+          ...(options.activeDeployment ? { runtime_id: "runtime-live-sma" } : {}),
         },
         runs: [
           { run_id: "live-run", run_mode: "live", status: "running", trading_sessions: 1, config_hash: "live-hash" },
@@ -293,7 +295,10 @@ function mockLiveFetch(options: {
         quote_provider: "emt",
         daemon_running: true,
         daemon_status: "running",
-        subscribed_symbols: ["600000.SSE"],
+        strategy_symbols: [],
+        observer_symbols: ["600000.SSE", "000001.SZSE"],
+        subscribed_symbols: ["600000.SSE", "000001.SZSE"],
+        awaiting_first_tick: ["000001.SZSE"],
         stale_after_seconds: 3,
         ticks: [{
           key: "600000.SSE", code: "600000", exchange: "SSE", name: "浦发银行",
@@ -306,6 +311,24 @@ function mockLiveFetch(options: {
           enabled: true, healthy: true, degraded: false, queue_depth: 0,
           written_ticks: 1234, written_bars: 20, dropped_ticks: 0, dropped_bars: 0,
         },
+      });
+    }
+    if (path === "/api/trading/deployments/live_sma/market/snapshot") {
+      return Response.json({
+        exists: true,
+        quote_provider: "emt",
+        daemon_running: true,
+        strategy_symbols: ["600000.SSE"],
+        observer_symbols: ["000001.SZSE"],
+        subscribed_symbols: ["600000.SSE", "000001.SZSE"],
+        awaiting_first_tick: ["000001.SZSE"],
+        stale_after_seconds: 3,
+        ticks: [],
+      });
+    }
+    if (path.startsWith("/api/trading/deployments/live_sma/market/bars")) {
+      return Response.json({
+        symbol: "600000.SSE", interval: 60, date_range: [], rows: [],
       });
     }
     if (path.startsWith("/api/live/market/bars")) {
@@ -383,6 +406,27 @@ function mockLiveFetch(options: {
     if (path === "/api/live/daemon/start" && init?.method === "POST") {
       Object.assign(daemonStatus, { alive: true, running: true, status: "running" });
       return Response.json(daemonStatus);
+    }
+    if (path === "/api/live/daemon/subscribe" && init?.method === "POST") {
+      return Response.json({
+        accepted: true,
+        ok: true,
+        requested: ["000001.SZSE"],
+        added: ["000001.SZSE"],
+        already_subscribed: [],
+        failed: [],
+        awaiting_first_tick: ["000001.SZSE"],
+      });
+    }
+    if (path === "/api/trading/deployments/live_sma/observer-subscriptions" && init?.method === "POST") {
+      return Response.json({
+        ok: true,
+        requested: ["000001.SZSE"],
+        added: ["000001.SZSE"],
+        already_subscribed: [],
+        failed: [],
+        awaiting_first_tick: ["000001.SZSE"],
+      });
     }
     if (path === "/api/live/daemon/reconnect" && init?.method === "POST") {
       return Response.json({ accepted: true, daemon: { ...daemonStatus, last_command: { action: "reconnect", ok: true } } });
@@ -541,6 +585,54 @@ describe("LivePage", () => {
     await waitFor(() => expect(postedJson(fetchMock, "/api/live/daemon/start")?.mode).toBe("paper"));
     expect(postedJson(fetchMock, "/api/live/daemon/start")?.cash).toBe(250000);
     expect(postedJson(fetchMock, "/api/live/daemon/start")?.trade_broker).toBe("paper");
+  });
+
+  it("adds standalone observer symbols explicitly and keeps pending symbols visible", async () => {
+    const fetchMock = mockLiveFetch();
+    renderLivePage();
+
+    const observerInput = await screen.findByLabelText("观察标的");
+    fireEvent.change(observerInput, { target: { value: "000001.SZ, 600519.SSE" } });
+    fireEvent.click(screen.getByRole("button", { name: "添加订阅" }));
+    await waitFor(() => expect(postedJson(fetchMock, "/api/live/daemon/subscribe")).toMatchObject({
+      mode: "paper",
+      trade_broker: "paper",
+      quote_provider: "paper",
+      symbols: ["000001.SZ", "600519.SSE"],
+      wait: true,
+    }));
+
+    fireEvent.click(screen.getByRole("tab", { name: /实时行情/ }));
+    expect(await screen.findByText("观察订阅")).toBeInTheDocument();
+    const pending = await screen.findByRole("button", { name: /000001\.SZSE.*等待首个 Tick/ });
+    const subscribeCalls = () => fetchMock.mock.calls.filter(
+      ([input, init]) => String(input) === "/api/live/daemon/subscribe" && init?.method === "POST",
+    ).length;
+    const before = subscribeCalls();
+    fireEvent.click(pending);
+    expect(subscribeCalls()).toBe(before);
+  });
+
+  it("routes observer subscriptions and market reads to an active deployment", async () => {
+    window.localStorage.setItem("portal_live_workspace", "live");
+    const fetchMock = mockLiveFetch({ activeDeployment: true });
+    renderLivePage();
+
+    fireEvent.change(await screen.findByLabelText("择时策略"), {
+      target: { value: "live_sma" },
+    });
+    await screen.findByText(/正式部署 daemon: live_sma/);
+    const observerInput = await screen.findByLabelText("观察标的");
+    fireEvent.change(observerInput, { target: { value: "000001.SZ" } });
+    fireEvent.click(screen.getByRole("button", { name: "添加订阅" }));
+    await waitFor(() => expect(
+      postedJson(fetchMock, "/api/trading/deployments/live_sma/observer-subscriptions")?.symbols,
+    ).toEqual(["000001.SZ"]));
+
+    fireEvent.click(screen.getByRole("tab", { name: /实时行情/ }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(
+      ([input]) => String(input) === "/api/trading/deployments/live_sma/market/snapshot",
+    )).toBe(true));
   });
 
   it("starts the Live daemon with resolved providers and no simulated cash", async () => {

@@ -73,6 +73,23 @@ observed state，以及 runtime ID、runner heartbeat、最后命令、错误和
 `reconcile_required`。API 不会再通过单独更新实例生命周期来假装 daemon 已经执行命令；
 命令超时、daemon 死亡或撤单未确认都会 fail closed。
 
+## 策略订阅与观察订阅隔离
+
+正式部署启动时，实例 universe 以 `strategy` 类型订阅。Portal/CLI 在运行期间新增的标的以
+`observer` 类型订阅，只供行情快照、K 线和录制；两者并集继续通过兼容字段
+`subscribed_symbols`/`symbols` 返回。旧的一参数 `LiveEngine.subscribe_market_data(symbols)`
+默认归类为 observer，策略 Runner 必须显式传 `subscription_type="strategy"`。
+
+Bar 服务可以为并集生成 1/5 分钟和日 K，但正式 Runner 注册固定 universe 的过滤 listener，
+并在消费入口再次拒绝非 universe Bar。因此 observer 不会污染 `_pending_session`、模型/因子
+输入或决策，也不会改变实例/部署哈希、stale、生命周期、Kill Switch 和路由授权。observer
+命令失败只生成诊断，不走部署生命周期失败分支。
+
+独立 daemon 的启动 `symbols` 归为 observer；正式部署的 observer 通过
+`RuntimeControlPort` 按 `instance_id` 定位隔离 state/runtime，HTTP 不接受内部 `state_dir`。
+显式 reconnect 先恢复 strategy，再恢复 observer：前者失败时 fail closed，后者失败时只记录
+诊断。observer 最多 50 个、只增不减并在 daemon 停止时清空，已录制行情继续保留。
+
 ## 自动路由与 SHADOW
 
 自动子订单必须在发送前通过 `AutomatedRouteAuthorizer`，并同时匹配：
@@ -136,6 +153,9 @@ observed state，以及 runtime ID、runner heartbeat、最后命令、错误和
 - `GET /api/trading/deployments`
 - `GET|PUT /api/trading/deployments/{id}`
 - `GET /api/trading/deployments/{id}/diagnostics`
+- `POST /api/trading/deployments/{id}/observer-subscriptions`
+- `GET /api/trading/deployments/{id}/market/snapshot`
+- `GET /api/trading/deployments/{id}/market/bars`
 - `GET|POST /api/trading/deployments/{id}/decision-comparisons`
 - `POST /api/trading/deployments/{id}/{start|pause|reconcile|resume|stop}`
 - `GET /api/trading/deployments/{id}/status`

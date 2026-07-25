@@ -2,7 +2,7 @@
 
 > 本文件由 `scripts/generate_docs_reference.py` 从 FastAPI OpenAPI 生成，请勿手工编辑。
 
-当前共有 **134** 条路径、**151** 个操作。运行 Portal 后可访问 `/docs` 查看请求和响应 Schema。
+当前共有 **138** 条路径、**155** 个操作。运行 Portal 后可访问 `/docs` 查看请求和响应 Schema。
 
 Portal 默认只监听 `127.0.0.1`。交易写操作由启动时冻结的 `required | optional` 模式决定；`optional + 0.0.0.0 + wildcard CORS` 允许可达客户端无令牌写入，不等于互联网级认证边界。
 
@@ -82,6 +82,7 @@ Portal 默认只监听 `127.0.0.1`。交易写操作由启动时冻结的 `requi
 | `GET` | `/api/live/daemon/status` | Live Daemon Status | 免 Operator token |
 | `POST` | `/api/live/daemon/stop` | Live Daemon Stop | Portal operator auth（required / optional） |
 | `POST` | `/api/live/daemon/submit-target` | Live Daemon Submit Target | Portal operator auth（required / optional） |
+| `POST` | `/api/live/daemon/subscribe` | Live Daemon Subscribe | Portal operator auth（required / optional） |
 | `GET` | `/api/live/ledger/events` | Live Ledger Events | 免 Operator token |
 | `GET` | `/api/live/market/bars` | Live Market Bars | 免 Operator token |
 | `GET` | `/api/live/market/snapshot` | Live Market Snapshot | 免 Operator token |
@@ -234,6 +235,9 @@ Portal 默认只监听 `127.0.0.1`。交易写操作由启动时冻结的 `requi
 | `GET` | `/api/trading/deployments/{instance_id}/decision-comparisons` | Trading Decision Comparisons | 免 Operator token |
 | `POST` | `/api/trading/deployments/{instance_id}/decision-comparisons` | Trading Decision Comparison Create | Portal operator auth（required / optional） |
 | `GET` | `/api/trading/deployments/{instance_id}/diagnostics` | Trading Deployment Diagnostics | 免 Operator token |
+| `GET` | `/api/trading/deployments/{instance_id}/market/bars` | Trading Deployment Market Bars | 免 Operator token |
+| `GET` | `/api/trading/deployments/{instance_id}/market/snapshot` | Trading Deployment Market Snapshot | 免 Operator token |
+| `POST` | `/api/trading/deployments/{instance_id}/observer-subscriptions` | Trading Deployment Observer Subscriptions | Portal operator auth（required / optional） |
 | `POST` | `/api/trading/deployments/{instance_id}/pause` | Trading Deployment Pause | Portal operator auth（required / optional） |
 | `POST` | `/api/trading/deployments/{instance_id}/reconcile` | Trading Deployment Reconcile | Portal operator auth（required / optional） |
 | `POST` | `/api/trading/deployments/{instance_id}/resume` | Trading Deployment Resume | Portal operator auth（required / optional） |

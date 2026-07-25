@@ -95,15 +95,19 @@ The live subsystem connects target portfolios or timing signals to one execution
 - A single pre-trade gate for session, board-lot, price, cash, position, concentration, per-order, and daily-turnover checks
 - OMS state, append-only audit events, runtime snapshots, and recovery reconciliation; a trade-channel disconnect halts execution and requires review before resuming
 - XTP Pro, EMT, and OpenCTP TTS broker/quote integrations are decoupled from the core as installable pip plugins; trading and quote providers can be configured independently
-- The Portal Live page exposes preflight, connection, daemon and strategy controls, risk state, orders, and ledger queries
+- Up to 50 observer symbols can be added from the Portal or CLI while a daemon is running, without reconnecting; observer quotes are used only for display, bars, and recording
+- The Portal Live page exposes preflight, connection, daemon control, dynamic quote subscriptions, formal deployments, risk state, orders, and ledger queries
 
 The safest first step is a paper daemon:
 
 ```bash
 alphapilot live_daemon_start --mode paper --symbols 600000,000001 --cash 100000
+alphapilot live_daemon_subscribe --symbols 600519.SSE,510300.SSE --wait=True
 alphapilot live_daemon_status --mode paper
 alphapilot live_daemon_stop --mode paper
 ```
+
+For a standalone daemon, both startup `symbols` and later additions are `observer_symbols`. A formal deployment classifies its instance universe as `strategy_symbols`; extra display symbols remain observers. The compatibility field `subscribed_symbols` is their union. `added` means the quote SDK accepted the request, not that a Tick has arrived—keep waiting while a symbol remains in `awaiting_first_tick`. Stopping the daemon clears active observers but retains recorded Tick and bar history.
 
 > **Live-trading warning:** this subsystem is still under active development and broker-environment validation. Before using a real account, complete paper rehearsal, plugin and network preflight, a small broker-side acceptance test, and a review of risk limits and recovery results. Do not enable real routing until you understand `--confirm_live`, daemon state, and the audit ledger.
 
@@ -431,11 +435,13 @@ alphapilot trading_deploy --instance_id=sma_20_demo --run_mode=live \
   --trade_provider=xtp --quote_provider=xtp --account_id=YOUR_ACCOUNT_ID
 
 alphapilot trading_start --instance_id=sma_20_demo
+alphapilot trading_deployment_subscribe \
+  --instance_id=sma_20_demo --symbols=600519.SSE,510300.SSE
 alphapilot trading_deployments
 alphapilot trading_diagnostics --instance_id=sma_20_demo
 ```
 
-A LIVE start remains paused pending reconciliation. Run `trading_reconcile`, then explicitly call `trading_resume`. Removing promotion gates does not remove order safety: LIVE still checks the environment switch, account/Provider binding, single writer, market/contract metadata, reconciliation, heartbeat, Kill Switch, and per-order RiskGate. PAPER/SHADOW sessions and `trading_decision_compare` are diagnostics only and never grant deployment authority.
+`trading_deployment_subscribe` expands only the deployment's observer quote set; it does not alter the strategy universe, `config_hash`, `binding_hash`, stale state, or routing authority. A LIVE start remains paused pending reconciliation. Run `trading_reconcile`, then explicitly call `trading_resume`. Removing promotion gates does not remove order safety: LIVE still checks the environment switch, account/Provider binding, single writer, market/contract metadata, reconciliation, heartbeat, Kill Switch, and per-order RiskGate. PAPER/SHADOW sessions and `trading_decision_compare` are diagnostics only and never grant deployment authority.
 
 Every `/api/live` and `/api/trading` write uses one Portal operator-auth policy. The default is `required`, including strategy instances, deployment configuration and lifecycle, Kill Switch, daemon operations, and manual trading. Generate a token locally; its plaintext is returned once:
 
