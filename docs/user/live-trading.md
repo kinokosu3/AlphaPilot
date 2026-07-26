@@ -4,7 +4,7 @@
 
 ## 适用场景与前置条件
 
-用于 PAPER 演练、仿真柜台、SHADOW 观察、人工运维和受控 LIVE 部署。PAPER 只需本地环境；simulation/live 需要对应插件、受限账户、合约与行情能力。自动策略必须有已验证实例和匹配当前配置哈希的独立部署。
+用于 PAPER 演练、仿真柜台、SHADOW 观察、人工运维和受控 LIVE 部署。PAPER 只需本地环境；SIMULATION、SHADOW 和 LIVE 需要与模式匹配的交易/行情插件、账户、合约与行情能力。自动策略必须有已验证实例和匹配当前配置哈希的独立部署。
 
 ## 运行边界
 
@@ -55,7 +55,7 @@ daemon 启动后可以显式添加观察标的，不需要停止进程或重新�
 alphapilot live_daemon_subscribe \
   --symbols=000001.SZ,600519.SSE --wait=True --timeout=5
 
-# 已启动的正式策略部署
+# 已启动的策略实例部署
 alphapilot trading_deployment_subscribe \
   --instance_id=ma_5_20 --symbols=000001.SZ
 ```
@@ -64,7 +64,7 @@ Portal「实盘交易」页在 daemon 运行时会单独启用“添加观察订
 
 | 字段 | 来源 | 进入策略计算 | 生命周期 |
 |---|---|---:|---|
-| `strategy_symbols` | 正式实例 universe | 是 | 随正式部署 daemon |
+| `strategy_symbols` | 策略实例 universe | 是 | 随策略实例部署 daemon |
 | `observer_symbols` | Portal/CLI 显式添加；独立 daemon 启动参数也归此类 | 否 | 停止 daemon 后清空 |
 | `subscribed_symbols` / `symbols` | 前两者并集，供旧客户端兼容 | 不直接决定 | 随 daemon |
 
@@ -104,9 +104,9 @@ alphapilot portal_restart
 
 `optional` 模式不会关闭确认、账户绑定、对账、单账户 writer lock、Kill Switch、RiskGate 或 automated LIVE 环境开关，但它会允许无令牌客户端调用策略、部署、daemon、Kill Switch 和手工订单接口。若 Portal 监听 `0.0.0.0`，通配 CORS 还允许跨站网页发起请求。启动日志、实盘/策略页面和 `/api/portal/security` 会持续显示警告；通用审计记录 request ID、路径、方法、结果、客户端地址、Origin 与 User-Agent，不记录凭据或请求载荷。
 
-## 自动策略部署
+## 策略实例部署
 
-正式部署只接受持久化 `instance_id`：
+自动部署只接受已验证的持久化 `instance_id`：
 
 ```bash
 alphapilot trading_deploy --instance_id=ma_5_20 --run_mode=paper

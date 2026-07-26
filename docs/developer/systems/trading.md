@@ -26,10 +26,10 @@ flowchart TB
 
 ## 服务能力
 
-- 定义/政策列表和实例 CRUD/校验。
+- 定义/政策列表，以及实例创建、列表、更新与校验。
 - 研究资产 artifact 快照。
 - preview、异步 replay、详情和取消。
-- 独立 `DeploymentSpec` 配置、Provider/账户绑定和中性运行诊断。
+- 独立 `DeploymentSpec` 配置、Provider/账户绑定、部署 observer 行情订阅和中性运行诊断。
 - start/pause/reconcile/resume/stop 协调。
 - kill switch、审计、通用 decision comparison、兼容历史和 UAT 结果。
 

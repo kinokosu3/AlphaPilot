@@ -88,15 +88,15 @@ AlphaPilot 的主线能力是自动化因子研究。你可以用自然语言启
 
 ### 模拟盘与实盘交易
 
-实盘系统把研究侧生成的目标持仓或择时信号接入统一执行链路：`LiveRuntime → LiveEngine → RiskGate → BrokerGateway`。底层 `dry_run` 永远不路由订单；正式策略部署可使用 `paper`、`simulation`、`shadow` 或 `live`。SHADOW 会读取真实账户和实时行情，但永远不能路由订单；LIVE 还必须显式开启环境开关并完成启动对账。
+实盘系统把研究侧生成的目标持仓或择时信号接入统一执行链路：`LiveRuntime → LiveEngine → RiskGate → BrokerGateway`。底层 `dry_run` 永远不路由订单；策略实例部署可使用 `paper`、`simulation`、`shadow` 或 `live`。SHADOW 会读取真实账户和实时行情，但永远不能路由订单；LIVE 还必须显式开启环境开关并完成启动对账。
 
 - 支持 `dry_run`、`paper`、`simulation`、`shadow`、`live` 运行模式，以及前台运行和长驻 daemon
-- 支持人工委托、撤单和目标组合提交；自动策略只能通过持久化实例与 `trading_*` 部署控制启动
+- 支持人工委托、撤单和目标组合提交；自动策略只能通过持久化策略实例与 `trading_*` 部署控制启动
 - 所有订单统一经过交易时段、整手、价格、资金、持仓、集中度、单笔和日累计限额检查
 - 维护 OMS 状态、追加式审计账本、运行时快照和恢复对账；交易通道断线会触发 halt，恢复后仍需人工检查再继续
 - XTP Pro、EMT 和 OpenCTP TTS 接入已从核心解耦为可安装、可卸载的 pip 插件，交易通道和行情源可分别配置
 - daemon 运行期间可从 Portal 或 CLI 增量添加最多 50 个观察标的，无需重连；观察行情只用于展示、K 线和录制，不进入策略决策
-- Portal「实盘交易」页面提供预检、连接、daemon 运维、动态行情订阅、正式策略部署、风控状态、委托与 ledger 查询
+- Portal「实盘交易」页面提供预检、连接、daemon 运维、动态行情订阅、策略实例部署、风控状态、委托与 ledger 查询
 
 最安全的体验路径是先从 paper daemon 开始：
 
@@ -107,7 +107,7 @@ alphapilot live_daemon_status --mode paper
 alphapilot live_daemon_stop --mode paper
 ```
 
-启动参数中的 `symbols` 和后来添加的标的都属于独立 daemon 的 `observer_symbols`。正式策略部署则把实例 universe 归入 `strategy_symbols`，额外查看的标的仍归入 observer；兼容字段 `subscribed_symbols` 是两者并集。`added` 只表示行情 SDK 已接受请求，标的仍出现在 `awaiting_first_tick` 时应继续等待首个 Tick。停止 daemon 会清空活动 observer，已经录制的 Tick/K 线不会删除。
+启动参数中的 `symbols` 和后来添加的标的都属于独立 daemon 的 `observer_symbols`。策略实例部署则把实例 universe 归入 `strategy_symbols`，额外查看的标的仍归入 observer；兼容字段 `subscribed_symbols` 是两者并集。`added` 只表示行情 SDK 已接受请求，标的仍出现在 `awaiting_first_tick` 时应继续等待首个 Tick。停止 daemon 会清空活动 observer，已经录制的 Tick/K 线不会删除。
 
 > **实盘风险提示：** 该功能仍在持续开发和券商环境验证中。接入真实账户前，请先完成 paper 演练、插件与网络预检、小额柜台测试，并逐项确认风控限额和恢复结果。不要在未理解 `--confirm_live`、daemon 状态和 ledger 的情况下启用真实路由。
 
@@ -536,8 +536,13 @@ XTP Pro / EMT 的 SDK 绑定和 broker 插件属于可选、可能受许可约�
 
 ## 开发日志
 
+> 下表按提交时的实现状态记录。旧记录中的 `timing_*`、stage/parity/qualification、LIVE approval 等接口或门禁已在后续 0.2.0 重构中删除；当前用法以[文档中心](docs/index.md)和[自动生成 CLI 参考](docs/reference/cli.md)为准。
+
 | 日期 | 类型 | 功能/模块 | 目标 | 关键改动 | 影响入口 | 验证 | 状态/后续 |
 |------|------|-----------|------|----------|----------|------|-----------|
+| 2026-07-25 | 增强 | 动态观察行情与策略实例术语 | 在不中断 daemon 的情况下扩展展示行情，并明确区分策略实例与旧择时策略名称 | 新增 strategy/observer 两类订阅、50 个动态 observer 上限、首 Tick 等待状态、重连恢复和双层 universe 过滤；Portal 中原“择时策略”字段统一为“策略实例” | `live_daemon_subscribe`、`trading_deployment_subscribe`、Portal「模拟与实盘」页 | Live engine/market data/runner、CLI/API、Portal 交互与安全闭环测试 | 当前 observer 只增不减、停止 daemon 后清空；录制行情保留且不进入策略决策 |
+| 2026-07-24 | 安全 | Portal 操作员鉴权 | 让全部交易写接口默认要求操作员身份，同时保留显式的隔离网络实验模式 | `/api/live` 与 `/api/trading` 写操作统一使用 `required`/`optional` 模式；新增本机安全设置、只读安全状态、transport 审计和高风险网络提示 | `portal_operator_auth`、`GET /api/portal/security`、Portal 策略实例/模拟与实盘页 | Portal security、OpenAPI、CLI、前端交互和审计测试 | 默认保持 `required`；`optional` 不会关闭账户绑定、对账、Kill Switch 或 RiskGate |
+| 2026-07-24 | 破坏性重构 | 独立部署与中性诊断 | 将实例校验、部署配置和研究验收解耦，避免诊断事实隐式授予 LIVE 权限 | 引入 schema v10 `DeploymentSpec`、独立 PAPER/SIMULATION/SHADOW/LIVE 配置、运行诊断和通用 decision comparison；删除 promote/stage/parity/qualification/LIVE approval 状态机 | `trading_deploy`、`trading_diagnostics`、`trading_decision_compare`、`/api/trading/deployments/*` | schema v10、部署安全闭环、回放/实盘一致性、CLI/OpenAPI/Portal 回归 | 当前部署只要求已验证且绑定新鲜的实例；真实路由仍受环境开关、账户/Provider、对账、心跳和逐单风控约束 |
 | 2026-07-15 | 实盘验收 | 全接口验收、Broker UAT v2 与旧入口删除门禁 | 以一次性完整等价验收和真实券商回报证明正式链路可替代旧入口，同时保持 LIVE 20/5 日门禁独立 | schema v8 保存 Git/核心代码/native SDK/插件哈希、两子订单累计金额和 callback 状态；增加只读预检、私有凭据包装器、泄漏扫描，并拆分 removal/live qualification | `/api/trading/{compatibility,removal-check,broker-uat-runs}`、`alphapilot trading_broker_uat_preflight`、`scripts/broker_uat_local.py` | 全量后端与 Portal、正式接口矩阵、OpenAPI/CLI、wheel、XTP/EMT 真实模拟 UAT | 只有 removal qualification 全绿才删除旧入口；自动 LIVE 仍需独立 20 PAPER 日、5 SHADOW 日、parity 与人工授权 |
 | 2026-07-14 | 迁移与验收 | 新链路等价、Broker UAT 与旧入口删除门禁 | 在不提前删除兼容入口的前提下证明正式链路等价、确定且可恢复 | timing 兼容入口转接正式 REPLAY；增加精确历史窗口、决策 provenance、REPLAY/SHADOW parity、qualification、XTP/EMT 共用 UAT harness、多环境调用证据、schema v6/v7 和 commit 绑定的发布验证；固定 0.2.0 Sunset | `/api/trading/{compatibility,parity-runs,broker-uat-runs}`、`alphapilot trading_{compatibility,removal_check,parity_*,qualification,broker_uat_*}`、`docs/strategy-trading-migration-0.2.md` | 全量测试、Portal coverage/typecheck/build、OpenAPI/CLI、依赖边界、变更行覆盖率和 wheel smoke 必须由发布脚本在干净 commit 上生成报告 | 正式替代与兼容演练工具已落地；后续由 v8 验收门禁决定删除，20/5 日仅约束自动 LIVE |
 | 2026-07-14 | 全链路重构 | 策略实例到交易执行 | 让规则择时和 Qlib 横截面选股分别共享可恢复的信号、组合、账户 sizing、回放和实盘执行链路 | 新增纯 trading contracts、v1/v2 provider 生命周期与隔离 worker、独立组合政策注册、不可变 Qlib 研究 artifact、D 日决策/D+1 sizing、统一 ReplayRuntime、卖出后买入执行状态机、账户边界、操作员 token/LIVE approval/审计、schema v5 起始迁移、正式 `/api/trading`/`trading_*` CLI 和 Portal 工作台；组合策略只预留接口 | `/api/trading/*`、`alphapilot trading_*`、Portal「择时/实盘」页、`docs/strategy-trading-full-chain.md` | 后端与 Portal 回归、typecheck 和生产构建 | 代码闭环完成；自动 LIVE 默认关闭，仍需 20 日 PAPER、5 日 SHADOW 和 XTP/EMT UAT 后才可受限试运行 |

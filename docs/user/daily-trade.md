@@ -58,7 +58,7 @@ alphapilot trade_session_cash \
 
 ## 与正式链路的边界
 
-`daily_signals` 仍允许人工传入模型路径等研究参数，适合复验和人工计划；它不能形成自动部署证据。要进入 SHADOW/LIVE，应把研究资产导入正式策略实例，由统一 pipeline 基于真实账户快照重新 sizing。
+`daily_signals` 仍允许人工传入模型路径等研究参数，适合复验和人工计划；它不能直接作为自动部署配置，也不授予路由权限。要进入正式 PAPER、SIMULATION、SHADOW 或 LIVE 部署，应把研究资产导入策略实例，由统一 pipeline 按对应账户快照重新 sizing。
 
 ## 安全提示与常见错误
 

@@ -2,7 +2,7 @@
 
 ## 职责与非职责
 
-`LiveSystem` 负责构建交易运行时、Broker/行情插件、OMS、RiskGate、ledger、恢复和 daemon 控制。策略定义、参数和部署资格属于 TradingSystem。
+`LiveSystem` 负责构建交易运行时、Broker/行情插件、OMS、RiskGate、ledger、恢复和 daemon 控制。策略定义、实例参数、独立部署配置和自动路由授权属于 TradingSystem；中性诊断或研究验收不会修改这些权限。
 
 ```mermaid
 flowchart LR
@@ -25,6 +25,12 @@ flowchart LR
 daemon 通过 IPC 接收人工运维和 DeploymentCoordinator 命令。连接 FSM、session FSM、order FSM 和 run-mode FSM 管理状态。断线、未知订单、缺失回报或投影损坏必须 halt；恢复先查询 Broker 并对账，不根据本地 JSON 猜测终态。
 
 Broker callback 进入单一事件循环更新 OMS；调用线程不能直接改订单终态。ledger 先记录不可变事件，再更新 runtime projection。跨进程命令通过 runtime ID、心跳和状态版本判断是否仍指向同一个 daemon。
+
+## 行情订阅边界
+
+`LiveEngine` 将实例 universe 分类为 `strategy_symbols`，将 standalone daemon 启动标的和运行期显式新增标的分类为 `observer_symbols`。两者都可录制行情并生成 K 线，但策略 Runner 必须在 listener 和消费入口按固定 universe 各过滤一次。
+
+动态 observer 通过 daemon IPC 逐标的订阅，最多 50 个，不变更 `config_hash`、`binding_hash`、部署生命周期或路由授权。重连时先恢复 strategy，再恢复 observer；strategy 失败必须 fail closed，observer 失败只写诊断。
 
 ## 订单边界
 

@@ -99,7 +99,7 @@ alphapilot live_daemon_stop --mode=paper
 - `log/`：挖掘及应用日志。
 - `strategies/`：经过显式清单注册的本地自定义策略代码。
 
-输入主要来自 `.env`、股票列表和命令参数；输出写入上述目录。第一次运行前确认这些目录可写，并把 `.env`、`git_ignore_folder/` 和私有 artifact 排除在版本控制之外。快速开始中的命令均不会连接真实 Broker；真实路由需另行完成[模拟与实盘](live-trading.md)中的门禁。
+输入主要来自 `.env`、股票列表和命令参数；输出写入上述目录。第一次运行前确认这些目录可写，并把 `.env`、`git_ignore_folder/` 和私有 artifact 排除在版本控制之外。快速开始中的命令均不会连接真实 Broker；真实路由需另行完成[模拟与实盘](live-trading.md)中的部署配置、环境开关和安全检查。
 
 ## 常见问题
 
