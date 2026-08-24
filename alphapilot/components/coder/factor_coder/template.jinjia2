@@ -26,6 +26,6 @@ def calculate_factor(expr: str, name: str):
 
 if __name__ == '__main__':
     # Input factor expression. Do NOT use the variable format like "df['$xxx']" in factor expressions. Instead, you should use "$xxx". 
-    expr = "{{ expression }}" # Your output factor expression will be filled in here
-    name = "{{ factor_name }}" # Your output factor name will be filled in here
+    expr = {{ expression | tojson }} # Your output factor expression will be filled in here
+    name = {{ factor_name | tojson }} # Your output factor name will be filled in here
     calculate_factor(expr, name)

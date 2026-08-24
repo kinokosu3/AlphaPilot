@@ -166,8 +166,7 @@ class FactorFBWorkspace(FBWorkspace):
             python_bin = resolve_factor_python_bin()
             try:
                 subprocess.check_output(
-                    f'"{python_bin}" {execution_code_path}',
-                    shell=True,
+                    [python_bin, str(execution_code_path)],
                     cwd=self.workspace_path,
                     stderr=subprocess.STDOUT,
                     timeout=FACTOR_COSTEER_SETTINGS.file_based_execution_timeout,
