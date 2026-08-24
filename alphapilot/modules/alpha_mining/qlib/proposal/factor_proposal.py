@@ -455,8 +455,11 @@ class AlphaPilotHypothesis2FactorExpression(FactorHypothesis2Experiment):
                     flag = True
         
 
-        # Add valid factors to the factor regulator
-        self.factor_regulator.add_factor(proposed_names, proposed_exprs)
+        # Register each accepted expression separately so later rounds can
+        # compare against actual name/expression rows.  Passing the two lists as
+        # one row made cross-round duplicate detection effectively inert.
+        for factor_name, expression in zip(proposed_names, proposed_exprs):
+            self.factor_regulator.add_factor(factor_name, expression)
                 
                 
         return self.convert_response(resp, trace)
