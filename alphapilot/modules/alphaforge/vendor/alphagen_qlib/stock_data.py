@@ -4,6 +4,41 @@ import numpy as np
 import pandas as pd
 import torch
 
+
+def _resolve_padded_calendar_range(
+    cal: np.ndarray,
+    start_time: str,
+    end_time: str,
+    max_backtrack_days: int,
+    max_future_days: int,
+) -> tuple[int, int]:
+    """Return inclusive usable indices with full history/future padding."""
+    for name, value in (
+        ("max_backtrack_days", max_backtrack_days),
+        ("max_future_days", max_future_days),
+    ):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, np.integer))
+            or value < 0
+        ):
+            raise ValueError(f"{name} must be a non-negative integer")
+    if len(cal) == 0:
+        raise ValueError("Qlib calendar is empty")
+    calendar = pd.DatetimeIndex(cal)
+    requested_start = int(calendar.searchsorted(pd.Timestamp(start_time), side="left"))
+    requested_end = int(calendar.searchsorted(pd.Timestamp(end_time), side="right")) - 1
+    start_index = max(requested_start, max_backtrack_days)
+    end_index = min(requested_end, len(cal) - max_future_days - 1)
+    if start_index > end_index:
+        raise ValueError(
+            "No usable Qlib dates remain after applying AlphaForge padding: "
+            f"requested=[{start_time}, {end_time}], "
+            f"calendar=[{cal[0]}, {cal[-1]}], "
+            f"backtrack={max_backtrack_days}, future={max_future_days}"
+        )
+    return start_index, end_index
+
 class FeatureType(IntEnum):
     OPEN = 0
     CLOSE = 1
@@ -11,7 +46,7 @@ class FeatureType(IntEnum):
     LOW = 3
     VOLUME = 4
     VWAP = 5
-    
+
 def change_to_raw_min(features):
     result = []
     for feature in features:
@@ -82,17 +117,26 @@ class StockData:
         if not isinstance(exprs, list):
             exprs = [exprs]
         cal: np.ndarray = D.calendar(freq=self.freq)
-        start_index = cal.searchsorted(pd.Timestamp(self._start_time))  # type: ignore
-        end_index = cal.searchsorted(pd.Timestamp(self._end_time))  # type: ignore
+        # AlphaForge evaluates expressions with fixed history/future padding.  The
+        # original implementation indexed the calendar directly and therefore
+        # wrapped a request before the first date (``cal[-100]``) or overflowed a
+        # request near the final date.  Clamp the *usable* research interval to
+        # dates for which the full padding exists instead.  This also lets a
+        # generic request such as 2010..2023 run on a provider that starts in 2017.
+        start_index, end_index = _resolve_padded_calendar_range(
+            cal,
+            self._start_time,
+            self._end_time,
+            self.max_backtrack_days,
+            self.max_future_days,
+        )
+
         real_start_time = cal[start_index - self.max_backtrack_days]
-        if cal[end_index] != pd.Timestamp(self._end_time):
-            end_index -= 1
-        # real_end_time = cal[min(end_index + self.max_future_days,len(cal)-1)]
         real_end_time = cal[end_index + self.max_future_days]
         result =  (QlibDataLoader(config=exprs,freq=self.freq)  # type: ignore
                 .load(self._instrument, real_start_time, real_end_time))
         return result
-    
+
     def _get_data(self) -> Tuple[torch.Tensor, pd.Index, pd.Index]:
         features = ['$' + f.name.lower() for f in self._features]
         if self.raw and self.freq == 'day':
@@ -166,5 +210,3 @@ class StockData:
         index = pd.MultiIndex.from_product([date_index, self._stock_ids])
         data = data.reshape(-1, n_columns)
         return pd.DataFrame(data.detach().cpu().numpy(), index=index, columns=columns)
-    
-    
