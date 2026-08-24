@@ -319,8 +319,17 @@ class FactorParsingStrategy(MultiProcessEvolvingStrategy):
                         former_expression=self.extract_expr(queried_former_failed_knowledge_to_render[-1].implementation.code),
                         former_feedback=queried_former_failed_knowledge_to_render[-1].feedback,
                         error_summary_critics=error_summary_critics,
-                        similar_successful_factor_description=queried_similar_successful_knowledge_to_render[-1].target_task.get_task_description(),
-                        similar_successful_expression=self.extract_expr(queried_similar_successful_knowledge_to_render[-1].implementation.code),
+                        # 知识库冷启动（size=0）时无成功案例可参考，此处需容忍空列表
+                        similar_successful_factor_description=(
+                            queried_similar_successful_knowledge_to_render[-1].target_task.get_task_description()
+                            if queried_similar_successful_knowledge_to_render
+                            else None
+                        ),
+                        similar_successful_expression=(
+                            self.extract_expr(queried_similar_successful_knowledge_to_render[-1].implementation.code)
+                            if queried_similar_successful_knowledge_to_render
+                            else None
+                        ),
                         latest_attempt_to_latest_successful_execution=latest_attempt_to_latest_successful_execution,
                     )
                     .strip("\n")
