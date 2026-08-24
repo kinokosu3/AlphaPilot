@@ -199,7 +199,27 @@ function_call = var + "(" + Optional(DelimitedList(expr)) + ")"
 function_call.set_parse_action(create_function_node)
 
 # Operands
-operand = function_call | var | number | ("(" + expr + ")").set_parse_action(lambda tokens: tokens[1])
+paren_expr = ("(" + expr + ")").set_parse_action(lambda tokens: tokens[1])
+
+
+def create_unary_neg_node(tokens):
+    """Desugar unary minus to ``-1 * X``.
+
+    Reusing BinaryOpNode/NumberNode keeps every existing tree walk (dedup,
+    subtree matching, node counting) working without a new node type, and makes
+    ``-$close`` and ``-1 * $close`` compare equal — they are the same factor.
+    """
+    return BinaryOpNode("*", NumberNode(-1.0), tokens[1])
+
+
+# The ``number`` regex already absorbs a leading sign, so ``-1`` keeps parsing
+# as NumberNode(-1.0) and previously-stored ASTs are unchanged. This clause is
+# tried only after ``number`` fails, i.e. for a sign in front of a variable,
+# function call or parenthesised group (``-$close``), which the grammar used to
+# reject outright with "Expected ?: operation".
+unary_neg = (Literal("-") + (function_call | var | paren_expr)).set_parse_action(create_unary_neg_node)
+
+operand = function_call | var | number | unary_neg | paren_expr
 
 # Complete expression
 expr <<= infix_notation(
