@@ -25,6 +25,7 @@ import docker.models.containers
 from pydantic import BaseModel
 from rich import print
 from rich.console import Console
+from rich.markup import escape
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.rule import Rule
 from rich.table import Table
@@ -199,11 +200,16 @@ class QlibLocalEnv(LocalEnv):
         )
         
         # 输出结果
+        # ``print`` here is rich's, which parses ``[...]`` as markup. Subprocess
+        # output is arbitrary text (qlib tracebacks contain things like ``[/<m>]``)
+        # and would raise MarkupError, masking the real failure and skipping the
+        # returncode check below. Escape it before printing.
         output = result.stdout
-        print(output)
-        
+        print(escape(output))
+
         if result.stderr:
-            print(f"[bold red]错误输出:[/bold red] {result.stderr}")
+            # Note: qlib logs INFO to stderr, so non-empty stderr is not a failure.
+            print(f"[bold red]错误输出:[/bold red] {escape(result.stderr)}")
             
         print(Rule("[bold green]本地执行结束[/bold green]", style="dark_orange"))
         
