@@ -37,18 +37,29 @@ def _resolve_sota_result(exp: Experiment, trace: Trace):
     return None
 
 
-# qlib prefixes portfolio metrics with the rebalance-freq tag (``1day.``/``5min.``/
-# ...). Match by suffix so feedback works at any frequency; ``IC`` is freq-agnostic.
+# Qlib prefixes portfolio metrics with the rebalance-freq tag (``1day.``/``5min.``/
+# ...). Match by suffix so feedback works at any frequency; predictive metrics
+# such as IC and Rank IC are frequency-agnostic.
 _IMPORTANT_METRIC_SUFFIXES = [
     "excess_return_without_cost.max_drawdown",
     "excess_return_without_cost.information_ratio",
     "excess_return_without_cost.annualized_return",
+    "excess_return_with_cost.max_drawdown",
+    "excess_return_with_cost.information_ratio",
+    "excess_return_with_cost.annualized_return",
 ]
-_IMPORTANT_NONFREQ_METRICS = ["IC"]
+_IMPORTANT_NONFREQ_METRICS = [
+    "IC",
+    "ICIR",
+    "Rank IC",
+    "Rank ICIR",
+    "RankIC",
+    "RankICIR",
+]
 
 
 def _select_important_metrics(index) -> list:
-    """Pick freq-tagged portfolio metrics (any rebalance tag) + IC, in stable order."""
+    """Pick freq-tagged portfolio and predictive metrics in stable order."""
     index_list = [str(k) for k in index]
     selected: list = []
     for suffix in _IMPORTANT_METRIC_SUFFIXES:
