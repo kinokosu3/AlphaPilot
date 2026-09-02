@@ -49,6 +49,19 @@ def extract_and_validate_llm_json(resp: str) -> str:
     json_end = resp.rfind("}") + 1
     if json_start == -1 or json_end <= json_start:
         raise json.JSONDecodeError("No JSON object found in LLM response", resp, 0)
+
+    # Take exactly ONE complete object starting at the first `{`, ignoring whatever
+    # follows. The first-`{`-to-last-`}` slice below cannot do this: on a response
+    # carrying two concatenated objects (`{...}{...}`, which real proxies emit) it
+    # swallows both and `json.loads` raises "Extra data" -- the failure that killed
+    # a mining round at eva_utils.py's final-decision evaluator.
+    try:
+        value, _ = json.JSONDecoder().raw_decode(resp[json_start:])
+        return json.dumps(value)
+    except json.JSONDecodeError:
+        pass
+
+    # Fallback for a single object the strict decoder rejects, e.g. trailing commas.
     json_str = resp[json_start:json_end]
     json_str = _remove_trailing_commas(json_str)
     json.loads(json_str)

@@ -9,9 +9,11 @@ from jinja2 import Environment, StrictUndefined
 
 from alphapilot.components.coder.factor_coder.config import FACTOR_COSTEER_SETTINGS
 from alphapilot.components.coder.factor_coder.factor import FactorTask
+from alphapilot.core.exception import CoderError
 from alphapilot.core.experiment import Task, Workspace
 from alphapilot.core.prompts import Prompts
 from alphapilot.oai.llm_conf import LLM_SETTINGS
+from alphapilot.oai.llm_utils import extract_and_validate_llm_json
 from alphapilot.adapters import get_llm
 
 evaluate_prompts = Prompts(file_path=Path(__file__).parent / "prompts.yaml")
@@ -559,12 +561,14 @@ class FactorFinalDecisionEvaluator(FactorEvaluator):
             try:
                 api = get_llm() if attempts == 0 else get_llm(use_chat_cache=False)
                 final_evaluation_dict = json.loads(
-                    api.chat_completion(
-                        user_prompt=user_prompt,
-                        system_prompt=system_prompt,
-                        reasoning_flag=False,
-                        json_mode=True,
-                        seed=attempts,  # in case of useless retrying when cache enabled.
+                    extract_and_validate_llm_json(
+                        api.chat_completion(
+                            user_prompt=user_prompt,
+                            system_prompt=system_prompt,
+                            reasoning_flag=False,
+                            json_mode=True,
+                            seed=attempts,  # in case of useless retrying when cache enabled.
+                        ),
                     ),
                 )
                 final_decision = final_evaluation_dict["final_decision"]
@@ -573,13 +577,16 @@ class FactorFinalDecisionEvaluator(FactorEvaluator):
                 final_decision = str(final_decision).lower() in ["true", "1"]
                 return final_decision, final_feedback
 
-            except json.JSONDecodeError as e:
-                raise ValueError("Failed to decode JSON response from API.") from e
-            except KeyError as e:
+            except (json.JSONDecodeError, KeyError) as e:
+                # A decode failure must NOT kill the round. `LoopBase.run` only
+                # tolerates CoderError/skip_loop_error; a raw JSONDecodeError
+                # escapes it and takes down the whole `mine` run (seen live:
+                # "Extra data" on a proxy that returned two back-to-back JSON
+                # objects, retried three times, crashed the round).
                 attempts += 1
                 if attempts >= max_attempts:
-                    raise KeyError(
-                        "Response from API is missing 'final_decision' or 'final_feedback' key after multiple attempts."
+                    raise CoderError(
+                        f"Failed to decode JSON from API after {max_attempts} attempts: {e}"
                     ) from e
 
         return None, None
