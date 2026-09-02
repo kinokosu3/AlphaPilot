@@ -79,7 +79,11 @@ class QlibYamlParams(BaseModel):
     lambda_l2: float = 580.9768
     max_depth: int = 4
     num_leaves: int = 210
-    num_threads: int = 20
+    # Physical cores on this box (i5-10210U: 4 physical / 8 logical). Was 20, which
+    # oversubscribed the CPU 5x and made LGBM threads contend rather than parallelise.
+    # LightGBM gains little from hyperthreads, so this tracks physical cores, not
+    # `nproc`. Raise it on a bigger machine; it changes timing only, never a metric.
+    num_threads: int = 4
 
     # Model class is configurable; ``model_kwargs`` (when non-empty) overrides the
     # LGBM scalar fields above so non-LGBM / custom models can be plugged in.
