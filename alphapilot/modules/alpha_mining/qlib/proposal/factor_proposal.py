@@ -40,7 +40,10 @@ class AlphaPilotHypothesis(Hypothesis):
         concise_observation: str,
         concise_justification: str,
         concise_knowledge: str,
-        concise_specification: str
+        concise_specification: str,
+        expected_sign: str = "",
+        mechanism_family: str = "",
+        cross_regime_rationale: str = "",
     ) -> None:
         super().__init__(
             hypothesis,
@@ -51,6 +54,9 @@ class AlphaPilotHypothesis(Hypothesis):
             concise_knowledge,
         )
         self.concise_specification = concise_specification
+        self.expected_sign = expected_sign
+        self.mechanism_family = mechanism_family
+        self.cross_regime_rationale = cross_regime_rationale
         
     def __str__(self) -> str:
         return f"""Hypothesis: {self.hypothesis}
@@ -58,6 +64,9 @@ class AlphaPilotHypothesis(Hypothesis):
                 Concise Justification: {self.concise_justification}
                 Concise Knowledge: {self.concise_knowledge}
                 concise Specification: {self.concise_specification}
+                Expected Sign: {self.expected_sign}
+                Mechanism Family: {self.mechanism_family}
+                Cross-Regime Rationale: {self.cross_regime_rationale}
                 """
 
 rdagent_prompt_dict = Prompts(file_path=Path(__file__).parent.parent / "prompts_rdagent.yaml")
@@ -213,6 +222,9 @@ class AlphaPilotHypothesisGen(FactorHypothesisGen):
             concise_knowledge=response_dict["concise_knowledge"],
             concise_justification=response_dict["concise_justification"],
             concise_specification=response_dict["concise_specification"],
+            expected_sign=response_dict["expected_sign"],
+            mechanism_family=response_dict["mechanism_family"],
+            cross_regime_rationale=response_dict["cross_regime_rationale"],
         )
         return hypothesis
     

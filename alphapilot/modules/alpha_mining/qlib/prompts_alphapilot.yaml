@@ -23,7 +23,10 @@ hypothesis_output_format: |-
   "concise_knowledge": "A SINGLE LINE OF TEXT. Transferable knowledge based on theoretical principles. Use conditional grammar. eg. 'If...., ..; When..., .; and etc' Make sure that you state things clearly without ambiguity. Eg. avoid saying 'previous hypothesis', because one wouldn't know what that is.",
   "concise_observation": "A SINGLE LINE OF TEXT. It focuses on the observation of the given scenario, data characteristics, or previous experiences (failures & succeses).",
   "concise_justification": "A SINGLE LINE OF TEXT. Justify the hypothesis based on theoretical principles or initial assumptions.",
-  "concise_specification": "A SINGLE LINE OF TEXT. Define the scope, conditions, constraints of the hypothesis. Specify the expected relationships, variables, and thresholds, ensuring testability and relevance to the observed data."
+  "concise_specification": "A SINGLE LINE OF TEXT. Define the scope, conditions, constraints of the hypothesis. Specify the expected relationships, variables, and thresholds, ensuring testability and relevance to the observed data.",
+  "expected_sign": "Exactly positive or negative. This is the ex-ante expected relation between the final factor value and h=5 next-open forward return, with higher factor values on the long side.",
+  "mechanism_family": "A SINGLE short kebab-case economic mechanism name. Window changes, normalization, and sign flips do not create a new family.",
+  "cross_regime_rationale": "A SINGLE LINE OF TEXT. Explain before evaluation why the same sign should hold across years and bull, range, and bear regimes; make the claim falsifiable."
     }
 
 
@@ -42,6 +45,11 @@ factor_hypothesis_specification: |-
   3. **Continuous Optimization and Exploration:**  
       - Refine the first hypothesis iteratively by testing across different variants. 
       - Incorporate feedback from empirical results to enhance the factor's predictive power.
+
+  4. **Mandatory Ex-Ante Evidence:**
+      - Declare exactly one expected sign before factor construction. `positive` means larger final factor values should predict larger h=5 next-open returns; `negative` means the reverse.
+      - Name one economic mechanism family. A window, normalization, or sign change is not a new mechanism.
+      - State why the sign should survive bull, range, and bear regimes. Do not cite evaluation results that have not happened yet.
 
 
 function_lib_description: |-
@@ -436,4 +444,3 @@ expression_duplication: |-
   - Proposed Expression: {{ prev_expression }}
   - Duplicated Sub-expression Size: {{ duplicated_subtree_size }}
   - Duplicated Sub-expression: {{ duplicated_subtree }}
-
